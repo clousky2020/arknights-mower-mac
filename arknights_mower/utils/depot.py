@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pandas as pd
 
-# from .log import logger
+from arknights_mower.utils.log import logger
 from arknights_mower.data import key_mapping, workshop_formula
 
 # from typing import Dict, List, Union
@@ -19,10 +19,17 @@ def 读取仓库():
     with open(path, "r", encoding="utf-8") as f:
         depotinfo = json.load(f)
     物品数量 = depotinfo["data"]["items"]
+    未知物品 = [
+        item["id"]
+        for item in 物品数量
+        if item["id"] not in key_mapping and int(item["count"]) != 0
+    ]
+    if 未知物品:
+        logger.warning(f"仓库扫描: 未知物品ID，已跳过: {未知物品}")
     新物品1 = {
         key_mapping[item["id"]][2]: int(item["count"])
         for item in 物品数量
-        if int(item["count"]) != 0
+        if int(item["count"]) != 0 and item["id"] in key_mapping
     }
 
     csv_path = get_path("@app/tmp/depotresult.csv")

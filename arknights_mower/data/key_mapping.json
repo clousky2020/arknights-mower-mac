@@ -371,11 +371,11 @@
         10501
     ],
     "合约赏金": [
-        "CRISIS_SHOP_COIN",
-        "CRISIS_SHOP_COIN",
+        "act5d1_point_conbounty",
+        "act5d1_point_conbounty",
         "合约赏金",
-        "NORMAL",
-        10501
+        "NONE",
+        -10000
     ],
     "CRISIS_SHOP_COIN_V2": [
         "CRISIS_SHOP_COIN_V2",
@@ -12381,5 +12381,3400 @@
         "确定性混沌寻访凭证",
         "NORMAL",
         40003
+    ],
+    "1stact": [
+        "1stact",
+        "1stact",
+        "赏金猎人金币",
+        "NONE",
+        -10000
+    ],
+    "赏金猎人金币": [
+        "1stact",
+        "1stact",
+        "赏金猎人金币",
+        "NONE",
+        -10000
+    ],
+    "2026recruitment10_1": [
+        "2026recruitment10_1",
+        "2026recruitment10_1",
+        "α类新年寻访凭证",
+        "CONSUME",
+        50107
+    ],
+    "α类新年寻访凭证": [
+        "2026recruitment10_1",
+        "2026recruitment10_1",
+        "α类新年寻访凭证",
+        "CONSUME",
+        50107
+    ],
+    "2026recruitment10_2": [
+        "2026recruitment10_2",
+        "2026recruitment10_2",
+        "β类新年寻访凭证",
+        "CONSUME",
+        50107
+    ],
+    "β类新年寻访凭证": [
+        "2026recruitment10_2",
+        "2026recruitment10_2",
+        "β类新年寻访凭证",
+        "CONSUME",
+        50107
+    ],
+    "2026recruitment10_3": [
+        "2026recruitment10_3",
+        "2026recruitment10_3",
+        "γ类新年寻访凭证",
+        "CONSUME",
+        50107
+    ],
+    "γ类新年寻访凭证": [
+        "2026recruitment10_3",
+        "2026recruitment10_3",
+        "γ类新年寻访凭证",
+        "CONSUME",
+        50107
+    ],
+    "2026recruitment10_new_1": [
+        "2026recruitment10_new_1",
+        "2026recruitment10_new_1",
+        "α类新人寻访凭证",
+        "CONSUME",
+        50109
+    ],
+    "α类新人寻访凭证": [
+        "2026recruitment10_new_1",
+        "2026recruitment10_new_1",
+        "α类新人寻访凭证",
+        "CONSUME",
+        50109
+    ],
+    "2026recruitment10_new_2": [
+        "2026recruitment10_new_2",
+        "2026recruitment10_new_2",
+        "β类新人寻访凭证",
+        "CONSUME",
+        50109
+    ],
+    "β类新人寻访凭证": [
+        "2026recruitment10_new_2",
+        "2026recruitment10_new_2",
+        "β类新人寻访凭证",
+        "CONSUME",
+        50109
+    ],
+    "2026recruitment10_new_3": [
+        "2026recruitment10_new_3",
+        "2026recruitment10_new_3",
+        "γ类新人寻访凭证",
+        "CONSUME",
+        50109
+    ],
+    "γ类新人寻访凭证": [
+        "2026recruitment10_new_3",
+        "2026recruitment10_new_3",
+        "γ类新人寻访凭证",
+        "CONSUME",
+        50109
+    ],
+    "2026recruitment10_register_1": [
+        "2026recruitment10_register_1",
+        "2026recruitment10_register_1",
+        "α类迎新寻访凭证",
+        "CONSUME",
+        50108
+    ],
+    "α类迎新寻访凭证": [
+        "2026recruitment10_register_1",
+        "2026recruitment10_register_1",
+        "α类迎新寻访凭证",
+        "CONSUME",
+        50108
+    ],
+    "2026recruitment10_register_2": [
+        "2026recruitment10_register_2",
+        "2026recruitment10_register_2",
+        "β类迎新寻访凭证",
+        "CONSUME",
+        50108
+    ],
+    "β类迎新寻访凭证": [
+        "2026recruitment10_register_2",
+        "2026recruitment10_register_2",
+        "β类迎新寻访凭证",
+        "CONSUME",
+        50108
+    ],
+    "2026recruitment10_register_3": [
+        "2026recruitment10_register_3",
+        "2026recruitment10_register_3",
+        "γ类迎新寻访凭证",
+        "CONSUME",
+        50108
+    ],
+    "γ类迎新寻访凭证": [
+        "2026recruitment10_register_3",
+        "2026recruitment10_register_3",
+        "γ类迎新寻访凭证",
+        "CONSUME",
+        50108
+    ],
+    "5001": [
+        "5001",
+        "5001",
+        "声望",
+        "NONE",
+        -10000
+    ],
+    "声望": [
+        "5001",
+        "5001",
+        "声望",
+        "NONE",
+        -10000
+    ],
+    "6001": [
+        "6001",
+        "6001",
+        "演习券",
+        "NONE",
+        -10000
+    ],
+    "演习券": [
+        "6001",
+        "6001",
+        "演习券",
+        "NONE",
+        -10000
+    ],
+    "AP_GAMEPLAY": [
+        "AP_GAMEPLAY",
+        "AP_GAMEPLAY",
+        "理智",
+        "NONE",
+        -10000
+    ],
+    "理智": [
+        "AP_GAMEPLAY",
+        "AP_GAMEPLAY",
+        "理智",
+        "NONE",
+        -10000
+    ],
+    "CRISIS_RUNE_COIN": [
+        "CRISIS_RUNE_COIN",
+        "CRISIS_RUNE_COIN",
+        "行动协议",
+        "NONE",
+        -10000
+    ],
+    "行动协议": [
+        "act5d1_point_opagrt",
+        "act5d1_point_opagrt",
+        "行动协议",
+        "NONE",
+        -10000
+    ],
+    "LINKAGE_TKT_GACHA_10_1701": [
+        "LINKAGE_TKT_GACHA_10_1701",
+        "LINKAGE_TKT_GACHA_10_1701",
+        "特勤专家寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "特勤专家寻访凭证": [
+        "LINKAGE_TKT_GACHA_10_4801",
+        "LINKAGE_TKT_GACHA_10_4801",
+        "特勤专家寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "LINKAGE_TKT_GACHA_10_3601": [
+        "LINKAGE_TKT_GACHA_10_3601",
+        "LINKAGE_TKT_GACHA_10_3601",
+        "指引明路寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "指引明路寻访凭证": [
+        "LINKAGE_TKT_GACHA_10_3601",
+        "LINKAGE_TKT_GACHA_10_3601",
+        "指引明路寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "LINKAGE_TKT_GACHA_10_3602": [
+        "LINKAGE_TKT_GACHA_10_3602",
+        "LINKAGE_TKT_GACHA_10_3602",
+        "合作限定十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "合作限定十连寻访凭证": [
+        "LINKAGE_TKT_GACHA_10_3602",
+        "LINKAGE_TKT_GACHA_10_3602",
+        "合作限定十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "LINKAGE_TKT_GACHA_10_4801": [
+        "LINKAGE_TKT_GACHA_10_4801",
+        "LINKAGE_TKT_GACHA_10_4801",
+        "特勤专家寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "LINKAGE_TKT_GACHA_10_5401": [
+        "LINKAGE_TKT_GACHA_10_5401",
+        "LINKAGE_TKT_GACHA_10_5401",
+        "好好吃饭寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "好好吃饭寻访凭证": [
+        "LINKAGE_TKT_GACHA_10_5401",
+        "LINKAGE_TKT_GACHA_10_5401",
+        "好好吃饭寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "LINKAGE_TKT_GACHA_10_6501": [
+        "LINKAGE_TKT_GACHA_10_6501",
+        "LINKAGE_TKT_GACHA_10_6501",
+        "坠梦歌谣寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "坠梦歌谣寻访凭证": [
+        "LINKAGE_TKT_GACHA_10_6501",
+        "LINKAGE_TKT_GACHA_10_6501",
+        "坠梦歌谣寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "LINKAGE_TKT_GACHA_10_7401": [
+        "LINKAGE_TKT_GACHA_10_7401",
+        "LINKAGE_TKT_GACHA_10_7401",
+        "弓吟空跃寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "弓吟空跃寻访凭证": [
+        "LINKAGE_TKT_GACHA_10_7401",
+        "LINKAGE_TKT_GACHA_10_7401",
+        "弓吟空跃寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "LMTGS_COIN_1401": [
+        "LMTGS_COIN_1401",
+        "LMTGS_COIN_1401",
+        "寻访数据契约",
+        "NORMAL",
+        10303
+    ],
+    "寻访数据契约": [
+        "LMTGS_COIN_903",
+        "LMTGS_COIN_903",
+        "寻访数据契约",
+        "NORMAL",
+        10302
+    ],
+    "LMTGS_COIN_1601": [
+        "LMTGS_COIN_1601",
+        "LMTGS_COIN_1601",
+        "寻访数据契约",
+        "NORMAL",
+        10304
+    ],
+    "LMTGS_COIN_1803": [
+        "LMTGS_COIN_1803",
+        "LMTGS_COIN_1803",
+        "寻访数据契约",
+        "NORMAL",
+        10305
+    ],
+    "LMTGS_COIN_2101": [
+        "LMTGS_COIN_2101",
+        "LMTGS_COIN_2101",
+        "寻访数据契约",
+        "NORMAL",
+        10306
+    ],
+    "LMTGS_COIN_2301": [
+        "LMTGS_COIN_2301",
+        "LMTGS_COIN_2301",
+        "寻访数据契约",
+        "NORMAL",
+        10307
+    ],
+    "LMTGS_COIN_2501": [
+        "LMTGS_COIN_2501",
+        "LMTGS_COIN_2501",
+        "寻访数据契约",
+        "NORMAL",
+        10308
+    ],
+    "LMTGS_COIN_2701": [
+        "LMTGS_COIN_2701",
+        "LMTGS_COIN_2701",
+        "寻访数据契约",
+        "NORMAL",
+        10309
+    ],
+    "LMTGS_COIN_3001": [
+        "LMTGS_COIN_3001",
+        "LMTGS_COIN_3001",
+        "寻访数据契约",
+        "NORMAL",
+        10310
+    ],
+    "LMTGS_COIN_3301": [
+        "LMTGS_COIN_3301",
+        "LMTGS_COIN_3301",
+        "寻访数据契约",
+        "NORMAL",
+        10311
+    ],
+    "LMTGS_COIN_3501": [
+        "LMTGS_COIN_3501",
+        "LMTGS_COIN_3501",
+        "寻访数据契约",
+        "NORMAL",
+        10312
+    ],
+    "LMTGS_COIN_3801": [
+        "LMTGS_COIN_3801",
+        "LMTGS_COIN_3801",
+        "寻访数据契约",
+        "NORMAL",
+        10313
+    ],
+    "LMTGS_COIN_4101": [
+        "LMTGS_COIN_4101",
+        "LMTGS_COIN_4101",
+        "寻访数据契约",
+        "NORMAL",
+        10314
+    ],
+    "LMTGS_COIN_4401": [
+        "LMTGS_COIN_4401",
+        "LMTGS_COIN_4401",
+        "寻访数据契约",
+        "NORMAL",
+        10315
+    ],
+    "LMTGS_COIN_4701": [
+        "LMTGS_COIN_4701",
+        "LMTGS_COIN_4701",
+        "寻访数据契约",
+        "NORMAL",
+        10316
+    ],
+    "LMTGS_COIN_5001": [
+        "LMTGS_COIN_5001",
+        "LMTGS_COIN_5001",
+        "寻访数据契约",
+        "NORMAL",
+        10317
+    ],
+    "LMTGS_COIN_5301": [
+        "LMTGS_COIN_5301",
+        "LMTGS_COIN_5301",
+        "寻访数据契约",
+        "NORMAL",
+        10318
+    ],
+    "LMTGS_COIN_5601": [
+        "LMTGS_COIN_5601",
+        "LMTGS_COIN_5601",
+        "寻访数据契约",
+        "NORMAL",
+        10319
+    ],
+    "LMTGS_COIN_5801": [
+        "LMTGS_COIN_5801",
+        "LMTGS_COIN_5801",
+        "寻访数据契约",
+        "NORMAL",
+        10320
+    ],
+    "LMTGS_COIN_601": [
+        "LMTGS_COIN_601",
+        "LMTGS_COIN_601",
+        "寻访数据契约",
+        "NORMAL",
+        10301
+    ],
+    "LMTGS_COIN_6101": [
+        "LMTGS_COIN_6101",
+        "LMTGS_COIN_6101",
+        "寻访数据契约",
+        "NORMAL",
+        10321
+    ],
+    "LMTGS_COIN_6401": [
+        "LMTGS_COIN_6401",
+        "LMTGS_COIN_6401",
+        "寻访数据契约",
+        "NORMAL",
+        10322
+    ],
+    "LMTGS_COIN_6701": [
+        "LMTGS_COIN_6701",
+        "LMTGS_COIN_6701",
+        "寻访数据契约",
+        "NORMAL",
+        10323
+    ],
+    "LMTGS_COIN_7001": [
+        "LMTGS_COIN_7001",
+        "LMTGS_COIN_7001",
+        "寻访数据契约",
+        "NORMAL",
+        10324
+    ],
+    "LMTGS_COIN_7301": [
+        "LMTGS_COIN_7301",
+        "LMTGS_COIN_7301",
+        "寻访数据契约",
+        "NORMAL",
+        10325
+    ],
+    "LMTGS_COIN_7601": [
+        "LMTGS_COIN_7601",
+        "LMTGS_COIN_7601",
+        "寻访数据契约",
+        "NORMAL",
+        10326
+    ],
+    "LMTGS_COIN_903": [
+        "LMTGS_COIN_903",
+        "LMTGS_COIN_903",
+        "寻访数据契约",
+        "NORMAL",
+        10302
+    ],
+    "Logistics_Special_Permit": [
+        "Logistics_Special_Permit",
+        "Logistics_Special_Permit",
+        "后勤特别许可证",
+        "NONE",
+        30200
+    ],
+    "后勤特别许可证": [
+        "Logistics_Special_Permit",
+        "Logistics_Special_Permit",
+        "后勤特别许可证",
+        "NONE",
+        30200
+    ],
+    "RETRO_COIN": [
+        "RETRO_COIN",
+        "RETRO_COIN",
+        "事相结晶",
+        "NORMAL",
+        -10000
+    ],
+    "事相结晶": [
+        "RETRO_COIN",
+        "RETRO_COIN",
+        "事相结晶",
+        "NORMAL",
+        -10000
+    ],
+    "SINGLE_49_0_1_GACHA": [
+        "SINGLE_49_0_1_GACHA",
+        "SINGLE_49_0_1_GACHA",
+        "如死亦终寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "如死亦终寻访凭证": [
+        "SINGLE_49_0_1_GACHA",
+        "SINGLE_49_0_1_GACHA",
+        "如死亦终寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_49_0_1_GACHA_10": [
+        "SINGLE_49_0_1_GACHA_10",
+        "SINGLE_49_0_1_GACHA_10",
+        "如死亦终十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "如死亦终十连寻访凭证": [
+        "SINGLE_49_0_1_GACHA_10",
+        "SINGLE_49_0_1_GACHA_10",
+        "如死亦终十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_55_0_1_GACHA": [
+        "SINGLE_55_0_1_GACHA",
+        "SINGLE_55_0_1_GACHA",
+        "未致蒙尘寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "未致蒙尘寻访凭证": [
+        "SINGLE_55_0_1_GACHA",
+        "SINGLE_55_0_1_GACHA",
+        "未致蒙尘寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_55_0_1_GACHA_10": [
+        "SINGLE_55_0_1_GACHA_10",
+        "SINGLE_55_0_1_GACHA_10",
+        "未致蒙尘十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "未致蒙尘十连寻访凭证": [
+        "SINGLE_55_0_1_GACHA_10",
+        "SINGLE_55_0_1_GACHA_10",
+        "未致蒙尘十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_60_0_1_GACHA": [
+        "SINGLE_60_0_1_GACHA",
+        "SINGLE_60_0_1_GACHA",
+        "指令重构寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "指令重构寻访凭证": [
+        "SINGLE_60_0_1_GACHA",
+        "SINGLE_60_0_1_GACHA",
+        "指令重构寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_60_0_1_GACHA_10": [
+        "SINGLE_60_0_1_GACHA_10",
+        "SINGLE_60_0_1_GACHA_10",
+        "指令重构十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "指令重构十连寻访凭证": [
+        "SINGLE_60_0_1_GACHA_10",
+        "SINGLE_60_0_1_GACHA_10",
+        "指令重构十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_66_0_1_GACHA": [
+        "SINGLE_66_0_1_GACHA",
+        "SINGLE_66_0_1_GACHA",
+        "空白频段寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "空白频段寻访凭证": [
+        "SINGLE_66_0_1_GACHA",
+        "SINGLE_66_0_1_GACHA",
+        "空白频段寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_66_0_1_GACHA_10": [
+        "SINGLE_66_0_1_GACHA_10",
+        "SINGLE_66_0_1_GACHA_10",
+        "空白频段十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "空白频段十连寻访凭证": [
+        "SINGLE_66_0_1_GACHA_10",
+        "SINGLE_66_0_1_GACHA_10",
+        "空白频段十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_72_0_1_GACHA": [
+        "SINGLE_72_0_1_GACHA",
+        "SINGLE_72_0_1_GACHA",
+        "辟路之人寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "辟路之人寻访凭证": [
+        "SINGLE_72_0_1_GACHA",
+        "SINGLE_72_0_1_GACHA",
+        "辟路之人寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_72_0_1_GACHA_10": [
+        "SINGLE_72_0_1_GACHA_10",
+        "SINGLE_72_0_1_GACHA_10",
+        "辟路之人十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "辟路之人十连寻访凭证": [
+        "SINGLE_72_0_1_GACHA_10",
+        "SINGLE_72_0_1_GACHA_10",
+        "辟路之人十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SINGLE_75_0_1_GACHA_10": [
+        "SINGLE_75_0_1_GACHA_10",
+        "SINGLE_75_0_1_GACHA_10",
+        "确定性混沌十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "确定性混沌十连寻访凭证": [
+        "SINGLE_75_0_1_GACHA_10",
+        "SINGLE_75_0_1_GACHA_10",
+        "确定性混沌十连寻访凭证",
+        "NORMAL",
+        40003
+    ],
+    "SOCIAL_PT": [
+        "SOCIAL_PT",
+        "SOCIAL_PT",
+        "信用",
+        "NONE",
+        -10000
+    ],
+    "信用": [
+        "SOCIAL_PT",
+        "SOCIAL_PT",
+        "信用",
+        "NONE",
+        -10000
+    ],
+    "act10d5_token_biscuit": [
+        "act10d5_token_biscuit",
+        "act10d5_token_biscuit",
+        "彼得海姆热销饼干",
+        "NONE",
+        -10000
+    ],
+    "彼得海姆热销饼干": [
+        "act10d5_token_biscuit",
+        "act10d5_token_biscuit",
+        "彼得海姆热销饼干",
+        "NONE",
+        -10000
+    ],
+    "act10mini_token_ticket": [
+        "act10mini_token_ticket",
+        "act10mini_token_ticket",
+        "薪水票",
+        "NONE",
+        -10000
+    ],
+    "薪水票": [
+        "act10mini_token_ticket",
+        "act10mini_token_ticket",
+        "薪水票",
+        "NONE",
+        -10000
+    ],
+    "act11d0_token_currency": [
+        "act11d0_token_currency",
+        "act11d0_token_currency",
+        "老旧贵族领铸币",
+        "NONE",
+        -10000
+    ],
+    "老旧贵族领铸币": [
+        "act11d0_token_currency",
+        "act11d0_token_currency",
+        "老旧贵族领铸币",
+        "NONE",
+        -10000
+    ],
+    "act11d0_token_warrant": [
+        "act11d0_token_warrant",
+        "act11d0_token_warrant",
+        "沃伦姆德搜查令",
+        "NONE",
+        -10000
+    ],
+    "沃伦姆德搜查令": [
+        "act11d0_token_warrant",
+        "act11d0_token_warrant",
+        "沃伦姆德搜查令",
+        "NONE",
+        -10000
+    ],
+    "act11mini_token_card": [
+        "act11mini_token_card",
+        "act11mini_token_card",
+        "借阅证",
+        "NONE",
+        -10000
+    ],
+    "借阅证": [
+        "act11mini_token_card",
+        "act11mini_token_card",
+        "借阅证",
+        "NONE",
+        -10000
+    ],
+    "act12d0_token_components": [
+        "act12d0_token_components",
+        "act12d0_token_components",
+        "机械零件",
+        "NONE",
+        -10000
+    ],
+    "机械零件": [
+        "act12d0_token_components",
+        "act12d0_token_components",
+        "机械零件",
+        "NONE",
+        -10000
+    ],
+    "act12d6_token_mushroom": [
+        "act12d6_token_mushroom",
+        "act12d6_token_mushroom",
+        "好看的蘑菇",
+        "NONE",
+        -10000
+    ],
+    "好看的蘑菇": [
+        "act12d6_token_mushroom",
+        "act12d6_token_mushroom",
+        "好看的蘑菇",
+        "NONE",
+        -10000
+    ],
+    "act12d6_token_pancake": [
+        "act12d6_token_pancake",
+        "act12d6_token_pancake",
+        "美味的蜜饼",
+        "NONE",
+        -10000
+    ],
+    "美味的蜜饼": [
+        "act12d6_token_pancake",
+        "act12d6_token_pancake",
+        "美味的蜜饼",
+        "NONE",
+        -10000
+    ],
+    "act12mini_token_component": [
+        "act12mini_token_component",
+        "act12mini_token_component",
+        "制式器械零件",
+        "NONE",
+        -10000
+    ],
+    "制式器械零件": [
+        "act12mini_token_component",
+        "act12mini_token_component",
+        "制式器械零件",
+        "NONE",
+        -10000
+    ],
+    "act12side_point_cmemomedal": [
+        "act12side_point_cmemomedal",
+        "act12side_point_cmemomedal",
+        "陈小姐纪念奖牌",
+        "NONE",
+        -10000
+    ],
+    "陈小姐纪念奖牌": [
+        "act12side_point_cmemomedal",
+        "act12side_point_cmemomedal",
+        "陈小姐纪念奖牌",
+        "NONE",
+        -10000
+    ],
+    "act12side_token_coupon": [
+        "act12side_token_coupon",
+        "act12side_token_coupon",
+        "约翰老妈代金券",
+        "NONE",
+        -10000
+    ],
+    "约翰老妈代金券": [
+        "act12side_token_coupon",
+        "act12side_token_coupon",
+        "约翰老妈代金券",
+        "NONE",
+        -10000
+    ],
+    "act12side_token_key01": [
+        "act12side_token_key01",
+        "act12side_token_key01",
+        "《鬼虎双星》",
+        "NONE",
+        -10000
+    ],
+    "《鬼虎双星》": [
+        "act12side_token_key01",
+        "act12side_token_key01",
+        "《鬼虎双星》",
+        "NONE",
+        -10000
+    ],
+    "act12side_token_key02": [
+        "act12side_token_key02",
+        "act12side_token_key02",
+        "《龙鼠相争》",
+        "NONE",
+        -10000
+    ],
+    "《龙鼠相争》": [
+        "act12side_token_key02",
+        "act12side_token_key02",
+        "《龙鼠相争》",
+        "NONE",
+        -10000
+    ],
+    "act12side_token_key03": [
+        "act12side_token_key03",
+        "act12side_token_key03",
+        "《“黄金拍档”》",
+        "NONE",
+        -10000
+    ],
+    "《“黄金拍档”》": [
+        "act12side_token_key03",
+        "act12side_token_key03",
+        "《“黄金拍档”》",
+        "NONE",
+        -10000
+    ],
+    "act12side_token_key04": [
+        "act12side_token_key04",
+        "act12side_token_key04",
+        "《假日终结》",
+        "NONE",
+        -10000
+    ],
+    "《假日终结》": [
+        "act12side_token_key04",
+        "act12side_token_key04",
+        "《假日终结》",
+        "NONE",
+        -10000
+    ],
+    "act13d0_token_dial": [
+        "act13d0_token_dial",
+        "act13d0_token_dial",
+        "废弃时钟表盘",
+        "NONE",
+        -10000
+    ],
+    "废弃时钟表盘": [
+        "act13d0_token_dial",
+        "act13d0_token_dial",
+        "废弃时钟表盘",
+        "NONE",
+        -10000
+    ],
+    "act13d5_token_securities": [
+        "act13d5_token_securities",
+        "act13d5_token_securities",
+        "梅什科竞技证券",
+        "NONE",
+        -10000
+    ],
+    "梅什科竞技证券": [
+        "act13d5_token_securities",
+        "act13d5_token_securities",
+        "梅什科竞技证券",
+        "NONE",
+        -10000
+    ],
+    "act13mini_token_can": [
+        "act13mini_token_can",
+        "act13mini_token_can",
+        "宠物营养罐头",
+        "NONE",
+        -10000
+    ],
+    "宠物营养罐头": [
+        "act13mini_token_can",
+        "act13mini_token_can",
+        "宠物营养罐头",
+        "NONE",
+        -10000
+    ],
+    "act13side_prestige_armorless": [
+        "act13side_prestige_armorless",
+        "act13side_prestige_armorless",
+        "无胄盟声望",
+        "NONE",
+        -10000
+    ],
+    "无胄盟声望": [
+        "act13side_prestige_armorless",
+        "act13side_prestige_armorless",
+        "无胄盟声望",
+        "NONE",
+        -10000
+    ],
+    "act13side_prestige_commerce": [
+        "act13side_prestige_commerce",
+        "act13side_prestige_commerce",
+        "商业联合会声望",
+        "NONE",
+        -10000
+    ],
+    "商业联合会声望": [
+        "act13side_prestige_commerce",
+        "act13side_prestige_commerce",
+        "商业联合会声望",
+        "NONE",
+        -10000
+    ],
+    "act13side_prestige_kazimierz": [
+        "act13side_prestige_kazimierz",
+        "act13side_prestige_kazimierz",
+        "监正会声望",
+        "NONE",
+        -10000
+    ],
+    "监正会声望": [
+        "act13side_prestige_kazimierz",
+        "act13side_prestige_kazimierz",
+        "监正会声望",
+        "NONE",
+        -10000
+    ],
+    "act13side_token_card": [
+        "act13side_token_card",
+        "act13side_token_card",
+        "联合会ID卡",
+        "NONE",
+        -10000
+    ],
+    "联合会ID卡": [
+        "act13side_token_card",
+        "act13side_token_card",
+        "联合会ID卡",
+        "NONE",
+        -10000
+    ],
+    "act13side_token_key": [
+        "act13side_token_key",
+        "act13side_token_key",
+        "卷宗管理员的钥匙",
+        "NONE",
+        -10000
+    ],
+    "卷宗管理员的钥匙": [
+        "act13side_token_key",
+        "act13side_token_key",
+        "卷宗管理员的钥匙",
+        "NONE",
+        -10000
+    ],
+    "act13side_token_model": [
+        "act13side_token_model",
+        "act13side_token_model",
+        "骑士领纪念模型",
+        "NONE",
+        -10000
+    ],
+    "骑士领纪念模型": [
+        "act13side_token_model",
+        "act13side_token_model",
+        "骑士领纪念模型",
+        "NONE",
+        -10000
+    ],
+    "act14mini_token_fu": [
+        "act14mini_token_fu",
+        "act14mini_token_fu",
+        "平安符",
+        "NONE",
+        -10000
+    ],
+    "平安符": [
+        "act14mini_token_fu",
+        "act14mini_token_fu",
+        "平安符",
+        "NONE",
+        -10000
+    ],
+    "act14side_token_stone": [
+        "act14side_token_stone",
+        "act14side_token_stone",
+        "耶拉冈德之石",
+        "NONE",
+        -10000
+    ],
+    "耶拉冈德之石": [
+        "act14side_token_stone",
+        "act14side_token_stone",
+        "耶拉冈德之石",
+        "NONE",
+        -10000
+    ],
+    "act15d0_token_ironSheet": [
+        "act15d0_token_ironSheet",
+        "act15d0_token_ironSheet",
+        "工厂铁片",
+        "NONE",
+        -10000
+    ],
+    "工厂铁片": [
+        "act15d0_token_ironSheet",
+        "act15d0_token_ironSheet",
+        "工厂铁片",
+        "NONE",
+        -10000
+    ],
+    "act15d5_token_postcard": [
+        "act15d5_token_postcard",
+        "act15d5_token_postcard",
+        "奇景明信片",
+        "NONE",
+        -10000
+    ],
+    "奇景明信片": [
+        "act15d5_token_postcard",
+        "act15d5_token_postcard",
+        "奇景明信片",
+        "NONE",
+        -10000
+    ],
+    "act15mini_token_figurine": [
+        "act15mini_token_figurine",
+        "act15mini_token_figurine",
+        "指木雕刻",
+        "NONE",
+        -10000
+    ],
+    "指木雕刻": [
+        "act15mini_token_figurine",
+        "act15mini_token_figurine",
+        "指木雕刻",
+        "NONE",
+        -10000
+    ],
+    "act15side_token_tea": [
+        "act15side_token_tea",
+        "act15side_token_tea",
+        "罐装晌午茶",
+        "NONE",
+        -10000
+    ],
+    "罐装晌午茶": [
+        "act15side_token_tea",
+        "act15side_token_tea",
+        "罐装晌午茶",
+        "NONE",
+        -10000
+    ],
+    "act16d5_token_inker": [
+        "act16d5_token_inker",
+        "act16d5_token_inker",
+        "夕墨",
+        "NONE",
+        -10000
+    ],
+    "夕墨": [
+        "act16d5_token_inker",
+        "act16d5_token_inker",
+        "夕墨",
+        "NONE",
+        -10000
+    ],
+    "act16mini_token_sap": [
+        "act16mini_token_sap",
+        "act16mini_token_sap",
+        "辣瓶树水",
+        "NONE",
+        -10000
+    ],
+    "辣瓶树水": [
+        "act16mini_token_sap",
+        "act16mini_token_sap",
+        "辣瓶树水",
+        "NONE",
+        -10000
+    ],
+    "act16side_token_bolt": [
+        "act16side_token_bolt",
+        "act16side_token_bolt",
+        "蚀刻弹弹壳",
+        "NONE",
+        -10000
+    ],
+    "蚀刻弹弹壳": [
+        "act16side_token_bolt",
+        "act16side_token_bolt",
+        "蚀刻弹弹壳",
+        "NONE",
+        -10000
+    ],
+    "act17d0_token_form": [
+        "act17d0_token_form",
+        "act17d0_token_form",
+        "罗德岛物资配给证书",
+        "NONE",
+        -10000
+    ],
+    "罗德岛物资配给证书": [
+        "act17d0_token_form",
+        "act17d0_token_form",
+        "罗德岛物资配给证书",
+        "NONE",
+        -10000
+    ],
+    "act17mini_token_ash": [
+        "act17mini_token_ash",
+        "act17mini_token_ash",
+        "炉渣",
+        "NONE",
+        -10000
+    ],
+    "炉渣": [
+        "act17mini_token_ash",
+        "act17mini_token_ash",
+        "炉渣",
+        "NONE",
+        -10000
+    ],
+    "act17side_token_compass": [
+        "act17side_token_compass",
+        "act17side_token_compass",
+        "锈蚀的罗盘",
+        "NONE",
+        -10000
+    ],
+    "锈蚀的罗盘": [
+        "act17side_token_compass",
+        "act17side_token_compass",
+        "锈蚀的罗盘",
+        "NONE",
+        -10000
+    ],
+    "act18d0_token_page": [
+        "act18d0_token_page",
+        "act18d0_token_page",
+        "手绘标本残页",
+        "NONE",
+        -10000
+    ],
+    "手绘标本残页": [
+        "act18d0_token_page",
+        "act18d0_token_page",
+        "手绘标本残页",
+        "NONE",
+        -10000
+    ],
+    "act18d3_token_record": [
+        "act18d3_token_record",
+        "act18d3_token_record",
+        "腐蚀的伊比利亚唱片",
+        "NONE",
+        -10000
+    ],
+    "腐蚀的伊比利亚唱片": [
+        "act18d3_token_record",
+        "act18d3_token_record",
+        "腐蚀的伊比利亚唱片",
+        "NONE",
+        -10000
+    ],
+    "act18mini_token_petals": [
+        "act18mini_token_petals",
+        "act18mini_token_petals",
+        "碎花瓣",
+        "NONE",
+        -10000
+    ],
+    "碎花瓣": [
+        "act18mini_token_petals",
+        "act18mini_token_petals",
+        "碎花瓣",
+        "NONE",
+        -10000
+    ],
+    "act18side_token_pieces": [
+        "act18side_token_pieces",
+        "act18side_token_pieces",
+        "乐谱草稿",
+        "NONE",
+        -10000
+    ],
+    "乐谱草稿": [
+        "act18side_token_pieces",
+        "act18side_token_pieces",
+        "乐谱草稿",
+        "NONE",
+        -10000
+    ],
+    "act19mini_token_sweetie": [
+        "act19mini_token_sweetie",
+        "act19mini_token_sweetie",
+        "“棠梨儿”",
+        "NONE",
+        -10000
+    ],
+    "“棠梨儿”": [
+        "act19mini_token_sweetie",
+        "act19mini_token_sweetie",
+        "“棠梨儿”",
+        "NONE",
+        -10000
+    ],
+    "act19side_token_reagents": [
+        "act19side_token_reagents",
+        "act19side_token_reagents",
+        "神秘试剂",
+        "NONE",
+        -10000
+    ],
+    "神秘试剂": [
+        "act19side_token_reagents",
+        "act19side_token_reagents",
+        "神秘试剂",
+        "NONE",
+        -10000
+    ],
+    "act1arcade_milestone_point": [
+        "act1arcade_milestone_point",
+        "act1arcade_milestone_point",
+        "积点卡券",
+        "NONE",
+        -10000
+    ],
+    "积点卡券": [
+        "act1arcade_milestone_point",
+        "act1arcade_milestone_point",
+        "积点卡券",
+        "NONE",
+        -10000
+    ],
+    "act1autochess_token_chess": [
+        "act1autochess_token_chess",
+        "act1autochess_token_chess",
+        "卫戍认证",
+        "NONE",
+        -10000
+    ],
+    "卫戍认证": [
+        "act2autochess_token_chess",
+        "act2autochess_token_chess",
+        "卫戍认证",
+        "NONE",
+        -10000
+    ],
+    "act1bossrush_milestone_point": [
+        "act1bossrush_milestone_point",
+        "act1bossrush_milestone_point",
+        "试炼经验",
+        "NONE",
+        -10000
+    ],
+    "试炼经验": [
+        "act6bossrush_milestone_point",
+        "act6bossrush_milestone_point",
+        "试炼经验",
+        "NONE",
+        -10000
+    ],
+    "act1bossrush_token_relic": [
+        "act1bossrush_token_relic",
+        "act1bossrush_token_relic",
+        "数据黑盒",
+        "NONE",
+        -10000
+    ],
+    "数据黑盒": [
+        "act6bossrush_token_relic",
+        "act6bossrush_token_relic",
+        "数据黑盒",
+        "NONE",
+        -10000
+    ],
+    "act1break_milestone_point": [
+        "act1break_milestone_point",
+        "act1break_milestone_point",
+        "“小心地滑”",
+        "NONE",
+        -10000
+    ],
+    "“小心地滑”": [
+        "act2break_milestone_point",
+        "act2break_milestone_point",
+        "“小心地滑”",
+        "NONE",
+        -10000
+    ],
+    "act1collection_point_token": [
+        "act1collection_point_token",
+        "act1collection_point_token",
+        "“探索者”兑换点数",
+        "NONE",
+        -10000
+    ],
+    "“探索者”兑换点数": [
+        "act1collection_point_token",
+        "act1collection_point_token",
+        "“探索者”兑换点数",
+        "NONE",
+        -10000
+    ],
+    "act1enemyduel_milestone_point": [
+        "act1enemyduel_milestone_point",
+        "act1enemyduel_milestone_point",
+        "争锋大礼花",
+        "NONE",
+        -10000
+    ],
+    "争锋大礼花": [
+        "act3enemyduel_milestone_point",
+        "act3enemyduel_milestone_point",
+        "争锋大礼花",
+        "NONE",
+        -10000
+    ],
+    "act1football_milestone_point": [
+        "act1football_milestone_point",
+        "act1football_milestone_point",
+        "锦标积分券",
+        "NONE",
+        -10000
+    ],
+    "锦标积分券": [
+        "act1football_milestone_point",
+        "act1football_milestone_point",
+        "锦标积分券",
+        "NONE",
+        -10000
+    ],
+    "act1lock_point_reward": [
+        "act1lock_point_reward",
+        "act1lock_point_reward",
+        "赛事奖章",
+        "NONE",
+        -10000
+    ],
+    "赛事奖章": [
+        "act1lock_point_reward",
+        "act1lock_point_reward",
+        "赛事奖章",
+        "NONE",
+        -10000
+    ],
+    "act1mainlinebp_token_star": [
+        "act1mainlinebp_token_star",
+        "act1mainlinebp_token_star",
+        "里程碑碎片",
+        "NONE",
+        -10000
+    ],
+    "里程碑碎片": [
+        "act1mainlinebp_token_star",
+        "act1mainlinebp_token_star",
+        "里程碑碎片",
+        "NONE",
+        -10000
+    ],
+    "act1mainss_token_medi": [
+        "act1mainss_token_medi",
+        "act1mainss_token_medi",
+        "急性感染抑制剂",
+        "NONE",
+        -10000
+    ],
+    "急性感染抑制剂": [
+        "act1mainss_token_medi",
+        "act1mainss_token_medi",
+        "急性感染抑制剂",
+        "NONE",
+        -10000
+    ],
+    "act1multi_token_cap": [
+        "act1multi_token_cap",
+        "act1multi_token_cap",
+        "参赛认证-S1",
+        "NONE",
+        -10000
+    ],
+    "参赛认证-S1": [
+        "act1multi_token_cap",
+        "act1multi_token_cap",
+        "参赛认证-S1",
+        "NONE",
+        -10000
+    ],
+    "act1sandbox_milestone_point": [
+        "act1sandbox_milestone_point",
+        "act1sandbox_milestone_point",
+        "繁荣证章",
+        "NONE",
+        -10000
+    ],
+    "繁荣证章": [
+        "act1sandbox_milestone_point",
+        "act1sandbox_milestone_point",
+        "繁荣证章",
+        "NONE",
+        -10000
+    ],
+    "act1teamquest_point": [
+        "act1teamquest_point",
+        "act1teamquest_point",
+        "共竞积分",
+        "NONE",
+        -10000
+    ],
+    "共竞积分": [
+        "act1teamquest_point",
+        "act1teamquest_point",
+        "共竞积分",
+        "NONE",
+        -10000
+    ],
+    "act1vautochess_token_chess": [
+        "act1vautochess_token_chess",
+        "act1vautochess_token_chess",
+        "卫戍认证",
+        "NONE",
+        -10000
+    ],
+    "act1vecb_milestone_point": [
+        "act1vecb_milestone_point",
+        "act1vecb_milestone_point",
+        "胜绩积分",
+        "NONE",
+        -10000
+    ],
+    "胜绩积分": [
+        "act1vecb_milestone_point",
+        "act1vecb_milestone_point",
+        "胜绩积分",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_asc_cst": [
+        "act1vhalfidle_asc_cst",
+        "act1vhalfidle_asc_cst",
+        "术师进阶信物",
+        "NONE",
+        -10000
+    ],
+    "术师进阶信物": [
+        "act1vhalfidle_asc_cst",
+        "act1vhalfidle_asc_cst",
+        "术师进阶信物",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_asc_grd": [
+        "act1vhalfidle_asc_grd",
+        "act1vhalfidle_asc_grd",
+        "近卫进阶信物",
+        "NONE",
+        -10000
+    ],
+    "近卫进阶信物": [
+        "act1vhalfidle_asc_grd",
+        "act1vhalfidle_asc_grd",
+        "近卫进阶信物",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_asc_med": [
+        "act1vhalfidle_asc_med",
+        "act1vhalfidle_asc_med",
+        "医疗进阶信物",
+        "NONE",
+        -10000
+    ],
+    "医疗进阶信物": [
+        "act1vhalfidle_asc_med",
+        "act1vhalfidle_asc_med",
+        "医疗进阶信物",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_asc_pio": [
+        "act1vhalfidle_asc_pio",
+        "act1vhalfidle_asc_pio",
+        "先锋进阶信物",
+        "NONE",
+        -10000
+    ],
+    "先锋进阶信物": [
+        "act1vhalfidle_asc_pio",
+        "act1vhalfidle_asc_pio",
+        "先锋进阶信物",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_asc_snp": [
+        "act1vhalfidle_asc_snp",
+        "act1vhalfidle_asc_snp",
+        "狙击进阶信物",
+        "NONE",
+        -10000
+    ],
+    "狙击进阶信物": [
+        "act1vhalfidle_asc_snp",
+        "act1vhalfidle_asc_snp",
+        "狙击进阶信物",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_asc_spc": [
+        "act1vhalfidle_asc_spc",
+        "act1vhalfidle_asc_spc",
+        "特种进阶信物",
+        "NONE",
+        -10000
+    ],
+    "特种进阶信物": [
+        "act1vhalfidle_asc_spc",
+        "act1vhalfidle_asc_spc",
+        "特种进阶信物",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_asc_sup": [
+        "act1vhalfidle_asc_sup",
+        "act1vhalfidle_asc_sup",
+        "辅助进阶信物",
+        "NONE",
+        -10000
+    ],
+    "辅助进阶信物": [
+        "act1vhalfidle_asc_sup",
+        "act1vhalfidle_asc_sup",
+        "辅助进阶信物",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_asc_tnk": [
+        "act1vhalfidle_asc_tnk",
+        "act1vhalfidle_asc_tnk",
+        "重装进阶信物",
+        "NONE",
+        -10000
+    ],
+    "重装进阶信物": [
+        "act1vhalfidle_asc_tnk",
+        "act1vhalfidle_asc_tnk",
+        "重装进阶信物",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_gacha_newplayer": [
+        "act1vhalfidle_gacha_newplayer",
+        "act1vhalfidle_gacha_newplayer",
+        "精炼矿核",
+        "NONE",
+        -10000
+    ],
+    "精炼矿核": [
+        "act1vhalfidle_gacha_newplayer",
+        "act1vhalfidle_gacha_newplayer",
+        "精炼矿核",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_gacha_normal": [
+        "act1vhalfidle_gacha_normal",
+        "act1vhalfidle_gacha_normal",
+        "封装矿核",
+        "NONE",
+        -10000
+    ],
+    "封装矿核": [
+        "act1vhalfidle_gacha_normal",
+        "act1vhalfidle_gacha_normal",
+        "封装矿核",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_itempack_asc": [
+        "act1vhalfidle_itempack_asc",
+        "act1vhalfidle_itempack_asc",
+        "精英进阶信物",
+        "NONE",
+        -10000
+    ],
+    "精英进阶信物": [
+        "act1vhalfidle_itempack_asc",
+        "act1vhalfidle_itempack_asc",
+        "精英进阶信物",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_level_exp": [
+        "act1vhalfidle_level_exp",
+        "act1vhalfidle_level_exp",
+        "培训手册",
+        "NONE",
+        -10000
+    ],
+    "培训手册": [
+        "act1vhalfidle_level_exp",
+        "act1vhalfidle_level_exp",
+        "培训手册",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_skill_exp": [
+        "act1vhalfidle_skill_exp",
+        "act1vhalfidle_skill_exp",
+        "技巧手册",
+        "NONE",
+        -10000
+    ],
+    "技巧手册": [
+        "act1vhalfidle_skill_exp",
+        "act1vhalfidle_skill_exp",
+        "技巧手册",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_strategy_point": [
+        "act1vhalfidle_strategy_point",
+        "act1vhalfidle_strategy_point",
+        "策略信标",
+        "NONE",
+        -10000
+    ],
+    "策略信标": [
+        "act1vhalfidle_strategy_point",
+        "act1vhalfidle_strategy_point",
+        "策略信标",
+        "NONE",
+        -10000
+    ],
+    "act1vhalfidle_token_point": [
+        "act1vhalfidle_token_point",
+        "act1vhalfidle_token_point",
+        "资源点数",
+        "NONE",
+        -10000
+    ],
+    "资源点数": [
+        "act1vhalfidle_token_point",
+        "act1vhalfidle_token_point",
+        "资源点数",
+        "NONE",
+        -10000
+    ],
+    "act20mini_token_cork": [
+        "act20mini_token_cork",
+        "act20mini_token_cork",
+        "软木瓶塞",
+        "NONE",
+        -10000
+    ],
+    "软木瓶塞": [
+        "act20mini_token_cork",
+        "act20mini_token_cork",
+        "软木瓶塞",
+        "NONE",
+        -10000
+    ],
+    "act20side_token_book": [
+        "act20side_token_book",
+        "act20side_token_book",
+        "《奇谈怪论》复印本",
+        "NONE",
+        -10000
+    ],
+    "《奇谈怪论》复印本": [
+        "act20side_token_book",
+        "act20side_token_book",
+        "《奇谈怪论》复印本",
+        "NONE",
+        -10000
+    ],
+    "act21mini_token_shred": [
+        "act21mini_token_shred",
+        "act21mini_token_shred",
+        "猎犬食糜",
+        "NONE",
+        -10000
+    ],
+    "猎犬食糜": [
+        "act21mini_token_shred",
+        "act21mini_token_shred",
+        "猎犬食糜",
+        "NONE",
+        -10000
+    ],
+    "act21side_token_permesso": [
+        "act21side_token_permesso",
+        "act21side_token_permesso",
+        "进货通行证",
+        "NONE",
+        -10000
+    ],
+    "进货通行证": [
+        "act21side_token_permesso",
+        "act21side_token_permesso",
+        "进货通行证",
+        "NONE",
+        -10000
+    ],
+    "act22side_token_manuscript": [
+        "act22side_token_manuscript",
+        "act22side_token_manuscript",
+        "手抄歌谣集",
+        "NONE",
+        -10000
+    ],
+    "手抄歌谣集": [
+        "act22side_token_manuscript",
+        "act22side_token_manuscript",
+        "手抄歌谣集",
+        "NONE",
+        -10000
+    ],
+    "act23side_token_spirit": [
+        "act23side_token_spirit",
+        "act23side_token_spirit",
+        "新酿烈刀子",
+        "NONE",
+        -10000
+    ],
+    "新酿烈刀子": [
+        "act23side_token_spirit",
+        "act23side_token_spirit",
+        "新酿烈刀子",
+        "NONE",
+        -10000
+    ],
+    "act25side_token_fdrchips": [
+        "act25side_token_fdrchips",
+        "act25side_token_fdrchips",
+        "飞行数据记录芯片",
+        "NONE",
+        -10000
+    ],
+    "飞行数据记录芯片": [
+        "act25side_token_fdrchips",
+        "act25side_token_fdrchips",
+        "飞行数据记录芯片",
+        "NONE",
+        -10000
+    ],
+    "act25side_token_key01": [
+        "act25side_token_key01",
+        "act25side_token_key01",
+        "特殊作战许可·α",
+        "NONE",
+        -10000
+    ],
+    "特殊作战许可·α": [
+        "act25side_token_key01",
+        "act25side_token_key01",
+        "特殊作战许可·α",
+        "NONE",
+        -10000
+    ],
+    "act25side_token_key02": [
+        "act25side_token_key02",
+        "act25side_token_key02",
+        "特殊作战许可·β",
+        "NONE",
+        -10000
+    ],
+    "特殊作战许可·β": [
+        "act25side_token_key02",
+        "act25side_token_key02",
+        "特殊作战许可·β",
+        "NONE",
+        -10000
+    ],
+    "act26side_token_fragmenta": [
+        "act26side_token_fragmenta",
+        "act26side_token_fragmenta",
+        "圣像碎片",
+        "NONE",
+        -10000
+    ],
+    "圣像碎片": [
+        "act26side_token_fragmenta",
+        "act26side_token_fragmenta",
+        "圣像碎片",
+        "NONE",
+        -10000
+    ],
+    "act27side_token_fur": [
+        "act27side_token_fur",
+        "act27side_token_fur",
+        "毛绒绒生物的毛",
+        "NONE",
+        -10000
+    ],
+    "毛绒绒生物的毛": [
+        "act27side_token_fur",
+        "act27side_token_fur",
+        "毛绒绒生物的毛",
+        "NONE",
+        -10000
+    ],
+    "act28side_token_box": [
+        "act28side_token_box",
+        "act28side_token_box",
+        "劣质燃料",
+        "NONE",
+        -10000
+    ],
+    "劣质燃料": [
+        "act28side_token_box",
+        "act28side_token_box",
+        "劣质燃料",
+        "NONE",
+        -10000
+    ],
+    "act29side_frag_1": [
+        "act29side_frag_1",
+        "act29side_frag_1",
+        "乐之节符",
+        "NONE",
+        5200001
+    ],
+    "乐之节符": [
+        "act29side_frag_1",
+        "act29side_frag_1",
+        "乐之节符",
+        "NONE",
+        5200001
+    ],
+    "act29side_frag_2": [
+        "act29side_frag_2",
+        "act29side_frag_2",
+        "怒之节符",
+        "NONE",
+        5200002
+    ],
+    "怒之节符": [
+        "act29side_frag_2",
+        "act29side_frag_2",
+        "怒之节符",
+        "NONE",
+        5200002
+    ],
+    "act29side_frag_3": [
+        "act29side_frag_3",
+        "act29side_frag_3",
+        "哀之节符",
+        "NONE",
+        5200003
+    ],
+    "哀之节符": [
+        "act29side_frag_3",
+        "act29side_frag_3",
+        "哀之节符",
+        "NONE",
+        5200003
+    ],
+    "act29side_frag_4": [
+        "act29side_frag_4",
+        "act29side_frag_4",
+        "惧之节符",
+        "NONE",
+        5200004
+    ],
+    "惧之节符": [
+        "act29side_frag_4",
+        "act29side_frag_4",
+        "惧之节符",
+        "NONE",
+        5200004
+    ],
+    "act29side_token_erin": [
+        "act29side_token_erin",
+        "act29side_token_erin",
+        "调律追忆",
+        "NONE",
+        -10000
+    ],
+    "调律追忆": [
+        "act29side_token_erin",
+        "act29side_token_erin",
+        "调律追忆",
+        "NONE",
+        -10000
+    ],
+    "act2autochess_token_chess": [
+        "act2autochess_token_chess",
+        "act2autochess_token_chess",
+        "卫戍认证",
+        "NONE",
+        -10000
+    ],
+    "act2bossrush_milestone_point": [
+        "act2bossrush_milestone_point",
+        "act2bossrush_milestone_point",
+        "试炼经验",
+        "NONE",
+        -10000
+    ],
+    "act2bossrush_token_relic": [
+        "act2bossrush_token_relic",
+        "act2bossrush_token_relic",
+        "数据黑盒",
+        "NONE",
+        -10000
+    ],
+    "act2break_milestone_point": [
+        "act2break_milestone_point",
+        "act2break_milestone_point",
+        "“小心地滑”",
+        "NONE",
+        -10000
+    ],
+    "act2collection_point_token": [
+        "act2collection_point_token",
+        "act2collection_point_token",
+        "“战略家”点数",
+        "NONE",
+        -10000
+    ],
+    "“战略家”点数": [
+        "act7collection_point_token",
+        "act7collection_point_token",
+        "“战略家”点数",
+        "NONE",
+        -10000
+    ],
+    "act2enemyduel_milestone_point": [
+        "act2enemyduel_milestone_point",
+        "act2enemyduel_milestone_point",
+        "争锋大礼花",
+        "NONE",
+        -10000
+    ],
+    "act2mainss_token": [
+        "act2mainss_token",
+        "act2mainss_token",
+        "“勇气”胸章",
+        "NONE",
+        -10000
+    ],
+    "“勇气”胸章": [
+        "act2mainss_token",
+        "act2mainss_token",
+        "“勇气”胸章",
+        "NONE",
+        -10000
+    ],
+    "act2multi_token_cap": [
+        "act2multi_token_cap",
+        "act2multi_token_cap",
+        "参赛认证-S2",
+        "NONE",
+        -10000
+    ],
+    "参赛认证-S2": [
+        "act2multi_token_cap",
+        "act2multi_token_cap",
+        "参赛认证-S2",
+        "NONE",
+        -10000
+    ],
+    "act2vmulti_token_cap": [
+        "act2vmulti_token_cap",
+        "act2vmulti_token_cap",
+        "参赛纪念",
+        "NONE",
+        -10000
+    ],
+    "参赛纪念": [
+        "act2vmulti_token_cap",
+        "act2vmulti_token_cap",
+        "参赛纪念",
+        "NONE",
+        -10000
+    ],
+    "act30side_token_box": [
+        "act30side_token_box",
+        "act30side_token_box",
+        "驮兽盲盒",
+        "NONE",
+        -10000
+    ],
+    "驮兽盲盒": [
+        "act30side_token_box",
+        "act30side_token_box",
+        "驮兽盲盒",
+        "NONE",
+        -10000
+    ],
+    "act31side_token_box": [
+        "act31side_token_box",
+        "act31side_token_box",
+        "天桩",
+        "NONE",
+        -10000
+    ],
+    "天桩": [
+        "act31side_token_box",
+        "act31side_token_box",
+        "天桩",
+        "NONE",
+        -10000
+    ],
+    "act32side_token_stamp": [
+        "act32side_token_stamp",
+        "act32side_token_stamp",
+        "艺术馆集章卡",
+        "NONE",
+        -10000
+    ],
+    "艺术馆集章卡": [
+        "act32side_token_stamp",
+        "act32side_token_stamp",
+        "艺术馆集章卡",
+        "NONE",
+        -10000
+    ],
+    "act33side_token_sugar": [
+        "act33side_token_sugar",
+        "act33side_token_sugar",
+        "粗制糖块",
+        "NONE",
+        -10000
+    ],
+    "粗制糖块": [
+        "act33side_token_sugar",
+        "act33side_token_sugar",
+        "粗制糖块",
+        "NONE",
+        -10000
+    ],
+    "act34side_token_chip": [
+        "act34side_token_chip",
+        "act34side_token_chip",
+        "“应急物资”蓝图芯片",
+        "NONE",
+        -10000
+    ],
+    "“应急物资”蓝图芯片": [
+        "act34side_token_chip",
+        "act34side_token_chip",
+        "“应急物资”蓝图芯片",
+        "NONE",
+        -10000
+    ],
+    "act35side_token_dust": [
+        "act35side_token_dust",
+        "act35side_token_dust",
+        "流光之沙",
+        "NONE",
+        -10000
+    ],
+    "流光之沙": [
+        "act35side_token_dust",
+        "act35side_token_dust",
+        "流光之沙",
+        "NONE",
+        -10000
+    ],
+    "act36side_token_recipe": [
+        "act36side_token_recipe",
+        "act36side_token_recipe",
+        "今日食谱",
+        "NONE",
+        -10000
+    ],
+    "今日食谱": [
+        "act36side_token_recipe",
+        "act36side_token_recipe",
+        "今日食谱",
+        "NONE",
+        -10000
+    ],
+    "act37side_token_nay": [
+        "act37side_token_nay",
+        "act37side_token_nay",
+        "“我反对！”",
+        "NONE",
+        -10000
+    ],
+    "“我反对！”": [
+        "act37side_token_nay",
+        "act37side_token_nay",
+        "“我反对！”",
+        "NONE",
+        -10000
+    ],
+    "act38d1_token_coin": [
+        "act38d1_token_coin",
+        "act38d1_token_coin",
+        "晶化源石",
+        "NONE",
+        -10000
+    ],
+    "晶化源石": [
+        "act38d1_token_coin",
+        "act38d1_token_coin",
+        "晶化源石",
+        "NONE",
+        -10000
+    ],
+    "act38side_token_ticket": [
+        "act38side_token_ticket",
+        "act38side_token_ticket",
+        "匿名邀请函",
+        "NONE",
+        -10000
+    ],
+    "匿名邀请函": [
+        "act38side_token_ticket",
+        "act38side_token_ticket",
+        "匿名邀请函",
+        "NONE",
+        -10000
+    ],
+    "act39side_token_garum": [
+        "act39side_token_garum",
+        "act39side_token_garum",
+        "盐鳞咸鳞汁",
+        "NONE",
+        -10000
+    ],
+    "盐鳞咸鳞汁": [
+        "act39side_token_garum",
+        "act39side_token_garum",
+        "盐鳞咸鳞汁",
+        "NONE",
+        -10000
+    ],
+    "act3bossrush_milestone_point": [
+        "act3bossrush_milestone_point",
+        "act3bossrush_milestone_point",
+        "试炼经验",
+        "NONE",
+        -10000
+    ],
+    "act3bossrush_token_relic": [
+        "act3bossrush_token_relic",
+        "act3bossrush_token_relic",
+        "数据黑盒",
+        "NONE",
+        -10000
+    ],
+    "act3collection_point_token": [
+        "act3collection_point_token",
+        "act3collection_point_token",
+        "“战略家”点数",
+        "NONE",
+        -10000
+    ],
+    "act3enemyduel_milestone_point": [
+        "act3enemyduel_milestone_point",
+        "act3enemyduel_milestone_point",
+        "争锋大礼花",
+        "NONE",
+        -10000
+    ],
+    "act3mainss_token": [
+        "act3mainss_token",
+        "act3mainss_token",
+        "打火石",
+        "NONE",
+        -10000
+    ],
+    "打火石": [
+        "act3mainss_token",
+        "act3mainss_token",
+        "打火石",
+        "NONE",
+        -10000
+    ],
+    "act40side_token_yumyum": [
+        "act40side_token_yumyum",
+        "act40side_token_yumyum",
+        "“生香”",
+        "NONE",
+        -10000
+    ],
+    "“生香”": [
+        "act40side_token_yumyum",
+        "act40side_token_yumyum",
+        "“生香”",
+        "NONE",
+        -10000
+    ],
+    "act41side_token_light": [
+        "act41side_token_light",
+        "act41side_token_light",
+        "损坏的源石灯",
+        "NONE",
+        -10000
+    ],
+    "损坏的源石灯": [
+        "act41side_token_light",
+        "act41side_token_light",
+        "损坏的源石灯",
+        "NONE",
+        -10000
+    ],
+    "act42side_token_pacifier": [
+        "act42side_token_pacifier",
+        "act42side_token_pacifier",
+        "蒙恩的奶嘴",
+        "NONE",
+        -10000
+    ],
+    "蒙恩的奶嘴": [
+        "act42side_token_pacifier",
+        "act42side_token_pacifier",
+        "蒙恩的奶嘴",
+        "NONE",
+        -10000
+    ],
+    "act43side_token_phantom": [
+        "act43side_token_phantom",
+        "act43side_token_phantom",
+        "神秘片场黑影",
+        "NONE",
+        -10000
+    ],
+    "神秘片场黑影": [
+        "act43side_token_phantom",
+        "act43side_token_phantom",
+        "神秘片场黑影",
+        "NONE",
+        -10000
+    ],
+    "act44side_token_information": [
+        "act44side_token_information",
+        "act44side_token_information",
+        "闲言碎语",
+        "NONE",
+        -10000
+    ],
+    "闲言碎语": [
+        "act44side_token_information",
+        "act44side_token_information",
+        "闲言碎语",
+        "NONE",
+        -10000
+    ],
+    "act44side_token_ticket": [
+        "act44side_token_ticket",
+        "act44side_token_ticket",
+        "艺人见面抽选券",
+        "NONE",
+        -10000
+    ],
+    "艺人见面抽选券": [
+        "act44side_token_ticket",
+        "act44side_token_ticket",
+        "艺人见面抽选券",
+        "NONE",
+        -10000
+    ],
+    "act45side_token_puzzlepieces": [
+        "act45side_token_puzzlepieces",
+        "act45side_token_puzzlepieces",
+        "梦境拼图",
+        "NONE",
+        -10000
+    ],
+    "梦境拼图": [
+        "act45side_token_puzzlepieces",
+        "act45side_token_puzzlepieces",
+        "梦境拼图",
+        "NONE",
+        -10000
+    ],
+    "act46side_token_detector": [
+        "act46side_token_detector",
+        "act46side_token_detector",
+        "雪地用多功能探测器",
+        "NONE",
+        -10000
+    ],
+    "雪地用多功能探测器": [
+        "act46side_token_detector",
+        "act46side_token_detector",
+        "雪地用多功能探测器",
+        "NONE",
+        -10000
+    ],
+    "act47side_token_bottle": [
+        "act47side_token_bottle",
+        "act47side_token_bottle",
+        "天空氧气瓶",
+        "NONE",
+        -10000
+    ],
+    "天空氧气瓶": [
+        "act47side_token_bottle",
+        "act47side_token_bottle",
+        "天空氧气瓶",
+        "NONE",
+        -10000
+    ],
+    "act48side_token_ostracon": [
+        "act48side_token_ostracon",
+        "act48side_token_ostracon",
+        "投票用的陶片",
+        "NONE",
+        -10000
+    ],
+    "投票用的陶片": [
+        "act48side_token_ostracon",
+        "act48side_token_ostracon",
+        "投票用的陶片",
+        "NONE",
+        -10000
+    ],
+    "act49side_token_draft": [
+        "act49side_token_draft",
+        "act49side_token_draft",
+        "未定稿",
+        "NONE",
+        -10000
+    ],
+    "未定稿": [
+        "act49side_token_draft",
+        "act49side_token_draft",
+        "未定稿",
+        "NONE",
+        -10000
+    ],
+    "act4bossrush_milestone_point": [
+        "act4bossrush_milestone_point",
+        "act4bossrush_milestone_point",
+        "试炼经验",
+        "NONE",
+        -10000
+    ],
+    "act4bossrush_token_relic": [
+        "act4bossrush_token_relic",
+        "act4bossrush_token_relic",
+        "数据黑盒",
+        "NONE",
+        -10000
+    ],
+    "act4d0_intelligencepoint": [
+        "act4d0_intelligencepoint",
+        "act4d0_intelligencepoint",
+        "有效情报值",
+        "NONE",
+        -10000
+    ],
+    "有效情报值": [
+        "act4d0_intelligencepoint",
+        "act4d0_intelligencepoint",
+        "有效情报值",
+        "NONE",
+        -10000
+    ],
+    "act4d5_point_kfc": [
+        "act4d5_point_kfc",
+        "act4d5_point_kfc",
+        "KFC积分",
+        "NONE",
+        -10000
+    ],
+    "KFC积分": [
+        "act4d5_point_kfc",
+        "act4d5_point_kfc",
+        "KFC积分",
+        "NONE",
+        -10000
+    ],
+    "act4mainss_token": [
+        "act4mainss_token",
+        "act4mainss_token",
+        "“厂券”",
+        "NONE",
+        -10000
+    ],
+    "“厂券”": [
+        "act4mainss_token",
+        "act4mainss_token",
+        "“厂券”",
+        "NONE",
+        -10000
+    ],
+    "act51side_token_poem": [
+        "act51side_token_poem",
+        "act51side_token_poem",
+        "破碎诗行",
+        "NONE",
+        -10000
+    ],
+    "破碎诗行": [
+        "act51side_token_poem",
+        "act51side_token_poem",
+        "破碎诗行",
+        "NONE",
+        -10000
+    ],
+    "act53side_token_photo": [
+        "act53side_token_photo",
+        "act53side_token_photo",
+        "沿途的点滴",
+        "NONE",
+        -10000
+    ],
+    "沿途的点滴": [
+        "act53side_token_photo",
+        "act53side_token_photo",
+        "沿途的点滴",
+        "NONE",
+        -10000
+    ],
+    "act5bossrush_milestone_point": [
+        "act5bossrush_milestone_point",
+        "act5bossrush_milestone_point",
+        "试炼经验",
+        "NONE",
+        -10000
+    ],
+    "act5bossrush_token_relic": [
+        "act5bossrush_token_relic",
+        "act5bossrush_token_relic",
+        "数据黑盒",
+        "NONE",
+        -10000
+    ],
+    "act5collection_point_token": [
+        "act5collection_point_token",
+        "act5collection_point_token",
+        "特殊兑换点数",
+        "NONE",
+        -10000
+    ],
+    "特殊兑换点数": [
+        "act6collection_point_token",
+        "act6collection_point_token",
+        "特殊兑换点数",
+        "NONE",
+        -10000
+    ],
+    "act5d0_point_medal": [
+        "act5d0_point_medal",
+        "act5d0_point_medal",
+        "终极企鹅勋章",
+        "NONE",
+        -10000
+    ],
+    "终极企鹅勋章": [
+        "act5d0_point_medal",
+        "act5d0_point_medal",
+        "终极企鹅勋章",
+        "NONE",
+        -10000
+    ],
+    "act5d1_point_conbounty": [
+        "act5d1_point_conbounty",
+        "act5d1_point_conbounty",
+        "合约赏金",
+        "NONE",
+        -10000
+    ],
+    "act5d1_point_opagrt": [
+        "act5d1_point_opagrt",
+        "act5d1_point_opagrt",
+        "行动协议",
+        "NONE",
+        -10000
+    ],
+    "act6bossrush_milestone_point": [
+        "act6bossrush_milestone_point",
+        "act6bossrush_milestone_point",
+        "试炼经验",
+        "NONE",
+        -10000
+    ],
+    "act6bossrush_token_relic": [
+        "act6bossrush_token_relic",
+        "act6bossrush_token_relic",
+        "数据黑盒",
+        "NONE",
+        -10000
+    ],
+    "act6collection_point_token": [
+        "act6collection_point_token",
+        "act6collection_point_token",
+        "特殊兑换点数",
+        "NONE",
+        -10000
+    ],
+    "act6d5_point_firecracker": [
+        "act6d5_point_firecracker",
+        "act6d5_point_firecracker",
+        "量子二踢脚",
+        "NONE",
+        -10000
+    ],
+    "量子二踢脚": [
+        "act6d5_point_firecracker",
+        "act6d5_point_firecracker",
+        "量子二踢脚",
+        "NONE",
+        -10000
+    ],
+    "act6d8_point_token": [
+        "act6d8_point_token",
+        "act6d8_point_token",
+        "元宵通宝",
+        "NONE",
+        -10000
+    ],
+    "元宵通宝": [
+        "act6d8_point_token",
+        "act6d8_point_token",
+        "元宵通宝",
+        "NONE",
+        -10000
+    ],
+    "act7collection_point_token": [
+        "act7collection_point_token",
+        "act7collection_point_token",
+        "“战略家”点数",
+        "NONE",
+        -10000
+    ],
+    "act7d5_point_coupon": [
+        "act7d5_point_coupon",
+        "act7d5_point_coupon",
+        "食堂汤点券",
+        "NONE",
+        -10000
+    ],
+    "食堂汤点券": [
+        "act7d5_point_coupon",
+        "act7d5_point_coupon",
+        "食堂汤点券",
+        "NONE",
+        -10000
+    ],
+    "act7mini_token_permit": [
+        "act7mini_token_permit",
+        "act7mini_token_permit",
+        "通关票券",
+        "NONE",
+        -10000
+    ],
+    "通关票券": [
+        "act7mini_token_permit",
+        "act7mini_token_permit",
+        "通关票券",
+        "NONE",
+        -10000
+    ],
+    "act8mini_token_vigilo": [
+        "act8mini_token_vigilo",
+        "act8mini_token_vigilo",
+        "“印象”",
+        "NONE",
+        -10000
+    ],
+    "“印象”": [
+        "act8mini_token_vigilo",
+        "act8mini_token_vigilo",
+        "“印象”",
+        "NONE",
+        -10000
+    ],
+    "act9d0_token_dogTag": [
+        "act9d0_token_dogTag",
+        "act9d0_token_dogTag",
+        "无名的识别牌",
+        "NONE",
+        -10000
+    ],
+    "无名的识别牌": [
+        "act9d0_token_dogTag",
+        "act9d0_token_dogTag",
+        "无名的识别牌",
+        "NONE",
+        -10000
+    ],
+    "act9d4_point_token": [
+        "act9d4_point_token",
+        "act9d4_point_token",
+        "游击队员徽章",
+        "NONE",
+        -10000
+    ],
+    "游击队员徽章": [
+        "act9d4_point_token",
+        "act9d4_point_token",
+        "游击队员徽章",
+        "NONE",
+        -10000
+    ],
+    "act9mini_token_ticket": [
+        "act9mini_token_ticket",
+        "act9mini_token_ticket",
+        "红松叶彩券",
+        "NONE",
+        -10000
+    ],
+    "红松叶彩券": [
+        "act9mini_token_ticket",
+        "act9mini_token_ticket",
+        "红松叶彩券",
+        "NONE",
+        -10000
+    ],
+    "ap_supply_lt_60": [
+        "ap_supply_lt_60",
+        "ap_supply_lt_60",
+        "应急理智合剂",
+        "CONSUME",
+        30003
+    ],
+    "应急理智合剂": [
+        "ap_supply_lt_60",
+        "ap_supply_lt_60",
+        "应急理智合剂",
+        "CONSUME",
+        30003
+    ],
+    "ap_supply_lt_80_2025_1": [
+        "ap_supply_lt_80_2025_1",
+        "ap_supply_lt_80_2025_1",
+        "清爽运动饮料",
+        "CONSUME",
+        30006
+    ],
+    "清爽运动饮料": [
+        "ap_supply_lt_80_2025_1",
+        "ap_supply_lt_80_2025_1",
+        "清爽运动饮料",
+        "CONSUME",
+        30006
+    ],
+    "ark_odc_act53side_spitem_1": [
+        "ark_odc_act53side_spitem_1",
+        "ark_odc_act53side_spitem_1",
+        "温泉度假村体验券",
+        "NORMAL",
+        10606
+    ],
+    "温泉度假村体验券": [
+        "ark_odc_act53side_spitem_1",
+        "ark_odc_act53side_spitem_1",
+        "温泉度假村体验券",
+        "NORMAL",
+        10606
+    ],
+    "base_ap": [
+        "base_ap",
+        "base_ap",
+        "无人机",
+        "NONE",
+        -10000
+    ],
+    "无人机": [
+        "base_ap",
+        "base_ap",
+        "无人机",
+        "NONE",
+        -10000
+    ],
+    "bilibili001": [
+        "bilibili001",
+        "bilibili001",
+        "预约干员随机4选1",
+        "NONE",
+        -10000
+    ],
+    "预约干员随机4选1": [
+        "bilibili001",
+        "bilibili001",
+        "预约干员随机4选1",
+        "NONE",
+        -10000
+    ],
+    "emoticon_foolsday_amiya": [
+        "emoticon_foolsday_amiya",
+        "emoticon_foolsday_amiya",
+        "表情套组：米米子",
+        "NONE",
+        2000004
+    ],
+    "表情套组：米米子": [
+        "emoticon_foolsday_amiya",
+        "emoticon_foolsday_amiya",
+        "表情套组：米米子",
+        "NONE",
+        2000004
+    ],
+    "emoticon_foolsday_doctor": [
+        "emoticon_foolsday_doctor",
+        "emoticon_foolsday_doctor",
+        "表情套组：博士士",
+        "NONE",
+        2000003
+    ],
+    "表情套组：博士士": [
+        "emoticon_foolsday_doctor",
+        "emoticon_foolsday_doctor",
+        "表情套组：博士士",
+        "NONE",
+        2000003
+    ],
+    "emoticon_foolsday_wisdel": [
+        "emoticon_foolsday_wisdel",
+        "emoticon_foolsday_wisdel",
+        "表情套组：维维美",
+        "NONE",
+        2000005
+    ],
+    "表情套组：维维美": [
+        "emoticon_foolsday_wisdel",
+        "emoticon_foolsday_wisdel",
+        "表情套组：维维美",
+        "NONE",
+        2000005
+    ],
+    "emoticon_originium_slug": [
+        "emoticon_originium_slug",
+        "emoticon_originium_slug",
+        "表情套组：虫动",
+        "NONE",
+        2000002
+    ],
+    "表情套组：虫动": [
+        "emoticon_originium_slug",
+        "emoticon_originium_slug",
+        "表情套组：虫动",
+        "NONE",
+        2000002
+    ],
+    "et_ObsidianPass": [
+        "et_ObsidianPass",
+        "et_ObsidianPass",
+        "黑曜石节门票",
+        "NONE",
+        -10000
+    ],
+    "黑曜石节门票": [
+        "et_ObsidianPass",
+        "et_ObsidianPass",
+        "黑曜石节门票",
+        "NONE",
+        -10000
+    ],
+    "favor_add_ulika": [
+        "favor_add_ulika",
+        "favor_add_ulika",
+        "主播U的直播切片",
+        "NONE",
+        -10000
+    ],
+    "主播U的直播切片": [
+        "favor_add_ulika",
+        "favor_add_ulika",
+        "主播U的直播切片",
+        "NONE",
+        -10000
+    ],
+    "itempack_gacha_1": [
+        "itempack_gacha_1",
+        "itempack_gacha_1",
+        "福运鼓鼓礼袋",
+        "CONSUME",
+        -10000
+    ],
+    "福运鼓鼓礼袋": [
+        "itempack_gacha_1",
+        "itempack_gacha_1",
+        "福运鼓鼓礼袋",
+        "CONSUME",
+        -10000
+    ],
+    "itempack_gold_1": [
+        "itempack_gold_1",
+        "itempack_gold_1",
+        "特别版!超强!老板奖章",
+        "NONE",
+        -10000
+    ],
+    "特别版!超强!老板奖章": [
+        "itempack_gold_1",
+        "itempack_gold_1",
+        "特别版!超强!老板奖章",
+        "NONE",
+        -10000
+    ],
+    "itempack_gold_2": [
+        "itempack_gold_2",
+        "itempack_gold_2",
+        "精心准备的试饮套装",
+        "NONE",
+        -10000
+    ],
+    "精心准备的试饮套装": [
+        "itempack_gold_2",
+        "itempack_gold_2",
+        "精心准备的试饮套装",
+        "NONE",
+        -10000
+    ],
+    "itempack_leaf_def": [
+        "itempack_leaf_def",
+        "itempack_leaf_def",
+        "特辑/罗德岛风尚",
+        "NONE",
+        -10000
+    ],
+    "特辑/罗德岛风尚": [
+        "itempack_leaf_def",
+        "itempack_leaf_def",
+        "特辑/罗德岛风尚",
+        "NONE",
+        -10000
+    ],
+    "itempack_leaf_def2": [
+        "itempack_leaf_def2",
+        "itempack_leaf_def2",
+        "特辑/流媒体",
+        "NONE",
+        -10000
+    ],
+    "特辑/流媒体": [
+        "itempack_leaf_def2",
+        "itempack_leaf_def2",
+        "特辑/流媒体",
+        "NONE",
+        -10000
+    ],
+    "itempack_main_1": [
+        "itempack_main_1",
+        "itempack_main_1",
+        "罗德岛补给箱",
+        "NONE",
+        -10000
+    ],
+    "罗德岛补给箱": [
+        "itempack_main_3",
+        "itempack_main_3",
+        "罗德岛补给箱",
+        "NONE",
+        -10000
+    ],
+    "itempack_main_2": [
+        "itempack_main_2",
+        "itempack_main_2",
+        "罗德岛补给箱",
+        "NONE",
+        -10000
+    ],
+    "itempack_main_3": [
+        "itempack_main_3",
+        "itempack_main_3",
+        "罗德岛补给箱",
+        "NONE",
+        -10000
+    ],
+    "itempack_mod_10": [
+        "itempack_mod_10",
+        "itempack_mod_10",
+        "狙击芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "狙击芯片组印刻仪": [
+        "itempack_mod_10",
+        "itempack_mod_10",
+        "狙击芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "itempack_mod_11": [
+        "itempack_mod_11",
+        "itempack_mod_11",
+        "术师芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "术师芯片组印刻仪": [
+        "itempack_mod_11",
+        "itempack_mod_11",
+        "术师芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "itempack_mod_12": [
+        "itempack_mod_12",
+        "itempack_mod_12",
+        "医疗芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "医疗芯片组印刻仪": [
+        "itempack_mod_12",
+        "itempack_mod_12",
+        "医疗芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "itempack_mod_13": [
+        "itempack_mod_13",
+        "itempack_mod_13",
+        "辅助芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "辅助芯片组印刻仪": [
+        "itempack_mod_13",
+        "itempack_mod_13",
+        "辅助芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "itempack_mod_14": [
+        "itempack_mod_14",
+        "itempack_mod_14",
+        "特种芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "特种芯片组印刻仪": [
+        "itempack_mod_14",
+        "itempack_mod_14",
+        "特种芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "itempack_mod_4": [
+        "itempack_mod_4",
+        "itempack_mod_4",
+        "模组数据整合块",
+        "NONE",
+        -10000
+    ],
+    "模组数据整合块": [
+        "itempack_mod_4",
+        "itempack_mod_4",
+        "模组数据整合块",
+        "NONE",
+        -10000
+    ],
+    "itempack_mod_6": [
+        "itempack_mod_6",
+        "itempack_mod_6",
+        "模组数据整合箱",
+        "NONE",
+        -10000
+    ],
+    "模组数据整合箱": [
+        "itempack_mod_6",
+        "itempack_mod_6",
+        "模组数据整合箱",
+        "NONE",
+        -10000
+    ],
+    "itempack_mod_7": [
+        "itempack_mod_7",
+        "itempack_mod_7",
+        "先锋芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "先锋芯片组印刻仪": [
+        "itempack_mod_7",
+        "itempack_mod_7",
+        "先锋芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "itempack_mod_8": [
+        "itempack_mod_8",
+        "itempack_mod_8",
+        "近卫芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "近卫芯片组印刻仪": [
+        "itempack_mod_8",
+        "itempack_mod_8",
+        "近卫芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "itempack_mod_9": [
+        "itempack_mod_9",
+        "itempack_mod_9",
+        "重装芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "重装芯片组印刻仪": [
+        "itempack_mod_9",
+        "itempack_mod_9",
+        "重装芯片组印刻仪",
+        "CONSUME",
+        -10000
+    ],
+    "itempack_recruit_1": [
+        "itempack_recruit_1",
+        "itempack_recruit_1",
+        "2025感谢庆典招聘补给",
+        "NONE",
+        -10000
+    ],
+    "2025感谢庆典招聘补给": [
+        "itempack_recruit_1",
+        "itempack_recruit_1",
+        "2025感谢庆典招聘补给",
+        "NONE",
+        -10000
+    ],
+    "itempack_stickers_act5unique": [
+        "itempack_stickers_act5unique",
+        "itempack_stickers_act5unique",
+        "特辑/夏日音轨",
+        "NONE",
+        -10000
+    ],
+    "特辑/夏日音轨": [
+        "itempack_stickers_act5unique",
+        "itempack_stickers_act5unique",
+        "特辑/夏日音轨",
+        "NONE",
+        -10000
+    ],
+    "itempack_stickers_rog1": [
+        "itempack_stickers_rog1",
+        "itempack_stickers_rog1",
+        "贴纸包/猩红孤钻",
+        "NONE",
+        -10000
+    ],
+    "贴纸包/猩红孤钻": [
+        "itempack_stickers_rog1",
+        "itempack_stickers_rog1",
+        "贴纸包/猩红孤钻",
+        "NONE",
+        -10000
+    ],
+    "itempack_stickers_rog2": [
+        "itempack_stickers_rog2",
+        "itempack_stickers_rog2",
+        "贴纸包/深蓝之树",
+        "NONE",
+        -10000
+    ],
+    "贴纸包/深蓝之树": [
+        "itempack_stickers_rog2",
+        "itempack_stickers_rog2",
+        "贴纸包/深蓝之树",
+        "NONE",
+        -10000
+    ],
+    "itempack_stickers_rog3": [
+        "itempack_stickers_rog3",
+        "itempack_stickers_rog3",
+        "贴纸包/银凇止境",
+        "NONE",
+        -10000
+    ],
+    "贴纸包/银凇止境": [
+        "itempack_stickers_rog3",
+        "itempack_stickers_rog3",
+        "贴纸包/银凇止境",
+        "NONE",
+        -10000
+    ],
+    "itempack_stickers_rog4": [
+        "itempack_stickers_rog4",
+        "itempack_stickers_rog4",
+        "贴纸包/无终奇语",
+        "NONE",
+        -10000
+    ],
+    "贴纸包/无终奇语": [
+        "itempack_stickers_rog4",
+        "itempack_stickers_rog4",
+        "贴纸包/无终奇语",
+        "NONE",
+        -10000
+    ],
+    "itempack_stickers_rog5": [
+        "itempack_stickers_rog5",
+        "itempack_stickers_rog5",
+        "贴纸包/界园志异",
+        "NONE",
+        -10000
+    ],
+    "贴纸包/界园志异": [
+        "itempack_stickers_rog5",
+        "itempack_stickers_rog5",
+        "贴纸包/界园志异",
+        "NONE",
+        -10000
+    ],
+    "itempack_stickers_sand1": [
+        "itempack_stickers_sand1",
+        "itempack_stickers_sand1",
+        "贴纸包/沙洲遗闻",
+        "NONE",
+        -10000
+    ],
+    "贴纸包/沙洲遗闻": [
+        "itempack_stickers_sand1",
+        "itempack_stickers_sand1",
+        "贴纸包/沙洲遗闻",
+        "NONE",
+        -10000
+    ],
+    "itempack_stickers_sand2": [
+        "itempack_stickers_sand2",
+        "itempack_stickers_sand2",
+        "贴纸包/重启锚点",
+        "NONE",
+        -10000
+    ],
+    "贴纸包/重启锚点": [
+        "itempack_stickers_sand2",
+        "itempack_stickers_sand2",
+        "贴纸包/重启锚点",
+        "NONE",
+        -10000
+    ],
+    "mcardVoucher": [
+        "mcardVoucher",
+        "mcardVoucher",
+        "月卡兑换凭证",
+        "NONE",
+        -10000
+    ],
+    "月卡兑换凭证": [
+        "mcardVoucher",
+        "mcardVoucher",
+        "月卡兑换凭证",
+        "NONE",
+        -10000
+    ],
+    "randomMaterial_act53side": [
+        "randomMaterial_act53side",
+        "randomMaterial_act53side",
+        "“幸福在途”补给包",
+        "CONSUME",
+        60123
+    ],
+    "“幸福在途”补给包": [
+        "randomMaterial_act53side",
+        "randomMaterial_act53side",
+        "“幸福在途”补给包",
+        "CONSUME",
+        60123
+    ],
+    "randomMaterial_message4": [
+        "randomMaterial_message4",
+        "randomMaterial_message4",
+        "“神秘动物的口袋”",
+        "CONSUME",
+        60124
+    ],
+    "“神秘动物的口袋”": [
+        "randomMaterial_message4",
+        "randomMaterial_message4",
+        "“神秘动物的口袋”",
+        "CONSUME",
+        60124
+    ],
+    "return_credit_token": [
+        "return_credit_token",
+        "return_credit_token",
+        "二次认证徽记",
+        "NONE",
+        -10000
+    ],
+    "二次认证徽记": [
+        "return_credit_token2",
+        "return_credit_token2",
+        "二次认证徽记",
+        "NONE",
+        -10000
+    ],
+    "return_credit_token2": [
+        "return_credit_token2",
+        "return_credit_token2",
+        "二次认证徽记",
+        "NONE",
+        -10000
+    ],
+    "rogue_1_token_bp": [
+        "rogue_1_token_bp",
+        "rogue_1_token_bp",
+        "蜡烛",
+        "NONE",
+        -10000
+    ],
+    "蜡烛": [
+        "rogue_1_token_bp",
+        "rogue_1_token_bp",
+        "蜡烛",
+        "NONE",
+        -10000
+    ],
+    "rogue_1_token_grow": [
+        "rogue_1_token_grow",
+        "rogue_1_token_grow",
+        "昏暗的灵感",
+        "NONE",
+        -10000
+    ],
+    "昏暗的灵感": [
+        "rogue_1_token_grow",
+        "rogue_1_token_grow",
+        "昏暗的灵感",
+        "NONE",
+        -10000
+    ],
+    "rogue_2_token_bp": [
+        "rogue_2_token_bp",
+        "rogue_2_token_bp",
+        "生机细胞",
+        "NONE",
+        -10000
+    ],
+    "生机细胞": [
+        "rogue_2_token_bp",
+        "rogue_2_token_bp",
+        "生机细胞",
+        "NONE",
+        -10000
+    ],
+    "rogue_3_token_bp": [
+        "rogue_3_token_bp",
+        "rogue_3_token_bp",
+        "生态标本",
+        "NONE",
+        -10000
+    ],
+    "生态标本": [
+        "rogue_3_token_bp",
+        "rogue_3_token_bp",
+        "生态标本",
+        "NONE",
+        -10000
+    ],
+    "rogue_4_token_bp": [
+        "rogue_4_token_bp",
+        "rogue_4_token_bp",
+        "魂灵书签",
+        "NONE",
+        -10000
+    ],
+    "魂灵书签": [
+        "rogue_4_token_bp",
+        "rogue_4_token_bp",
+        "魂灵书签",
+        "NONE",
+        -10000
+    ],
+    "rogue_5_token_bp": [
+        "rogue_5_token_bp",
+        "rogue_5_token_bp",
+        "迷路幼伥",
+        "NONE",
+        -10000
+    ],
+    "迷路幼伥": [
+        "rogue_5_token_bp",
+        "rogue_5_token_bp",
+        "迷路幼伥",
+        "NONE",
+        -10000
+    ],
+    "rogue_6_token_bp": [
+        "rogue_6_token_bp",
+        "rogue_6_token_bp",
+        "源流样本",
+        "NONE",
+        -10000
+    ],
+    "源流样本": [
+        "rogue_6_token_bp",
+        "rogue_6_token_bp",
+        "源流样本",
+        "NONE",
+        -10000
+    ],
+    "sandbox_1_tokencoin": [
+        "sandbox_1_tokencoin",
+        "sandbox_1_tokencoin",
+        "繁荣点数",
+        "NONE",
+        -10000
+    ],
+    "繁荣点数": [
+        "sandbox_1_tokencoin",
+        "sandbox_1_tokencoin",
+        "繁荣点数",
+        "NONE",
+        -10000
+    ],
+    "so_char_exp_1": [
+        "so_char_exp_1",
+        "so_char_exp_1",
+        "特勤作战记录",
+        "NONE",
+        -10000
+    ],
+    "特勤作战记录": [
+        "so_char_exp_1",
+        "so_char_exp_1",
+        "特勤作战记录",
+        "NONE",
+        -10000
+    ],
+    "token_Obsidian": [
+        "token_Obsidian",
+        "token_Obsidian",
+        "汐斯塔的黑曜石",
+        "NONE",
+        -10000
+    ],
+    "汐斯塔的黑曜石": [
+        "token_Obsidian",
+        "token_Obsidian",
+        "汐斯塔的黑曜石",
+        "NONE",
+        -10000
+    ],
+    "token_ObsidianCoin": [
+        "token_ObsidianCoin",
+        "token_ObsidianCoin",
+        "黑曜石节抽奖代币",
+        "NONE",
+        -10000
+    ],
+    "黑曜石节抽奖代币": [
+        "token_ObsidianCoin",
+        "token_ObsidianCoin",
+        "黑曜石节抽奖代币",
+        "NONE",
+        -10000
+    ],
+    "token_Wristband": [
+        "token_Wristband",
+        "token_Wristband",
+        "黑曜石节手环",
+        "NONE",
+        -10000
+    ],
+    "黑曜石节手环": [
+        "token_Wristband",
+        "token_Wristband",
+        "黑曜石节手环",
+        "NONE",
+        -10000
     ]
 }
