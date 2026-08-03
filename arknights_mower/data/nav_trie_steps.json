@@ -9,21 +9,30 @@
         {
           "action": "tap",
           "payload": {
-            "pos": [352, 827],
+            "pos": [
+              352,
+              827
+            ],
             "text": "踏入新生黎明“内关卡已开放"
           }
         },
         {
           "action": "tap",
           "payload": {
-            "pos": [1464, 920],
+            "pos": [
+              1464,
+              920
+            ],
             "text": "告别天真年代"
           }
         },
         {
           "action": "tap",
           "payload": {
-            "pos": [1113, 291],
+            "pos": [
+              1113,
+              291
+            ],
             "text": "PA-8",
             "success": true
           }
@@ -31,7 +40,10 @@
         {
           "action": "tap",
           "payload": {
-            "pos": [1447, 145],
+            "pos": [
+              1447,
+              145
+            ],
             "text": "PA-8",
             "success": true
           }
@@ -46,22 +58,55 @@
         {
           "action": "swipe",
           "payload": {
-            "start": [500, 540],
-            "vector": [800, 0]
+            "start": [
+              500,
+              540
+            ],
+            "vector": [
+              800,
+              0
+            ]
           }
         },
         {
           "action": "swipe",
           "payload": {
-            "start": [500, 540],
-            "vector": [800, 0]
+            "start": [
+              500,
+              540
+            ],
+            "vector": [
+              800,
+              0
+            ]
           }
         },
         {
           "action": "tap",
           "payload": {
-            "pos": [197, 316],
+            "pos": [
+              197,
+              316
+            ],
             "text": "PA-1",
+            "success": true
+          }
+        }
+      ]
+    },
+    "AP-5": {
+      "updated_at": "2026-07-27T10:01:35",
+      "stage_type": "DAILY",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1452,
+              146
+            ],
+            "text": "AP-5",
             "success": true
           }
         }
@@ -78,22 +123,56 @@
         {
           "action": "swipe",
           "payload": {
-            "start": [500, 540],
-            "vector": [800, 0]
+            "start": [
+              500,
+              540
+            ],
+            "vector": [
+              800,
+              0
+            ]
           }
         },
         {
           "action": "swipe",
           "payload": {
-            "start": [500, 540],
-            "vector": [800, 0]
+            "start": [
+              500,
+              540
+            ],
+            "vector": [
+              800,
+              0
+            ]
           }
         },
         {
           "action": "tap",
           "payload": {
-            "pos": [197, 316],
+            "pos": [
+              197,
+              316
+            ],
             "text": "PA-1",
+            "success": true
+          }
+        }
+      ]
+    },
+    "AP-*": {
+      "updated_at": "2026-07-27T10:01:35",
+      "stage_type": "DAILY",
+      "source_stage": "AP-5",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1452,
+              146
+            ],
+            "text": "AP-5",
             "success": true
           }
         }

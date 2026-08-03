@@ -132,7 +132,7 @@ def get_binding_list(sign_token):
         logger.info(f"请求角色列表出现问题：{resp['message']}")
         if resp.get("message") == "用户未登录":
             logger.warning("用户登录可能失效了，请重新运行此程序！")
-            return []
+        return []
     for i in resp["data"]["list"]:
         if i.get("appCode") not in ("arknights", "endfield"):
             continue

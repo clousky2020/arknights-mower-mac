@@ -17,6 +17,7 @@ from arknights_mower.utils.skland import (
     log,
     sign_endfield_url,
     sign_url,
+    skland_cache,
     token_password_url,
 )
 
@@ -41,7 +42,7 @@ class SKLand:
                 continue
 
             self.all_recorded = False
-            self.save_param(get_cred_by_token(log(item)))
+            self.save_param(get_cred_by_token(log(item)), item.account)
 
             # 明日方舟森空岛签到
             for i in get_binding_list(self.sign_token):
@@ -159,9 +160,15 @@ class SKLand:
             return True
         return False
 
-    def save_param(self, cred_resp):
+    def save_param(self, cred_resp, account=None):
         header["cred"] = cred_resp["cred"]
         self.sign_token = cred_resp["token"]
+        if account:
+            skland_cache[account] = {
+                "cred": cred_resp["cred"],
+                "sign_token": cred_resp["token"],
+                "updated_at": datetime.datetime.now(datetime.timezone.utc),
+            }
 
     def log(self, account):
         r = requests.post(
@@ -246,7 +253,7 @@ class SKLand:
         res = []
         for item in config.conf.skland_info:
             try:
-                self.save_param(get_cred_by_token(log(item)))
+                self.save_param(get_cred_by_token(log(item)), item.account)
                 res.append(f"账号 {item.account}：")
                 for i in get_binding_list(self.sign_token):
                     # 明日方舟角色/区服信息
