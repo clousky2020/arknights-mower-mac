@@ -6,11 +6,55 @@
 - fix: verify_agent 识别不匹配时重试读屏，避免基建换班反复报「检测到干员选择错误」 (feat/avd-support-and-encoding-fix) [@clousky2020](https://github.com/clousky2020)
 - fix: report.csv 读取新增 UTF-8-BOM / GBK 编码回退，并以 `utf-8-sig` 优先以正确去除 BOM，避免 Windows 用户导出的带 BOM 报表首列名残留 `\ufeff` 前缀导致读取报错 (feat/avd-support-and-encoding-fix) [@clousky2020](https://github.com/clousky2020)
 
+## v4.1.5.8 - 2026-08-07
+
+### 修复
+
+- 修复 MAA 连通性检测误报
+- 修复日志无输出的问题
+- 修复专精 level 3 训练误插入换人任务的问题
+- 专精升级改为读取倒计时成功后才标记 in_progress
+- 修复活动关卡导航失败的问题
+- 新增关卡体力消耗（AP）fallback 配置
+- 修复 local operation 体力消耗为 None 导致的报错
+- 游戏在后台时不强制退出，直接拉起前台
+- MAA 配置缺失时友好降级
+- 专精路线设置 - 默认值从JSON读取、自动保存、恢复默认修复
+
+### 其他
+
+- 更新游戏数据至SideStory `直到大地变为一颗酸橙`
+- 优化打包体积
+
+### 详细内容
+
+#### 修复 fix
+
+* 修复 mower 无法停止的问题（`/stop` 状态快照缺失字段导致接口报错） [#892](https://github.com/ArkMowers/arknights-mower/pull/892) [@ALEXsun0](https://github.com/ALEXsun0)
+
+* 修复 Maa 连通性检测误报，补充启动前检查测试 [#901](https://github.com/ArkMowers/arknights-mower/pull/901) [@ALEXsun0](https://github.com/ALEXsun0)
+
+* 修复专精调度、导航、日志等问题（训练时间读取真实倒计时、level 3 不再换人、导航失败、新增 AP fallback） [#902](https://github.com/ArkMowers/arknights-mower/pull/902) [@Shawnsdaddy](https://github.com/Shawnsdaddy)
+
+* 修复专精路线设置默认值，专精计划改为从数据库读取 [#895](https://github.com/ArkMowers/arknights-mower/pull/895) [@Shawnsdaddy](https://github.com/Shawnsdaddy)
+
+#### 清理 cleanup
+
+* 删除 training_idle 死代码块与 half_off 剩余引用 [#895](https://github.com/ArkMowers/arknights-mower/pull/895) [@Shawnsdaddy](https://github.com/Shawnsdaddy)
+
+#### 更新 update
+
+* 更新游戏数据（新增干员机械师）及补充机械师基建技能描述 [#899](https://github.com/ArkMowers/arknights-mower/pull/899) [@WufeiHalf](https://github.com/WufeiHalf)
+
+* 更新游戏数据，修复专精调度/导航/日志等问题 [#902](https://github.com/ArkMowers/arknights-mower/pull/902) [@Shawnsdaddy](https://github.com/Shawnsdaddy)
+
+* 更新 CHANGELOG 至 4.1.5.8 并优化打包体积 [#903](https://github.com/ArkMowers/arknights-mower/pull/903) [@NiceAfternoon](https://github.com/NiceAfternoon)
+
 ## v4.1.5.7 - 2026-07-10
 
 ### 新增
 
-- 新增 MAA 连通性测试的子进程执行与启动前检查选项，并在连接配置中提示 MuMu Mac 用户可切换 `MuMuMacStable`
+- 新增 MAA 连通性测试与启动前检查
 - 新增调用 MAA 刷生息演算，支持的主题有 `沙洲遗闻` 和 `重启锚点`
 - 新增基建设置 `读取心情后先刷新副表`，开启后缓存清零重启会先读取心情并按载入心情数据模式自动重启，再触发副表和后续排班
 - 新增启动游戏自定义命令选项，并预设唤醒无锁屏设备后启动游戏的命令

@@ -111,6 +111,71 @@
           }
         }
       ]
+    },
+    "TO-9": {
+      "updated_at": "2026-08-01T01:55:02",
+      "stage_type": "UNKNOWN",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              363,
+              827
+            ],
+            "text": "<直到大地变成一颗酸橙>活动已开放"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1681,
+              674
+            ],
+            "text": "驶向大地尽头",
+            "success": true
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1163,
+              603
+            ],
+            "text": "TO-9",
+            "success": true
+          }
+        }
+      ]
     }
   },
   "patterns": {
@@ -173,6 +238,72 @@
               146
             ],
             "text": "AP-5",
+            "success": true
+          }
+        }
+      ]
+    },
+    "TO-*": {
+      "updated_at": "2026-08-01T01:55:02",
+      "stage_type": "UNKNOWN",
+      "source_stage": "TO-9",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              363,
+              827
+            ],
+            "text": "<直到大地变成一颗酸橙>活动已开放"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1681,
+              674
+            ],
+            "text": "驶向大地尽头",
+            "success": true
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1163,
+              603
+            ],
+            "text": "TO-9",
             "success": true
           }
         }

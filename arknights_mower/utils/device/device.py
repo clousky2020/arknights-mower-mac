@@ -185,7 +185,10 @@ class Device:
 
     def exit(self) -> None:
         """exit the application"""
+        import traceback
+
         logger.info("退出游戏")
+        logger.debug("device.exit 调用来源:\n" + "".join(traceback.format_stack()[:-1]))
         self.run(f"am force-stop {config.conf.APPNAME}")
 
     def return_home(self) -> None:
@@ -504,7 +507,7 @@ class Device:
                         self.bring_to_foreground()
                         csleep(2)
                     else:
-                        self.exit()
+                        # 游戏既不在前台也不在后台，尝试直接拉起前台
                         self.launch()
                         csleep(10)
                     update = True

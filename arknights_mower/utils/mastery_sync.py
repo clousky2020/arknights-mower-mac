@@ -139,6 +139,15 @@ class MasterySync:
         if plan:
             expires_at = plan.get("expires_at")
             if not expires_at or datetime.fromisoformat(expires_at) > datetime.now():
+                # 队列中已存在 train REFRESH_TIME 时不重复插入，避免每轮空转产生重复任务
+                existing = self._scheduler.find_next_task(
+                    task_type=TaskTypes.REFRESH_TIME, meta_data="train"
+                )
+                if existing:
+                    logger.debug(
+                        "MasterySync: train REFRESH_TIME already in queue, skip add"
+                    )
+                    return
                 logger.info("MasterySync: in_progress plan found, adding REFRESH_TIME")
                 self._scheduler.tasks.append(
                     SchedulerTask(
@@ -149,6 +158,68 @@ class MasterySync:
                 )
                 return
 
+        # 处理 in_progress 但 expires_at 已过的计划（重启断链兜底）
+        from arknights_mower.solvers.player_info import player_info_cache
+
+        for p in get_all_plans():
+            if p.get("status") != "in_progress":
+                continue
+            expires_at = p.get("expires_at")
+            if not expires_at:
+                continue
+            try:
+                if datetime.fromisoformat(expires_at) > datetime.now():
+                    continue
+            except Exception:
+                continue
+
+            char_id = p["char_id"]
+            skill_index = p["skill_index"]
+            plan_level = p.get("level", 1)
+
+            # 用 building_training API 数据确认训练是否已完成
+            latest = player_info_cache.get("latest", {})
+            training = (
+                latest.get("building_training") if isinstance(latest, dict) else None
+            )
+            training_completed = False
+            if training and isinstance(training.get("trainee"), dict):
+                if (
+                    training["trainee"]["charId"] == char_id
+                    and (
+                        training["trainee"]["targetSkill"] == -1
+                        or training["trainee"]["targetSkill"] == skill_index
+                    )
+                    and (
+                        training.get("remainSecs", 0) <= 0
+                        or training.get("slotState", 0) == 2
+                    )
+                ):
+                    training_completed = True
+                    logger.info(
+                        f"MasterySync: API confirms training completed for "
+                        f"{char_id} skill{skill_index + 1}"
+                    )
+
+            if not training_completed:
+                logger.warning(
+                    f"MasterySync: expired plan but API shows training not complete, "
+                    f"skipping: {char_id} skill{skill_index + 1}"
+                )
+                continue
+
+            insert_plan(char_id, skill_index, "completed", level=plan_level)
+            if plan_level < 3:
+                insert_plan(char_id, skill_index, "pending", level=plan_level + 1)
+                logger.info(
+                    f"MasterySync: expired plan promoted: lv{plan_level} done "
+                    f"→ pending(lv{plan_level + 1}) {char_id} skill{skill_index + 1}"
+                )
+            else:
+                logger.info(
+                    f"MasterySync: expired plan done: lv{plan_level} "
+                    f"{char_id} skill{skill_index + 1}"
+                )
         if self._scheduler.find_next_task(task_type=TaskTypes.SKILL_UPGRADE):
             logger.debug("MasterySync: queue already has SKILL_UPGRADE, skip cycle")
             return
@@ -223,13 +294,16 @@ class MasterySync:
 
             self._scheduler.op_data.skill_upgrade_supports = supports
 
-            self._scheduler.tasks.append(
-                SchedulerTask(
-                    time=datetime.now(),
-                    task_type=TaskTypes.REFRESH_TIME,
-                    meta_data="train",
+            if not self._scheduler.find_next_task(
+                task_type=TaskTypes.REFRESH_TIME, meta_data="train"
+            ):
+                self._scheduler.tasks.append(
+                    SchedulerTask(
+                        time=datetime.now(),
+                        task_type=TaskTypes.REFRESH_TIME,
+                        meta_data="train",
+                    )
                 )
-            )
 
             # 从 building_training 数据或 op_data 获取当前助理
             current_assistant = self._scheduler.op_data.get_train_support()
@@ -293,9 +367,11 @@ class MasterySync:
 
         try:
             plan_level = plan.get("level", 1)
-            insert_plan(char_id, skill_index, "in_progress", level=plan_level)
+            # 不在这里提前标记 in_progress：只有 skill_upgrade 真正读取到训练倒计时
+            # （确认开始升级）后才会 set_plan_status(in_progress) 并写入 expires_at。
+            # 否则训练尚未启动，MasterySync 会误判为进行中并反复添加 REFRESH_TIME。
             logger.debug(
-                f"MasterySync: insert plan in_progress char={char_id} skill={skill_index} level={plan_level}"
+                f"MasterySync: schedule plan char={char_id} skill={skill_index} level={plan_level}"
             )
 
             parsed = _json.loads(route["supports"])
@@ -312,7 +388,7 @@ class MasterySync:
             name = char_info.get("name", char_id)
             sk = str(skill_index + 1)
 
-            if supports:
+            if supports and plan_level < 3:
                 self._scheduler.tasks.append(
                     SchedulerTask(
                         task_plan={"train": [supports[0].name, name]},

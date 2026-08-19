@@ -293,6 +293,7 @@ def compute_workshop_config(
     from collections import defaultdict
 
     from arknights_mower.data import workshop_formula
+    from arknights_mower.utils.mastery_db import get_all_plans
 
     planned_keys = []
     if planned_skills is not None:
@@ -629,15 +630,18 @@ def auto_schedule_mastery_tasks():
     """仓库扫描后：检测计划内未满M3的技能，直接需求全部满足则返回待安排列表"""
     result = {"scheduled": [], "skipped": []}
 
-    from arknights_mower.utils.mastery_db import get_pending_only
+    from arknights_mower.utils.mastery_db import get_all_plans, get_pending_plans
 
-    db_plans = get_pending_only()
+    db_plans = get_pending_plans()
     if not db_plans:
-        return result
+        all_plans = get_all_plans()
+        if not all_plans:
+            return result
+        db_plans = [p for p in all_plans if p.get("status") in ("pending", "failed")]
 
     plan_set = set()
     for p in db_plans:
-        plan_set.add((p['char_id'], p['skill_index']))
+        plan_set.add((p["char_id"], p["skill_index"]))
 
     if not plan_set:
         return result

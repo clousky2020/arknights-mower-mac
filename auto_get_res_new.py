@@ -109,6 +109,7 @@ class Arknights数据处理器:
 
         if not os.path.exists("./ui/public/depot/EXP.webp"):
             png_image = Image.open("./ArknightsGameResource/item/EXP_PLAYER.png")
+            png_image = png_image.resize((96, 96), Image.LANCZOS)
             png_image.save("./ui/public/depot/EXP.webp", "WEBP")
         for 物品代码, 物品数据 in self.物品表["items"].items():
             中文名称 = 物品数据.get("name", "")
@@ -127,6 +128,7 @@ class Arknights数据处理器:
                     self.装仓库物品的字典[分类类型].append([目标文件路径, 源文件路径])
                     if not os.path.exists(目标文件路径):
                         png_image = Image.open(源文件路径)
+                        png_image = png_image.resize((96, 96), Image.LANCZOS)
                         png_image.save(目标文件路径, "WEBP")
                     templist = [物品代码, 图标代码, 中文名称, 分类类型, 排序代码]
                     self.物品_名称对[物品代码] = templist
@@ -154,6 +156,7 @@ class Arknights数据处理器:
             print(f"{干员名}: {干员代码}")
             try:
                 png_image = Image.open(干员头像路径)
+                png_image = png_image.resize((96, 96), Image.LANCZOS)
                 png_image.save(目标路径, "WEBP")
             except Exception as ex:
                 print("头像读取失败")
@@ -235,6 +238,12 @@ class Arknights数据处理器:
         )
         zoneToActivity = activity_table.get("zoneToActivity", {})
         activityBasicInfo = activity_table.get("basicInfo", {})
+        retro_act_names = {}
+        for _retro in self.加载json(
+            "./ArknightsGameResource/gamedata/excel/retro_table.json"
+        )["retroActList"].values():
+            for _act in _retro.get("linkedActId", []):
+                retro_act_names.setdefault(_act, _retro.get("name", ""))
 
         def _pick_text(*values):
             for value in values:
@@ -265,9 +274,12 @@ class Arknights数据处理器:
             if not activity_id:
                 return ""
             info = activityBasicInfo.get(activity_id, {})
-            return clean_zone_name(
-                _pick_text(info.get("name"), info.get("id"), activity_id)
-            )
+            name = _pick_text(info.get("name"), info.get("id"))
+            if not name:
+                name = story_review.get(activity_id, "")
+            if not name:
+                name = retro_act_names.get(activity_id, "")
+            return clean_zone_name(name or activity_id)
 
         for 键, _ in 还未结束的非常驻关卡.items():
             关卡代码 = self.关卡表["stages"][键]["code"]
@@ -534,15 +546,20 @@ class Arknights数据处理器:
 
             if 干员名 in recruit_list:
                 tag = 干员数据["tagList"]
-                # 数据中稀有度从0-5
-                干员数据["rarity"] = int(干员数据["rarity"].removeprefix("TIER_"))
+                # 兼容稀有度字段：旧版 0-5 数字，新版 "TIER_x" 字符串。
+                # 注意用局部变量，避免就地修改 self.干员表 导致后续 提取专精数据 二次 +1
+                rarity = 干员数据["rarity"]
+                if isinstance(rarity, str):
+                    rarity = int(rarity.removeprefix("TIER_"))
+                else:
+                    rarity = int(rarity) + 1
                 if len(干员名) <= 4:
                     recruit_result_data[len(干员名)].append(干员代码)
                 else:
                     recruit_result_data[-1].append(干员代码)
-                if 干员数据["rarity"] == 5:
+                if rarity == 5:
                     tag.append("资深干员")
-                elif 干员数据["rarity"] == 6:
+                elif rarity == 6:
                     tag.append("高级资深干员")
 
                 if 干员数据["position"] == "MELEE":
@@ -554,13 +571,11 @@ class Arknights数据处理器:
 
                 recruit_data[干员代码] = {
                     "name": 干员名,
-                    "stars": 干员数据["rarity"],
+                    "stars": rarity,
                     "tags": 干员数据["tagList"],
                 }
                 print(
-                    "{} stars：{} tags:{}".format(
-                        干员名, 干员数据["rarity"], 干员数据["tagList"]
-                    )
+                    "{} stars：{} tags:{}".format(干员名, rarity, 干员数据["tagList"])
                 )
         print("载入公招干员数据{}个".format(len(recruit_data)))
         with open("./arknights_mower/data/recruit.json", "w", encoding="utf-8") as f:
@@ -577,7 +592,7 @@ class Arknights数据处理器:
         with open("./arknights_mower/data/recruit.json", "r", encoding="utf-8") as f:
             recruit_operators = json.load(f)
 
-        font = ImageFont.truetype("FZDYSK.TTF", 120)
+        font = ImageFont.truetype("ArknightsGameResource/fonts/FZDYSK.TTF", 120)
         print(len(recruit_operators))
         for operator in recruit_operators:
             im = Image.new(mode="RGBA", size=(1920, 1080))
@@ -595,7 +610,7 @@ class Arknights数据处理器:
             recruit_agent = json.load(f)
 
         font = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 30
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 30
         )
         recruit_tag = ["资深干员", "高级资深干员"]
         recruit_tag_template = {}
@@ -667,7 +682,7 @@ class Arknights数据处理器:
 
     def 训练在房间内的干员名的模型(self):
         font = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 37
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 37
         )
 
         data = {}
@@ -704,20 +719,20 @@ class Arknights数据处理器:
 
     def 训练选中的干员名的模型(self):
         font31 = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 31
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 31
         )
         font30 = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 30
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 30
         )
         font25 = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 25
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 25
         )
         font23 = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 23
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 23
         )
 
         font27 = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 27
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 27
         )
 
         data = {}
@@ -791,17 +806,17 @@ class Arknights数据处理器:
 
     def 训练训练室干员名的模型(self):
         font30 = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 30
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 30
         )
         font28 = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 28
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 28
         )
         font25 = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 25
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 25
         )
 
         font24 = ImageFont.truetype(
-            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 24
+            "ArknightsGameResource/fonts/SourceHanSansCN-Medium.otf", 24
         )
 
         data = {}
@@ -851,6 +866,9 @@ class Arknights数据处理器:
     def auto_fight_avatar(self):
         avatar_mapping = {}  # char_285_medic2 -> Lancet-2
         for name, data in self.干员表.items():
+            # 跳过敌方陷阱（trap_），auto_fight 只识别玩家可部署的干员/召唤物
+            if name.startswith("trap_"):
+                continue
             avatar_mapping[name] = data["name"]
         avatar = {}  # Lancet-2 -> List[avatar image]
         avatar_path = "./ArknightsGameResource/avatar"
@@ -909,8 +927,12 @@ class Arknights数据处理器:
                         干员技能详情["skill_key"] = skill_key
                         干员技能详情["skill_level"] = skill_level
                         skill_level += 1
+                        # 兼容精英阶段字段：旧版 0/1/2 数字，新版 "PHASE_x" 字符串
+                        phase = item2["cond"]["phase"]
+                        if isinstance(phase, str):
+                            phase = phase.removeprefix("PHASE_")
                         干员技能详情["phase_level"] = (
-                            f"精{item2['cond']['phase'].removeprefix('PHASE_')} {item2['cond']['level']}级"
+                            f"精{phase} {item2['cond']['level']}级"
                         )
                         干员技能详情["skillname"] = buff_table[item2["buffId"]][0]
                         text = buff_table[item2["buffId"]][1]
@@ -996,9 +1018,14 @@ class Arknights数据处理器:
                 skipped += 1
                 continue
 
+            rarity = char_info["rarity"]
+            if isinstance(rarity, str):
+                rarity = int(rarity.removeprefix("TIER_"))
+            else:
+                rarity = int(rarity) + 1
             characters[char_id] = {
                 "name": char_info.get("name", char_id),
-                "rarity": int(str(char_info["rarity"]).removeprefix("TIER_")),
+                "rarity": rarity,
                 "profession": char_info.get("profession", ""),
                 "skills": skills,
             }
@@ -1007,12 +1034,15 @@ class Arknights数据处理器:
         items = {}
         for item_id, item_info in self.物品表.get("items", {}).items():
             if item_info.get("classifyType") == "MATERIAL":
+                item_rarity = item_info.get("rarity", 0)
+                if isinstance(item_rarity, str):
+                    item_rarity = int(item_rarity.removeprefix("TIER_"))
+                else:
+                    item_rarity = int(item_rarity) + 1
                 items[item_id] = {
                     "name": item_info.get("name", item_id),
                     "icon": item_info.get("iconId", ""),
-                    "rarity": int(
-                        item_info.get("rarity", "TIER_1").removeprefix("TIER_")
-                    ),
+                    "rarity": item_rarity,
                 }
 
         composite_path = (
