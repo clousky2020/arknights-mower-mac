@@ -296,6 +296,8 @@ class ReportSolver(SceneGraphSolver):
                 score.append(min_val)
             value = value * 10 + score.index(min(score))
         return value
+
+
 def get_report_data():
     record_path = get_path("@app/tmp/report.csv")
     try:

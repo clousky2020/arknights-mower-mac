@@ -156,7 +156,9 @@ const loading = ref(false)
 const test_screenshot = async () => {
   loading.value = true
   try {
-    const resp = await fetch(`${import.meta.env.VITE_HTTP_URL || 'http://localhost:8000'}/test-custom-screenshot`)
+    const resp = await fetch(
+      `${import.meta.env.VITE_HTTP_URL || 'http://localhost:8000'}/test-custom-screenshot`
+    )
     const data = await resp.json()
     image.value = data.screenshot
     elapsed.value = data.elapsed

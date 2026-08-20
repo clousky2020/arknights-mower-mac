@@ -42,7 +42,9 @@ class TestTouchFallback(unittest.TestCase):
         """touch_fallback=False 时，login 使用原有逻辑"""
         solver = BaseSolver()
         solver.device = MagicMock()
-        solver.device.is_avd_like = False  # 非 AVD 模式（touch_fallback=False 且未自动检测到 AVD）
+        solver.device.is_avd_like = (
+            False  # 非 AVD 模式（touch_fallback=False 且未自动检测到 AVD）
+        )
         solver.recog = MagicMock()
         solver.scene = MagicMock(return_value=Scene.LOGIN_START)
         # 第一次 False 进入循环，第二次 True 使 while 退出，避免死循环

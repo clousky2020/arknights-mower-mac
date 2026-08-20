@@ -19,11 +19,15 @@ import shutil
 import subprocess
 import sys
 
-from arknights_mower.utils.path import get_path  # noqa: F401  (仅用于参考，路径直接基于仓库根)
+from arknights_mower.utils.path import (
+    get_path,  # noqa: F401  (仅用于参考，路径直接基于仓库根)
+)
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 MAA_REPO = os.path.expanduser("~/software_project/MaaResource")
-KEY_MAPPING_PATH = os.path.join(REPO_ROOT, "arknights_mower", "data", "key_mapping.json")
+KEY_MAPPING_PATH = os.path.join(
+    REPO_ROOT, "arknights_mower", "data", "key_mapping.json"
+)
 UI_DEPOT_PATH = os.path.join(REPO_ROOT, "ui", "public", "depot")
 MAA_ITEM_INDEX = os.path.join(MAA_REPO, "resource", "item_index.json")
 MAA_ITEMS_DIR = os.path.join(MAA_REPO, "resource", "template", "items")
@@ -67,9 +71,7 @@ def merge_key_mapping():
     with open(MAA_ITEM_INDEX, encoding="utf-8") as f:
         item_index = json.load(f)
 
-    known_ids = {
-        v[0] for v in key_mapping.values() if isinstance(v, list)
-    }
+    known_ids = {v[0] for v in key_mapping.values() if isinstance(v, list)}
     new_ids = []
     for item_id, info in item_index.items():
         if item_id in known_ids:

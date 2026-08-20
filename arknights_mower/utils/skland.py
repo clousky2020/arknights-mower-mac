@@ -172,7 +172,11 @@ def restore_cached_session(account: str) -> dict | None:
         return None
     # 缓存超过 30 分钟则视为过期，强制走完整登录刷新
     updated = session.get("updated_at")
-    if updated and (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds() > 1800:
+    if (
+        updated
+        and (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds()
+        > 1800
+    ):
         skland_cache.pop(account, None)
         return None
     return session

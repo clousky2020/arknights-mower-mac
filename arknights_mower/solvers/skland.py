@@ -257,7 +257,7 @@ class SKLand:
             return False
         except PermissionError:
             logger.info("skland.csv正在被占用")
-        except EmptyDataError:
+        except pd.errors.EmptyDataError:
             return False
 
     # 用于测试连接

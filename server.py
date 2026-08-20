@@ -9,6 +9,7 @@ from functools import wraps
 from io import BytesIO
 from threading import RLock, Thread
 
+import pandas as pd
 import pytz
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
@@ -21,7 +22,7 @@ from arknights_mower import __system__
 from arknights_mower.solvers.record import clear_data, load_state, save_state
 from arknights_mower.solvers.report import read_csv_with_encoding_fallback
 from arknights_mower.utils import config
-from arknights_mower.utils.csv_utils import parse_cell_num, read_dicts
+from arknights_mower.utils.csv_utils import parse_cell_num
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.maa_check import (

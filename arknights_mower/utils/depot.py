@@ -2,10 +2,10 @@ import json
 import os
 from datetime import datetime
 
-from arknights_mower.utils.log import logger
 from arknights_mower.data import key_mapping, workshop_formula
 from arknights_mower.solvers.record import save_inventory_counts
 from arknights_mower.utils.csv_utils import read_csv_rows
+from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
 
 

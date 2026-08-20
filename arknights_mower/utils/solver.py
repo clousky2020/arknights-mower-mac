@@ -638,9 +638,7 @@ class BaseSolver:
                 # 避免 AVD 横竖屏方向下 input tap 物理坐标错位的问题
                 self.device.force_input_tap = False
             except Exception as e:
-                logger.error(
-                    f"scrcpy-server 重新初始化失败，停止执行: {e}"
-                )
+                logger.error(f"scrcpy-server 重新初始化失败，停止执行: {e}")
                 raise StrategyError("scrcpy-server 重新初始化失败") from e
 
     def _avd_sleep(self, seconds: float = 3) -> None:

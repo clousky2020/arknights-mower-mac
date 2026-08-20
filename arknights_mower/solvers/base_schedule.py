@@ -1463,6 +1463,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             get_in_progress_plan,
             insert_plan,
         )
+
         plan = get_in_progress_plan()
         if not plan:
             return

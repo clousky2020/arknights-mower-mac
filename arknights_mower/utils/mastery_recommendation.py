@@ -280,8 +280,11 @@ def get_mastery_recommendations():
 
 
 def compute_workshop_config(
-    fodder_operators=None, t5_operators=None, book_operators=None,
-    planned_skills=None, keep_operators=None,
+    fodder_operators=None,
+    t5_operators=None,
+    book_operators=None,
+    planned_skills=None,
+    keep_operators=None,
 ):
     """根据当前专精计划和仓库库存，计算合成配置（与前端自动合成配置逻辑一致）"""
     if fodder_operators is None:
@@ -293,7 +296,6 @@ def compute_workshop_config(
     from collections import defaultdict
 
     from arknights_mower.data import workshop_formula
-    from arknights_mower.utils.mastery_db import get_all_plans
 
     planned_keys = []
     if planned_skills is not None:
@@ -305,9 +307,7 @@ def compute_workshop_config(
             from arknights_mower.utils.mastery_db import get_pending_only
 
             db_plans = get_pending_only()
-            planned_keys = [
-                f"{p['char_id']}_{p['skill_index']}" for p in db_plans
-            ]
+            planned_keys = [f"{p['char_id']}_{p['skill_index']}" for p in db_plans]
         except Exception:
             pass
         # 最后回退到文件（旧版兼容，安全迁移）
