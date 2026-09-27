@@ -32,9 +32,10 @@ class cultivate:
         item = config.conf.skland_info[0]
 
         # Reuse existing credential if already available (e.g. from a previous call)
-        if header["cred"]:
+        account = getattr(item, "account", "") or ""
+        if header["cred"] and account:
             # 复用凭据时从缓存恢复 sign_token（新实例默认值为空字符串）
-            cached = skland_cache.get(item.account)
+            cached = skland_cache.get(account)
             if cached:
                 self.sign_token = cached["sign_token"]
             logger.debug("cultivate: reusing existing credential")
@@ -42,11 +43,12 @@ class cultivate:
             cred_resp = get_cred_by_token(log(item))
             self.save_param(cred_resp)
             # Share credential so PlayerInfoClient can reuse via skland_cache
-            skland_cache[item.account] = {
-                "cred": cred_resp["cred"],
-                "sign_token": cred_resp["token"],
-                "updated_at": datetime.datetime.now(datetime.timezone.utc),
-            }
+            if account:
+                skland_cache[account] = {
+                    "cred": cred_resp["cred"],
+                    "sign_token": cred_resp["token"],
+                    "updated_at": datetime.datetime.now(datetime.timezone.utc),
+                }
 
         for i in get_binding_list(self.sign_token):
             if i.get("gameId") == 1 and item.cultivate_select == i.get("isOfficial"):

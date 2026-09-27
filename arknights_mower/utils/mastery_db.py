@@ -820,6 +820,8 @@ def get_all_routes(path: Optional[str] = None) -> list[dict]:
     except Exception as e:
         logger.error(f"get_all_routes failed: {e}")
         return []
+
+
 def cancel_pending_plan(char_id: str, skill_index: int) -> bool:
     """Delete all pending plan rows for a character skill pair."""
     try:

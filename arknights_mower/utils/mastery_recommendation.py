@@ -644,7 +644,7 @@ def compute_workshop_config(
                 {
                     "item_names": [name],
                     "children_lower_limit": 0,
-                    "self_upper_limit": max(0, demand - inv_of(name)),
+                    "self_upper_limit": demand,
                 }
             )
 
@@ -655,7 +655,7 @@ def compute_workshop_config(
                 {
                     "item_names": [name],
                     "children_lower_limit": 0,
-                    "self_upper_limit": max(0, demand - inv_of(name)),
+                    "self_upper_limit": demand,
                 }
             )
 
@@ -665,7 +665,7 @@ def compute_workshop_config(
             {
                 "item_names": ["技巧概要·卷3"],
                 "children_lower_limit": 0,
-                "self_upper_limit": max(0, book_count - inv_of("技巧概要·卷3")),
+                "self_upper_limit": book_count,
             }
         ]
         if book_count > 0
