@@ -13,6 +13,7 @@ from arknights_mower.utils.skland import (
     header,
     log,
     request_with_retry,
+    restore_cached_session,
     skland_cache,
 )
 from arknights_mower.utils.workshop_data import parse_roster
@@ -31,15 +32,19 @@ class cultivate:
         updated = False
         item = config.conf.skland_info[0]
 
-        # Reuse existing credential if already available (e.g. from a previous call)
+        # 凭据必须成对取用：sign_token 与 header["cred"] 恒来自同一账号。
+        # `header` 是全程序共用的（见 utils/skland.py），先点「测试设置」会把它刷成
+        # 最后那个账号的 cred；若此处只补 sign_token 而不换 cred，就会出现「按第一个
+        # 账号取数、却带着另一个账号的身份」，森空岛按 cred 认人，于是返回了另一个
+        # 账号的数据并被原样写入 cultivate.json。参照 player_info._ensure_session。
         account = getattr(item, "account", "") or ""
-        if header["cred"] and account:
-            # 复用凭据时从缓存恢复 sign_token（新实例默认值为空字符串）
-            cached = skland_cache.get(account)
-            if cached:
-                self.sign_token = cached["sign_token"]
-            logger.debug("cultivate: reusing existing credential")
+        session = restore_cached_session(account) if account else None
+        if session:
+            self.sign_token = session["sign_token"]
+            header["cred"] = session["cred"]
+            logger.debug("cultivate: reusing cached session of %s", account)
         else:
+            # 缓存缺失/过期时走真正的重新登录，避免用空 sign_token 或旧 cred 发起请求
             cred_resp = get_cred_by_token(log(item))
             self.save_param(cred_resp)
             # Share credential so PlayerInfoClient can reuse via skland_cache
@@ -93,6 +98,9 @@ class cultivate:
                         cloud_at=timestamp,
                     )
                 updated = True
+                # 只取第一个匹配的绑定：否则同账号下多个绑定会逐个请求并反复覆写
+                # cultivate.json，最终留下数组里最后那个的数据，且写盘次数不可控。
+                break
         return updated
 
     def save_param(self, cred_resp):
