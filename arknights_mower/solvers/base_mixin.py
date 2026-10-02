@@ -82,7 +82,9 @@ def agent_card_selected(img, scope, *, train=False):
     # 卡片右侧阴影使蓝框亮度降到约 140，仍须满足色相和饱和度条件。
     blue = cv2.inRange(frame, (96, 140, 160 if train else 140), (105, 255, 255)) > 0
     # 略过角落；完整边框用上下沿及任一侧确认。
-    upper = blue[:8, 8:-8].mean()
+    # 未选中卡片的右上角徽章是青蓝色圆角矩形，只污染条带右半；
+    # 上沿只测左侧约 56%（徽章起点约在窗口宽 60% 处），排除徽章像素。
+    upper = blue[:8, 8 : int((blue.shape[1] - 8) * 0.56)].mean()
     lower = blue[-8:, 8:-8].mean()
     left_side = blue[8:-8, :8].mean()
     right_side = blue[8:-8, -8:].mean()
