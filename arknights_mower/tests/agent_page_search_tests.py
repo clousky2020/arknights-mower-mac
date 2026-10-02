@@ -304,3 +304,52 @@ def test_name_cache_does_not_survive_a_new_wait(monkeypatch):
     BaseMixin.agent_page_reader()(img)
     BaseMixin.agent_page_reader()(img)
     assert matcher.call_count == 2
+
+
+@pytest.mark.parametrize("train", [False, True])
+def test_empty_match_is_never_reused_while_the_name_area_is_unchanged(
+    monkeypatch, train
+):
+    """整页识别失败只是瞬时状态，不能把空结果缓存成持续的空白。
+
+    过渡动画期间模板匹配可能读不到任何姓名。若该空结果被记入缓存，
+    则名字区域像素未变化时会一直复用空名单，直到选人重试耗尽并放弃房间。
+    """
+    matcher = MagicMock(side_effect=[(), page(), page()])
+    monkeypatch.setattr(base_mixin, "operator_list", matcher)
+    monkeypatch.setattr(base_mixin, "operator_list_train", matcher)
+    read = BaseMixin.agent_page_reader(train=train)
+    img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    assert read(img) == ()
+    # 画面静止但空结果不得复用：必须重新识别，直到读回可用名单。
+    assert read(img.copy()) == page()
+    assert matcher.call_count == 2
+
+
+def test_empty_match_cannot_pin_waiting_for_arranged_agents(monkeypatch):
+    """空名单不得让 wait_for_arranged_agents 反复等到重试耗尽。
+
+    首帧名字区域与后续帧不同，使读取必然重新识别；若空结果被缓存复用，
+    名单将永远停在空白并最终抛出 AgentSelectionNotReady。
+    """
+    names = ("芬", "安比尔", "杜林", "克洛丝", "炎熔", "安赛尔")
+    blank = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    steady = blank.copy()
+    steady[490, 700] = 255
+    frames = [blank] + [steady] * 23
+    matcher = MagicMock(side_effect=[()] + [page(names)] * 30)
+    monkeypatch.setattr(base_mixin, "operator_list", matcher)
+    snapshots = iter(frames)
+    solver = BaseMixin()
+    solver.recog = SimpleNamespace(img=next(snapshots))
+    solver.recog.update = MagicMock(
+        side_effect=lambda: setattr(solver.recog, "img", next(snapshots))
+    )
+    solver.sleep = MagicMock()
+    solver.find = MagicMock(return_value=False)
+    monkeypatch.setattr(
+        base_mixin, "agent_card_selected", lambda img, scope, train=False: True
+    )
+    assert solver.wait_for_arranged_agents(list(names)) == list(names)
+    # 空结果失效后必须重新识别，而不是把空白名单一路复用到重试耗尽。
+    assert matcher.call_count >= 2

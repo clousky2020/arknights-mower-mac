@@ -455,7 +455,11 @@ class BaseMixin:
     def agent_page_reader(
         *, full_scan=True, train=False, seed_image=None, seed_page=None
     ):
-        """名字区域未变化时复用已确认页面的姓名匹配结果。"""
+        """名字区域未变化时复用已确认页面的姓名匹配结果。
+
+        仅缓存非空名单：过渡动画期间的空识别只是瞬时状态，若被记入缓存，
+        名字区域像素未变化时会一直复用空白名单，直到选人重试耗尽并放弃房间。
+        """
 
         def name_key(img):
             if isinstance(img, np.ndarray):
@@ -466,13 +470,19 @@ class BaseMixin:
                 return tuple(img[y1:y2, left:right].tobytes() for y1, y2 in rows)
             return None
 
-        previous_key = name_key(seed_image) if seed_page is not None else None
+        previous_key = name_key(seed_image) if seed_page else None
         previous_ret = seed_page
+
+        def usable(result):
+            """识别器契约返回姓名元组；空元组与异常返回都视为不可用。"""
+            if not isinstance(result, tuple):
+                return False
+            return len(result) > 0
 
         def read(img):
             nonlocal previous_key, previous_ret
             key = name_key(img)
-            if key is not None and key == previous_key:
+            if usable(previous_ret) and key is not None and key == previous_key:
                 logger.debug("选人名字区域未变化，复用已确认的识别结果")
                 return previous_ret
             started = perf_counter()
@@ -484,7 +494,11 @@ class BaseMixin:
             logger.debug(
                 f"选人模板匹配耗时：{(perf_counter() - started) * 1000:.0f} ms"
             )
-            previous_key, previous_ret = key, ret
+            if usable(ret):
+                previous_key, previous_ret = key, ret
+            else:
+                # 空结果立即失效，下一次读取必须重新识别。
+                previous_key, previous_ret = None, None
             return ret
 
         return read
