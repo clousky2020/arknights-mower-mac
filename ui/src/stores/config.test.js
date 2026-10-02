@@ -3,9 +3,9 @@ import { createApp, nextTick, ref } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import axios from 'axios'
 import { useConfigStore } from './config'
-import { performanceProfile } from '@/utils/performanceProfile'
+import { performanceProfile } from '../utils/performanceProfile'
 
-vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn() } }))
+vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn(), patch: vi.fn() } }))
 let pinia
 let store
 afterEach(() => {
@@ -26,19 +26,20 @@ describe('workshop config autosave', () => {
     expect(store.workshop_protect_t2_device_rock).toBe(false)
     const manual = [{ operator: '空爆', items: [{ item_names: ['固源岩组', '异铁组'] }] }]
     store.workshop_manual_settings = manual
-    axios.post.mockResolvedValue({ data: {} })
+    axios.patch.mockResolvedValue({ data: {} })
     loaded.value = true
-    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1))
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch).not.toHaveBeenCalled()
     store.workshop_protect_t2_device_rock = true
-    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(2))
-    expect(axios.post.mock.calls[1][1]).toMatchObject({
-      workshop_protect_t2_device_rock: true,
-      workshop_manual_settings: manual
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(1))
+    expect(axios.patch.mock.calls[0][1]).toMatchObject({
+      workshop_protect_t2_device_rock: true
     })
     loaded.value = false
   })
 
-  it('saves stable crafter recovery priority without changing workshop selections', async () => {
+  it('omits retired dorm controls while saving workshop selections', async () => {
     pinia = createPinia()
     setActivePinia(pinia)
     const loaded = ref(false)
@@ -47,18 +48,20 @@ describe('workshop config autosave', () => {
     app.provide('loaded', loaded)
     store = app.runWithContext(() => useConfigStore())
     for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
-    expect(store.experimental_dorm_logic).toBe(false)
-    expect(store.workshop_low_priority_rest).toBe(true)
+    expect(store).not.toHaveProperty('experimental_dorm_logic')
+    expect(store).not.toHaveProperty('workshop_low_priority_rest')
+    expect(store).not.toHaveProperty('dorm_order')
+    expect(store).not.toHaveProperty('refresh_backup_plan_after_mood')
     store.fodder_operators = ['空爆']
-    axios.post.mockResolvedValue({ data: {} })
+    axios.patch.mockResolvedValue({ data: {} })
     loaded.value = true
-    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1))
-    store.workshop_low_priority_rest = false
-    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(2))
-    expect(axios.post.mock.calls[1][1]).toMatchObject({
-      experimental_dorm_logic: false,
-      workshop_low_priority_rest: false,
-      fodder_operators: ['空爆']
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch).not.toHaveBeenCalled()
+    store.fodder_operators = ['红']
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(1))
+    expect(axios.patch.mock.calls[0][1]).toMatchObject({
+      fodder_operators: ['红']
     })
     loaded.value = false
   })
@@ -74,7 +77,7 @@ describe('workshop config autosave', () => {
     for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
     store.workshop_settings = [{ operator: '赫拉格', source: 'mastery' }]
     const replies = []
-    axios.post.mockImplementation(
+    axios.patch.mockImplementation(
       (url, sent) =>
         new Promise((resolve) => {
           replies.push(() =>
@@ -91,18 +94,24 @@ describe('workshop config autosave', () => {
     )
     loaded.value = true
     await nextTick()
-    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1))
+    await store.flush_config_saves()
+    expect(axios.patch).not.toHaveBeenCalled()
     store.workshop_manual_settings.push({ operator: '空爆', items: [] })
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(1))
+    store.workshop_manual_settings.push({ operator: '月见夜', items: [] })
     await nextTick()
     replies.shift()()
-    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(2))
-    const sent = axios.post.mock.calls[1][1]
-    expect(sent.workshop_manual_settings).toEqual([{ operator: '空爆', items: [] }])
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(2))
+    const sent = axios.patch.mock.calls[1][1]
+    expect(sent.workshop_manual_settings).toEqual([
+      { operator: '空爆', items: [] },
+      { operator: '月见夜', items: [] }
+    ])
     expect(sent.workshop_manual_settings_revision).toBe(1)
     expect(sent).not.toHaveProperty('workshop_settings')
     expect(sent).not.toHaveProperty('workshop_manual_backup')
     loaded.value = false
-    axios.post.mockResolvedValue({ data: {} })
+    axios.patch.mockResolvedValue({ data: {} })
     replies.shift()()
   })
 })
@@ -247,7 +256,6 @@ describe('low frame rate adaptation', () => {
       expect(payload.run_order_grandet_mode.buffer_time).toBe(41)
     }
   })
-
   it.each([
     ['android', undefined, true],
     ['android', false, false],
@@ -278,23 +286,25 @@ describe('low frame rate adaptation', () => {
       maa_weekly_plan: []
     }
     axios.get.mockResolvedValue({ data: response })
-    axios.post.mockResolvedValue({ data: {} })
+    axios.patch.mockResolvedValue({ data: {} })
     await store.load_config()
     expect(store.low_frame_rate_mode).toBe(expected)
     const initialMode = store.performance_mode
+    expect(initialMode).toBe('auto')
     expect(store.build_config().low_frame_rate_mode).toBe(
       performanceProfile(initialMode, platform).lowFrameRateMode
     )
     loaded.value = true
     await nextTick()
-    await vi.waitFor(() => expect(axios.post).toHaveBeenCalled())
+    await store.flush_config_saves()
+    expect(axios.patch).not.toHaveBeenCalled()
     store.performance_mode = platform === 'android' ? 'low' : 'medium'
-    await nextTick()
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(1))
     const savedValue = performanceProfile(store.performance_mode, platform).lowFrameRateMode
-    await vi.waitFor(() => expect(axios.post.mock.lastCall[1].low_frame_rate_mode).toBe(savedValue))
+    expect(store.build_config().low_frame_rate_mode).toBe(savedValue)
     loaded.value = false
     response.performance_mode = store.performance_mode
-    response.low_frame_rate_mode = axios.post.mock.lastCall[1].low_frame_rate_mode
+    response.low_frame_rate_mode = store.build_config().low_frame_rate_mode
     await store.load_config()
     expect(store.low_frame_rate_mode).toBe(savedValue)
   })

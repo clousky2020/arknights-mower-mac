@@ -176,7 +176,7 @@ def test_product_mapping_overrides_current_slots_and_restores_default():
 
 
 def test_shift_projection_sees_hongxue_leaving_before_changing_real_staff():
-    conf = PlanConfig("", "", "", experimental_dorm_logic=True)
+    conf = PlanConfig("", "", "")
     plan = {
         "default_plan": Plan(
             {
@@ -225,7 +225,7 @@ def test_adjusted_manufacture_timer_reads_real_screenshot():
 
 def test_manufacture_survey_uses_operator_speed_with_base_countdown():
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver._open_manufacture_product_detail = MagicMock()
     solver.read_manufacture_product = MagicMock(return_value="gold")
     solver._cache_facility_state = MagicMock()
@@ -247,10 +247,9 @@ def test_manufacture_survey_uses_operator_speed_with_base_countdown():
 @pytest.mark.parametrize("source", ["orirock", "orirock_device"])
 def test_grandet_can_wait_for_orirock_without_using_drones(monkeypatch, source):
     monkeypatch.setattr(config, "conf", config.Conf())
-    config.conf.experimental_dorm_logic = True
     config.conf.product_switching.use_drones_when_leaving_orirock = False
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver._open_manufacture_product_detail = MagicMock()
     solver.read_manufacture_product = MagicMock(return_value=source)
     solver._cache_facility_state = MagicMock()
@@ -304,8 +303,7 @@ def test_shift_product_switch_invalidates_old_order_estimate():
     assert solver.tasks[0].meta_data == "room_2_2"
 
 
-@pytest.mark.parametrize("experimental", [False, True])
-def test_infra_main_switches_before_shift_off_arrangement(experimental):
+def test_infra_main_switches_before_shift_off_arrangement():
     solver = object.__new__(base.BaseSchedulerSolver)
     task = SchedulerTask(
         time=datetime.now() - timedelta(seconds=1),
@@ -314,16 +312,16 @@ def test_infra_main_switches_before_shift_off_arrangement(experimental):
     )
     solver.task = task
     solver.tasks = [task]
-    solver.op_data = SimpleNamespace(
-        experimental_dorm_logic=experimental, run_order_rooms={}
-    )
+    solver.op_data = SimpleNamespace(run_order_rooms={})
     solver.find = MagicMock(return_value=(1, 1))
     solver.refresh_connecting = False
+    solver._prepare_shift_cycle = MagicMock()
     solver._switch_products_before_arrangement = MagicMock()
     solver.agent_arrange = MagicMock(return_value=True)
     solver.backup_plan_solver = MagicMock(return_value=False)
     solver.plan_metadata = MagicMock()
     sequence = MagicMock()
+    sequence.attach_mock(solver._prepare_shift_cycle, "prepare")
     sequence.attach_mock(solver._switch_products_before_arrangement, "switch")
     sequence.attach_mock(solver.agent_arrange, "arrange")
 
@@ -331,13 +329,13 @@ def test_infra_main_switches_before_shift_off_arrangement(experimental):
         solver.infra_main()
 
     assert [call[0] for call in sequence.mock_calls] == (
-        ["switch", "arrange"] if experimental else ["arrange"]
+        ["prepare", "switch", "arrange"]
     )
 
 
 def test_infra_main_keeps_shift_off_pending_when_product_switch_waits():
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     task = SchedulerTask(
         time=datetime.now() - timedelta(seconds=1),
         task_plan={"room_1_1": ["Free"]},
@@ -347,6 +345,7 @@ def test_infra_main_keeps_shift_off_pending_when_product_switch_waits():
     solver.tasks = [task]
     solver.find = MagicMock(return_value=(1, 1))
     solver.refresh_connecting = False
+    solver._prepare_shift_cycle = MagicMock()
     solver._switch_products_before_arrangement = MagicMock(
         side_effect=base.ProductSwitchDeferred("无人机不足", minutes=7)
     )
@@ -614,7 +613,7 @@ def test_manufacture_product_change_handles_both_confirms_and_fills_queue():
     )
 
 
-def test_experimental_product_change_waits_on_second_confirmation():
+def test_unified_product_change_waits_on_second_confirmation():
     solver = object.__new__(base.BaseSchedulerSolver)
     solver.find = MagicMock(return_value=(1, 1))
     solver._tap_product_point = MagicMock()
@@ -647,11 +646,11 @@ def test_experimental_product_change_waits_on_second_confirmation():
     )
 
 
-def test_experimental_product_change_uses_speed_and_configured_buffer(monkeypatch):
+def test_unified_product_change_uses_speed_and_configured_buffer(monkeypatch):
     monkeypatch.setattr(config, "conf", config.Conf())
     config.conf.product_switching.waiting_seconds = 4
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver._open_manufacture_product_detail = MagicMock()
     solver.read_manufacture_product = MagicMock(side_effect=["gold", "exp3"])
     solver._cache_facility_state = MagicMock()
@@ -676,25 +675,92 @@ def test_experimental_product_change_uses_speed_and_configured_buffer(monkeypatc
     assert 93 <= (confirm_after - datetime.now()).total_seconds() <= 94
     solver._tap_product_point.assert_called_once_with((480, 864))
 
-    solver.op_data.experimental_dorm_logic = False
-    solver.read_manufacture_product.side_effect = ["gold", "exp3"]
-    solver._read_manufacture_speed.reset_mock()
-    solver._select_manufacture_product.reset_mock()
-    solver._change_manufacture_product(observation)
-    solver._read_manufacture_speed.assert_not_called()
-    solver._select_manufacture_product.assert_called_once_with(
-        "exp3", confirm_after=None
+
+@pytest.mark.parametrize(
+    "current_product, target_product, current_remaining, drones, elapsed_seconds",
+    [
+        ("gold", "exp3", 150, 1, 0),
+        ("gold", "exp3", 3605, 20, 10),
+        ("exp3", "gold", 9900, 55, 0),
+    ],
+)
+def test_accelerated_unit_rollover_does_not_defer_next_product(
+    monkeypatch,
+    current_product,
+    target_product,
+    current_remaining,
+    drones,
+    elapsed_seconds,
+):
+    monkeypatch.setattr(config, "conf", config.Conf())
+    total_seconds = 5000 + current_remaining
+    solver = acceleration_solver(available_drones=100, current_total=total_seconds)
+    solver.op_data = SimpleNamespace()
+    solver.read_manufacture_product.side_effect = [
+        current_product,
+        current_product,
+        target_product,
+    ]
+    solver._cache_facility_state = MagicMock()
+    solver._read_manufacture_speed = MagicMock(return_value=2.0)
+    solver._select_manufacture_product = MagicMock()
+    solver.recog.update = MagicMock()
+    observation = {
+        "room": "room_1_2",
+        "current_product": current_product,
+        "target_product": target_product,
+        "total_seconds": total_seconds,
+        "current_remaining": current_remaining,
+        "drone_count": drones,
+        "production_rate": 2.0,
+    }
+
+    solver._execute_manufacture_acceleration(observation)
+    solver._confirm_drone_count.assert_called_once_with(drones)
+    observation["accelerated_at"] -= timedelta(seconds=elapsed_seconds)
+    # The panel includes a full new unit after the accelerated unit ends.
+    solver._read_manufacture_total_seconds.return_value = (
+        total_seconds
+        - current_remaining
+        + MANUFACTURE_PRODUCTS[current_product].unit_seconds
     )
 
+    solver._change_manufacture_product(observation)
 
-def test_drone_cap_and_direct_switch_only_apply_to_experimental_dorm(monkeypatch):
+    solver._select_manufacture_product.assert_called_once()
+    assert solver._select_manufacture_product.call_args.args == (target_product,)
+    assert solver._read_manufacture_total_seconds.call_count == 1
+
+
+def test_accelerated_unit_with_remaining_work_still_defers(monkeypatch):
+    monkeypatch.setattr(config, "conf", config.Conf())
+    solver = acceleration_solver(available_drones=100, current_total=5000)
+    solver.op_data = SimpleNamespace()
+    solver._cache_facility_state = MagicMock()
+    solver._read_manufacture_speed = MagicMock(return_value=2.0)
+    solver._select_manufacture_product = MagicMock()
+    observation = {
+        "room": "room_1_2",
+        "current_product": "gold",
+        "target_product": "exp3",
+        "production_rate": 2.0,
+        "total_seconds": 5000,
+        "current_remaining": 600,
+        "remaining_after_acceleration": 600,
+        "accelerated_at": datetime.now(),
+    }
+
+    with pytest.raises(base.ProductSwitchDeferred):
+        solver._change_manufacture_product(observation)
+
+    solver._select_manufacture_product.assert_not_called()
+
+
+def test_drone_cap_applies_to_product_switch(monkeypatch):
     monkeypatch.setattr(config, "conf", config.Conf())
     config.conf.product_switching.max_drones_per_switch = 3
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=False)
-    assert solver._product_switch_drone_plan(2160, 4320, 30)[0] == 12
-
-    solver.op_data.experimental_dorm_logic = True
+    solver.op_data = SimpleNamespace()
     assert solver._product_switch_drone_plan(2160, 4320, 30) == (3, 1620)
 
 
@@ -702,11 +768,8 @@ def test_independent_backup_keeps_old_table_until_product_switch_succeeds(
     monkeypatch,
 ):
     monkeypatch.setattr(config, "conf", config.Conf())
-    config.conf.experimental_dorm_logic = True
     room, plan = product_plan()
     plan["default_plan"].plan[room] = [Room("陈", "", ["红"], "制造站", "gold")]
-    for item in [plan["default_plan"], *plan["backup_plans"]]:
-        item.config.experimental_dorm_logic = True
     plan["backup_plans"][0].trigger = LogicExpression("True", "==", "True")
     solver = object.__new__(base.BaseSchedulerSolver)
     solver.op_data = Operators(plan)
@@ -741,8 +804,6 @@ def test_unverified_independent_product_switch_schedules_retry(monkeypatch):
     monkeypatch.setattr(config, "conf", config.Conf())
     room, plan = product_plan()
     plan["default_plan"].plan[room] = [Room("陈", "", ["红"], "制造站", "gold")]
-    for item in [plan["default_plan"], *plan["backup_plans"]]:
-        item.config.experimental_dorm_logic = True
     plan["backup_plans"][0].trigger = LogicExpression("True", "==", "True")
     solver = object.__new__(base.BaseSchedulerSolver)
     solver.op_data = Operators(plan)
@@ -758,27 +819,9 @@ def test_unverified_independent_product_switch_schedules_retry(monkeypatch):
     )
 
 
-def test_disabling_experimental_dorm_clears_pending_backup_product_task():
-    room, plan = product_plan()
-    solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = Operators(plan)
-    pending = SchedulerTask(
-        task_type=TaskTypes.SWITCH_PRODUCT,
-        meta_data=product_task_meta(room, "exp3"),
-    )
-    pending.pending_backup_product_switch = True
-    pending.pending_product_targets = {room: "exp3"}
-    solver.tasks = [pending]
-
-    solver.queue_product_switches()
-
-    assert all(task is not pending for task in solver.tasks)
-
-
 def test_deferred_product_shift_keeps_related_bed_and_splits_other_room():
     solver = object.__new__(base.BaseSchedulerSolver)
     solver.op_data = SimpleNamespace(
-        experimental_dorm_logic=True,
         products={"room_1_2": "gold"},
         backup_plans=[],
         facility_states={"room_1_2": {"product": "gold"}},
@@ -831,8 +874,8 @@ def test_deferred_product_shift_keeps_related_bed_and_splits_other_room():
 
 
 def test_reserved_product_bed_accepts_only_temporary_low_priority(monkeypatch):
-    operators = object.__new__(Operators)
-    operators.config = SimpleNamespace(experimental_dorm_logic=True)
+    operators = Operators(product_plan()[1])
+    operators.config = SimpleNamespace()
     operators.is_effective_free_slot = MagicMock(return_value=True)
     operators.reserved_product_beds = {("dormitory_1", 0): "鸿雪"}
     operators.operators = {}
@@ -848,16 +891,16 @@ def test_reserved_product_bed_accepts_only_temporary_low_priority(monkeypatch):
     )
     bed = SimpleNamespace(position=("dormitory_1", 0), name="")
 
-    assert operators._slot_takable(bed, True, requester="鸿雪")
-    assert not operators._slot_takable(bed, True, requester="陈")
-    assert not operators._slot_takable(bed, True, requester="红")
-    assert operators._slot_takable(bed, True, requester="Lancet-2")
-    assert operators._slot_takable(bed, True, requester="城墙")
+    assert operators._slot_takable(bed, requester="鸿雪")
+    assert not operators._slot_takable(bed, requester="陈")
+    assert not operators._slot_takable(bed, requester="红")
+    assert operators._slot_takable(bed, requester="Lancet-2")
+    assert operators._slot_takable(bed, requester="城墙")
     bed.name = "Lancet-2"
     operators.operators["Lancet-2"] = SimpleNamespace(
         current_room="dormitory_1", current_index=0
     )
-    assert operators._slot_takable(bed, True, requester="鸿雪")
+    assert operators._slot_takable(bed, requester="鸿雪")
 
 
 def test_deferred_shift_blocks_shared_replacement_and_releases_reservation():
@@ -876,7 +919,6 @@ def test_deferred_shift_blocks_shared_replacement_and_releases_reservation():
     )
     solver.tasks = [locked, other]
     solver.op_data = SimpleNamespace(
-        experimental_dorm_logic=True,
         operators={"鸿雪": object(), "红": object(), "陈": object()},
         get_current_operator=lambda room, index: (
             SimpleNamespace(name="鸿雪") if room == "room_1_1" else None
@@ -958,6 +1000,70 @@ def test_read_manufacture_product_distinguishes_orundum_material(
 
     assert solver.read_manufacture_product() == expected
     assert solver._product_ocr_text.call_count == 2
+
+
+def reload_test_solver(op_data):
+    solver = object.__new__(base.BaseSchedulerSolver)
+    solver.op_data = op_data
+    solver.enter_room = MagicMock()
+    solver._wait_drone_interface = MagicMock()
+    solver.read_manufacture_product = MagicMock()
+    solver.scene_graph_navigation = MagicMock()
+    solver.tap = MagicMock()
+    solver.scene = MagicMock(return_value=base.Scene.INFRA_MAIN)
+    solver.waiting_scene = []
+    solver.recog = SimpleNamespace(w=1920, h=1080)
+    solver.reload_time = None
+    return solver
+
+
+def test_reload_uses_both_shard_labels_and_skips_other_products():
+    solver = reload_test_solver(
+        SimpleNamespace(
+            products={
+                "room_1_1": "gold",
+                "room_1_2": "orirock",
+                "room_1_3": "orirock_device",
+                "room_2_1": "orundum",
+            }
+        )
+    )
+
+    solver.reload()
+
+    assert [call.args[0] for call in solver.enter_room.call_args_list] == [
+        "room_1_2",
+        "room_1_3",
+    ]
+    solver.read_manufacture_product.assert_not_called()
+    assert solver.tap.call_count == 4
+    assert solver.scene_graph_navigation.call_count == 2
+    assert solver.reload_time is not None
+
+
+@pytest.mark.parametrize(
+    ("default", "backup", "before", "after"),
+    [
+        ("gold", "orirock", 0, 1),
+        ("gold", "orirock_device", 0, 1),
+        ("orirock", "gold", 1, 1),
+    ],
+)
+def test_reload_follows_active_backup_plan_product(default, backup, before, after):
+    room, plan = product_plan(default=default, backup=backup)
+    solver = reload_test_solver(Operators(plan))
+
+    solver.reload()
+    assert solver.enter_room.call_count == before
+
+    solver.op_data.swap_plan([True])
+    solver.reload()
+    assert solver.enter_room.call_count == after
+
+    solver.op_data.swap_plan([False])
+    solver.reload()
+    assert solver.enter_room.call_count == after + before
+    assert all(call.args[0] == room for call in solver.enter_room.call_args_list)
 
 
 def test_manufacture_idle_state_is_read_from_status_text():
@@ -1562,7 +1668,7 @@ def test_shift_waits_before_any_switch_when_drones_are_insufficient(monkeypatch)
         meta_data=product_task_meta("room_1_1", "orundum"),
     )
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver.tasks = [manufacture_task, trade_task]
     solver._survey_manufacture_switch = MagicMock(
         return_value={
@@ -1609,7 +1715,7 @@ def test_shift_enters_early_and_rechecks_drones(monkeypatch, recovered):
         meta_data=product_task_meta("room_1_2", "gold"),
     )
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver.tasks = [task]
     first = {
         "room": "room_1_2",
@@ -1660,7 +1766,7 @@ def test_shift_keeps_trade_product_if_manufacture_completion_is_unconfirmed(
         meta_data=product_task_meta("room_1_1", "orundum"),
     )
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver.tasks = [manufacture_task, trade_task]
     solver._survey_manufacture_switch = MagicMock(
         return_value={
@@ -1704,14 +1810,13 @@ def test_shift_keeps_trade_product_if_manufacture_completion_is_unconfirmed(
 
 def test_direct_switch_on_insufficient_drones_requires_explicit_option(monkeypatch):
     monkeypatch.setattr(config, "conf", config.Conf())
-    config.conf.experimental_dorm_logic = True
     config.conf.product_switching.direct_when_drones_insufficient = True
     task = SchedulerTask(
         task_type=TaskTypes.SWITCH_PRODUCT,
         meta_data=product_task_meta("room_1_2", "gold"),
     )
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver.tasks = [task]
     observation = {
         "room": "room_1_2",
@@ -1732,34 +1837,6 @@ def test_direct_switch_on_insufficient_drones_requires_explicit_option(monkeypat
     assert solver.tasks == []
 
 
-def test_direct_switch_option_is_inactive_without_experimental_dorm(monkeypatch):
-    monkeypatch.setattr(config, "conf", config.Conf())
-    config.conf.product_switching.direct_when_drones_insufficient = True
-    task = SchedulerTask(
-        task_type=TaskTypes.SWITCH_PRODUCT,
-        meta_data=product_task_meta("room_1_2", "gold"),
-    )
-    solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=False)
-    solver.tasks = [task]
-    solver._survey_manufacture_switch = MagicMock(
-        return_value={
-            "room": "room_1_2",
-            "facility": "manufacture",
-            "target_product": "gold",
-            "needs_switch": True,
-            "drone_count": 8,
-            "available_drones": 3,
-        }
-    )
-    solver._change_manufacture_product = MagicMock()
-
-    with pytest.raises(base.ProductSwitchDeferred):
-        solver.switch_base_products([task])
-
-    solver._change_manufacture_product.assert_not_called()
-
-
 def test_direct_option_still_checks_completion_when_drones_are_sufficient(monkeypatch):
     monkeypatch.setattr(config, "conf", config.Conf())
     config.conf.product_switching.direct_when_drones_insufficient = True
@@ -1768,7 +1845,7 @@ def test_direct_option_still_checks_completion_when_drones_are_sufficient(monkey
         meta_data=product_task_meta("room_1_2", "gold"),
     )
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver.tasks = [task]
     solver._survey_manufacture_switch = MagicMock(
         return_value={
@@ -1805,7 +1882,7 @@ def test_orirock_natural_wait_defers_shift_before_any_change(monkeypatch):
         meta_data=product_task_meta("room_1_2", "gold"),
     )
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver.tasks = [task]
     solver._survey_manufacture_switch = MagicMock(
         return_value={
@@ -1842,7 +1919,7 @@ def test_orirock_natural_wait_enters_early_and_checks_completion(monkeypatch):
         meta_data=product_task_meta("room_1_2", "gold"),
     )
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver.tasks = [task]
     observation = {
         "room": "room_1_2",
@@ -1890,7 +1967,7 @@ def test_orirock_is_not_switched_if_current_unit_has_not_finished(monkeypatch):
         meta_data=product_task_meta("room_1_2", "gold"),
     )
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver.tasks = [task]
     solver._survey_manufacture_switch = MagicMock(
         return_value={
@@ -1931,7 +2008,7 @@ def test_orirock_confirmation_waits_for_original_unit_boundary(
 ):
     monkeypatch.setattr(config, "conf", config.Conf())
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+    solver.op_data = SimpleNamespace()
     solver._open_manufacture_product_detail = MagicMock()
     solver.read_manufacture_product = MagicMock(side_effect=["orirock", "gold"])
     solver._cache_facility_state = MagicMock()
@@ -2035,7 +2112,8 @@ def test_mixed_batch_accelerates_manufacture_and_switches_both_facilities(
     )
     solver._change_manufacture_product.assert_called_once_with(manufacture_observation)
     solver._change_trade_product.assert_called_once_with(trade_observation)
-    solver.sleep.assert_called_once_with(35)
+    # The remaining-unit deadline is handled inside product confirmation.
+    solver.sleep.assert_not_called()
     assert solver.tasks == []
 
 
@@ -2274,7 +2352,7 @@ def test_matching_trade_order_never_opens_strategy_selector():
 
 def test_stable_shift_never_projects_or_switches_products():
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=False)
+    solver.op_data = SimpleNamespace()
     solver._products_after_arrangement = MagicMock()
     solver.switch_base_products = MagicMock()
     task = SchedulerTask(task_type=TaskTypes.SHIFT_OFF, task_plan={"room_1_1": ["红"]})
@@ -2283,33 +2361,3 @@ def test_stable_shift_never_projects_or_switches_products():
 
     solver._products_after_arrangement.assert_not_called()
     solver.switch_base_products.assert_not_called()
-
-
-def test_stable_survey_does_not_read_experimental_speed_or_timer(monkeypatch):
-    monkeypatch.setattr(config, "conf", config.Conf())
-    config.conf.product_switching.max_drones_per_switch = 1
-    config.conf.product_switching.use_drones_when_leaving_orirock = False
-    solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace(experimental_dorm_logic=False)
-    solver._open_manufacture_product_detail = MagicMock()
-    solver._cache_facility_state = MagicMock()
-    solver.read_manufacture_product = MagicMock(return_value="orirock")
-    solver._manufacture_is_idle = MagicMock(return_value=False)
-    solver._read_manufacture_speed = MagicMock(
-        side_effect=AssertionError("unexpected speed OCR")
-    )
-    solver._read_manufacture_adjusted_total_seconds = MagicMock(
-        side_effect=AssertionError("unexpected timer OCR")
-    )
-    solver._tap_drone_accelerate = MagicMock()
-    solver._read_manufacture_total_seconds = MagicMock(return_value=1800)
-    solver._tap_product_point = MagicMock()
-    solver.digit_reader = SimpleNamespace(get_drone=MagicMock(return_value=100))
-    solver.recog = SimpleNamespace(gray=None, h=1080, w=1920)
-
-    observation = solver._survey_manufacture_switch("room_1_2", "gold")
-
-    assert observation["drone_count"] == 10
-    assert not observation["natural_only"]
-    solver._read_manufacture_speed.assert_not_called()
-    solver._read_manufacture_adjusted_total_seconds.assert_not_called()

@@ -264,6 +264,40 @@ def version_key(value):
     )
 
 
+def release_is_downgrade(channel, target, current):
+    """Order Nightly commits by publication time, not their arbitrary SHA."""
+    target_version = target.get("version") or target["tag_name"]
+    target_key, current_key = version_key(target_version), version_key(current)
+    if target_key != current_key or channel != "dev" or not is_nightly(current):
+        return target_key < current_key
+    current_name = current.split("+", 1)[0].removeprefix("v")
+    if target_version.removeprefix("v") == current_name:
+        return False
+    current_release = next(
+        (
+            item
+            for item in [target, *target.get("history", [])]
+            if isinstance(item, dict)
+            and isinstance(item.get("version"), str)
+            and item["version"].removeprefix("v") == current_name
+        ),
+        None,
+    )
+    if current_release is None:
+        # The retained index cannot prove that this installed build is older.
+        return True
+    try:
+        target_date = datetime.fromisoformat(target["published_at"])
+        current_date = datetime.fromisoformat(current_release["published_at"])
+        return (
+            target_date.tzinfo is None
+            or current_date.tzinfo is None
+            or target_date <= current_date
+        )
+    except (KeyError, TypeError, ValueError):
+        return True
+
+
 def platform_asset():
     system = {"win32": "windows", "darwin": "macos", "linux": "linux"}.get(sys.platform)
     arch = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(
@@ -356,6 +390,7 @@ def resolve_source_remote(remote=None):
                 encoding="utf-8",
                 stderr=subprocess.PIPE,
                 timeout=10,
+                **runtime.hidden_console_options(),
             ).strip()
         except subprocess.CalledProcessError as error:
             raise ValueError(
@@ -396,7 +431,12 @@ def source_repository():
     if not git or not (root / ".git").exists():
         raise ValueError("版本管理需要 Git 检出目录和 Git 工具")
     current = subprocess.check_output(
-        [git, "rev-parse", "HEAD"], cwd=root, text=True, encoding="utf-8", timeout=10
+        [git, "rev-parse", "HEAD"],
+        cwd=root,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+        **runtime.hidden_console_options(),
     ).strip()
     branch = subprocess.check_output(
         [git, "branch", "--show-current"],
@@ -404,6 +444,7 @@ def source_repository():
         text=True,
         encoding="utf-8",
         timeout=10,
+        **runtime.hidden_console_options(),
     ).strip()
     network_settings.apply_http_proxy()
     proxy = network_settings.get_effective_settings()["http_proxy"]
@@ -1077,12 +1118,7 @@ def check(channel, proxy=None):
         release_version = release.get("version") or release["tag_name"]
         plan.update(
             version=release_version,
-            downgrade=version_key(release_version) < version_key(__version__)
-            and not (
-                channel == "dev"
-                and is_nightly(__version__)
-                and version_key(release_version) == version_key(__version__)
-            ),
+            downgrade=release_is_downgrade(channel, release, __version__),
             notes=release.get("notes") or release.get("body") or "暂无更新说明",
             url=release.get("source_release") or release["html_url"],
         )
@@ -1122,6 +1158,7 @@ def check(channel, proxy=None):
             text=True,
             encoding="utf-8",
             timeout=10,
+            **runtime.hidden_console_options(),
         ).strip()
         available = current != plan["commit"]
     else:
@@ -1392,12 +1429,21 @@ def manual_plan(package, proxy=""):
     ota = inspect_ota_package(package, __version__, system, arch)
     metadata = ota or inspect_package(package, system, arch)
     version = metadata["version"]
+    downgrade = version_key(version) < version_key(__version__)
+    if (
+        is_nightly(version)
+        and is_nightly(__version__)
+        and version_key(version) == version_key(__version__)
+        and version != __version__.split("+", 1)[0].removeprefix("v")
+    ):
+        # Offline packages provide no trusted publication time for two SHAs.
+        downgrade = True
     plan = {
         "deployment": "release",
         "manual": True,
         "manual_kind": "ota" if ota else "full",
         "available": True,
-        "downgrade": version_key(version) < version_key(__version__),
+        "downgrade": downgrade,
         "channel": "dev"
         if is_nightly(version)
         else "beta"

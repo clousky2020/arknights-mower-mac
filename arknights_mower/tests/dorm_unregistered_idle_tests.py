@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from arknights_mower.solvers.base_mixin import AgentSelectionNotReady
 from arknights_mower.tests import dorm_empty_release_tests
 from arknights_mower.utils import config, resting_priority, scheduler_task
 from arknights_mower.utils.scheduler_task import (
@@ -122,14 +123,80 @@ def test_unregistered_fallback_respects_exclusions_and_pending_tasks(
     assert "伊芙利特" not in instance.get_free_list([])
 
 
-def test_fallback_does_not_clear_full_resident_to_try_unregistered_operators(
+@pytest.mark.parametrize("mood", [8, 24])
+def test_release_uses_unregistered_idle_then_retains_only_if_actually_full(
+    solver, monkeypatch, mood
+):
+    instance, selected = solver
+    allow_unregistered(monkeypatch, instance, ["伊芙利特"])
+    screen_only(instance, ["伊芙利特"])
+    plan = instance.task.plan[ROOM]
+    instance.choose_agent(plan, ROOM)
+    assert plan[-1] == "伊芙利特"
+    assert selected == plan
+    assert len(selected) == 5
+    data = instance.op_data
+    data.update_detail("空爆", 24, "", -1, True)
+    data.update_detail("伊芙利特", mood, ROOM, 4, True)
+    assert data.is_full_dorm_fallback("伊芙利特") == (mood == 24)
+    if mood == 24:
+        for _ in range(3):
+            assert not any(t.meta_data == "伊芙利特" for t in plan_metadata(data, []))
+
+
+def test_known_tired_replacement_precedes_unregistered_idle(solver, monkeypatch):
+    instance, selected = solver
+    allow_unregistered(monkeypatch, instance, ["伊芙利特"])
+    instance.op_data.operators["红"].mood = 10
+    plan = instance.task.plan[ROOM]
+    instance.choose_agent(plan, ROOM)
+    assert plan[-1] == "红"
+    assert selected == plan
+    assert len(selected) == 5
+
+
+@pytest.mark.parametrize("replacement_mood", [10, 24])
+def test_exhausted_search_does_not_retry_unknown_but_still_admits_tired_replacement(
+    solver, monkeypatch, replacement_mood
+):
+    instance, selected = solver
+    allow_unregistered(monkeypatch, instance, ["伊芙利特"])
+    instance.op_data.idle_dorm_search_exhausted = True
+    instance.op_data.operators["红"].mood = replacement_mood
+    plan = instance.task.plan[ROOM]
+
+    instance.choose_agent(plan, ROOM)
+
+    assert plan[-1] == ("红" if replacement_mood == 10 else "空爆")
+    assert selected == plan
+    assert instance.op_data.idle_dorm_search_exhausted
+
+
+def test_unknown_release_search_keeps_exclusions_and_reservations(solver, monkeypatch):
+    instance, _ = solver
+    data = instance.op_data
+    allow_unregistered(monkeypatch, instance, ["伊芙利特", "妮芙", "特米米", "深靛"])
+    data.config.free_blacklist = ["妮芙"]
+    data.config.workaholic = ["特米米"]
+    instance.tasks = [SchedulerTask(task_plan={"meeting": ["深靛"]})]
+    candidates = instance.dorm_mood_fallback_candidates(instance.task.plan[ROOM], ROOM)
+    assert "伊芙利特" in candidates
+    assert not {"妮芙", "特米米", "深靛"} & set(candidates)
+
+
+def test_unowned_unknowns_allow_original_resident_as_full_bed_fallback(
     solver, monkeypatch
 ):
-    instance, _ = solver
+    instance, selected = solver
     allow_unregistered(monkeypatch, instance, ["伊芙利特"])
+    screen_only(instance, ["空爆"])
     plan = instance.task.plan[ROOM]
-    instance.preserve_resting_crafters(plan, ROOM)
+    instance.choose_agent(plan, ROOM)
+    assert selected == plan
     assert plan[-1] == "空爆"
+    data = instance.op_data
+    data.update_detail("空爆", 24, ROOM, 4, True)
+    assert data.is_full_dorm_fallback("空爆")
 
 
 def test_missing_owned_candidate_stops_search_without_registering_catalogue(
@@ -141,8 +208,9 @@ def test_missing_owned_candidate_stops_search_without_registering_catalogue(
     screen_only(instance, [])
     plan = selected.copy() + ["Free"]
     instance.task = SchedulerTask(task_plan={ROOM: plan})
-    with pytest.raises(Exception, match="列表已到末尾|足够的可用宿舍"):
+    with pytest.raises(AgentSelectionNotReady):
         instance.choose_agent(plan, ROOM)
+    assert instance.scan_agent.call_count <= 51
     assert "陈" not in instance.op_data.operators
 
 
@@ -242,8 +310,8 @@ def test_unknown_vacancy_fill_is_reserved_once_without_deferral_event(
         time=datetime.now() + timedelta(seconds=5), task_type=TaskTypes.RUN_ORDER
     )
     instance.tasks, instance.task = [order], None
-    assert instance._fill_empty_dorms()
-    assert not instance._fill_empty_dorms()
+    assert instance._fill_empty_dorms(primary_planned=True)
+    assert not instance._fill_empty_dorms(primary_planned=True)
     assert len(instance.tasks) == 2
     fill = next(t for t in instance.tasks if t.type == TaskTypes.FILL_DORM)
     assert fill.plan[ROOM][-1] == "Free"
@@ -268,6 +336,31 @@ def test_full_dorm_keeps_nearby_order_guard(solver):
     assert instance.tasks[0] is order
 
 
+def test_full_resident_replacement_is_queued_before_workshop(solver, monkeypatch):
+    from arknights_mower.solvers import base_schedule
+
+    instance, _ = solver
+    instance.op_data.operators["银灰"].current_room = "meeting"
+    instance.op_data.operators["红"].current_room = ""
+    instance.op_data.operators["红"].mood = 10
+    instance.tasks, instance.task = [], None
+    instance._plan_primary_recovery = MagicMock(return_value=True)
+    instance.agent_get_mood = MagicMock(return_value={})
+    workshop = MagicMock(
+        side_effect=lambda data, tasks: tasks.append(
+            SchedulerTask(task_type=TaskTypes.WORKSHOP)
+        )
+    )
+    monkeypatch.setattr(base_schedule, "try_workshop_tasks", workshop)
+
+    instance.plan_solver()
+
+    assert len(instance.tasks) == 1
+    assert instance.tasks[0].plan[ROOM][-1] == "红"
+    assert instance.tasks[0].type == TaskTypes.NOT_SPECIFIC
+    workshop.assert_not_called()
+
+
 @pytest.mark.parametrize("free_room", [False, True])
 def test_priority_vacancy_plan_does_not_include_ordinary_full_resident_release(
     solver, free_room
@@ -288,13 +381,13 @@ def test_priority_vacancy_plan_does_not_include_ordinary_full_resident_release(
     data.add(Operator("陈", "", mood=12, time_stamp=datetime.now()))
     data.plan["meeting"][0].replacement.append("陈")
     instance.tasks, instance.task = [], None
-    assert instance._fill_empty_dorms()
+    assert instance._fill_empty_dorms(primary_planned=True)
     assert instance.tasks[0].type == TaskTypes.FILL_DORM
     assert instance.tasks[0].plan == {ROOM: ["Current"] * 4 + ["红"]}
 
 
 @pytest.mark.parametrize(
-    "blocked", ["legacy", "personal_cap", "reserved", "stale_empty", "initializing"]
+    "blocked", ["personal_cap", "reserved", "stale_empty", "initializing"]
 )
 @pytest.mark.parametrize("free_room", [False, True])
 def test_vacancy_priority_keeps_existing_admission_guards(solver, blocked, free_room):
@@ -307,8 +400,6 @@ def test_vacancy_priority_keeps_existing_admission_guards(solver, blocked, free_
     instance.tasks, instance.task = [], None
     if blocked == "initializing":
         instance.defer_backup_plan_until_mood_read = True
-    elif blocked == "legacy":
-        data.config.experimental_dorm_logic = False
     elif blocked == "personal_cap":
         data.config.operator_mood_limits["红"] = {"lower": 0, "upper": 12}
         data.operators["红"].upper_limit = 12
@@ -318,7 +409,7 @@ def test_vacancy_priority_keeps_existing_admission_guards(solver, blocked, free_
         # 床位记录虽然空了，实际位置缓存仍有人，不能误当空床插队换人。
         data.operators["空爆"]._current_room = ROOM
         data.operators["空爆"].current_index = 4
-    assert not instance._fill_empty_dorms()
+    assert not instance._fill_empty_dorms(primary_planned=True)
 
 
 @pytest.mark.parametrize("kind", [TaskTypes.RUN_ORDER, TaskTypes.SWAP_SUPPORT])
@@ -338,7 +429,7 @@ def test_nearby_priority_task_skips_single_recovery_competition(
     instance.tasks = [priority]
     compete = MagicMock(wraps=scheduler_task.prioritize_new_dorm_recovery)
     monkeypatch.setattr(scheduler_task, "prioritize_new_dorm_recovery", compete)
-    assert instance._fill_empty_dorms()
+    assert instance._fill_empty_dorms(primary_planned=True)
     fill = next(t for t in instance.tasks if t.type == TaskTypes.FILL_DORM)
     assert getattr(fill, "simple_dorm_fill", False) == simple
     assert compete.call_count == (0 if simple else 1)

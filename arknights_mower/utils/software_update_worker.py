@@ -29,6 +29,7 @@ if __package__:
     from .update_runtime import (
         InstanceScanError,
         detached_options,
+        hidden_console_options,
         instances,
         launch_environment,
         process_alive,
@@ -43,6 +44,7 @@ else:
     from update_runtime import (
         InstanceScanError,
         detached_options,
+        hidden_console_options,
         instances,
         launch_environment,
         process_alive,
@@ -97,7 +99,11 @@ def generated_npm_lockfile(git, root, env=None):
     try:
         local = target.read_bytes()
         committed = subprocess.check_output(
-            [git, "show", "HEAD:" + NPM_LOCKFILE], cwd=root, env=env, timeout=10
+            [git, "show", "HEAD:" + NPM_LOCKFILE],
+            cwd=root,
+            env=env,
+            timeout=10,
+            **hidden_console_options(),
         )
         if npm_lockfile_without_metadata(local) == npm_lockfile_without_metadata(
             committed
@@ -132,6 +138,7 @@ def require_clean_source(git, root, env=None, *, force=False, environment=None):
         text=True,
         encoding="utf-8",
         timeout=10,
+        **hidden_console_options(),
     )
     if isinstance(changes, bytes):
         changes = changes.decode("utf-8", errors="replace")
@@ -153,6 +160,7 @@ def require_clean_source(git, root, env=None, *, force=False, environment=None):
             text=True,
             encoding="utf-8",
             timeout=10,
+            **hidden_console_options(),
         )
         entries.extend(tracked.rstrip().splitlines())
     generated = {}
@@ -628,6 +636,7 @@ class Worker:
                     ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                     check=False,
                     timeout=15,
+                    **hidden_console_options(),
                 )
             else:
                 try:
@@ -647,6 +656,7 @@ class Worker:
             text=True,
             encoding="utf-8",
             timeout=60,
+            **hidden_console_options(),
         ).strip()
 
     def prepare_source(self):
@@ -1209,6 +1219,15 @@ class Worker:
         shutil.copytree(
             payload, self.prepared, symlinks=True, copy_function=self.copy_package_file
         )
+        if any(record["kind"] == "manager" for record in instances(self.state)):
+            manager = (
+                self.prepared / "Contents/MacOS/manager"
+                if self.root.suffix == ".app"
+                else self.prepared
+                / ("多开管理器.exe" if sys.platform == "win32" else "多开管理器")
+            )
+            if not manager.is_file():
+                raise ValueError("目标安装包缺少正在运行的多开管理器，当前实例尚未停止")
         if self.root.suffix == ".app":
             self.verify_macos_signature(self.prepared)
 
@@ -1410,13 +1429,18 @@ class Worker:
             [] if record["kind"] == "manager" else [record["space"], record["name"]]
         )
 
-    def restart(self, records, verify=True):
-        self.report("restarting", "恢复实例，等待网页服务就绪")
+    def restart(self, records, verify=True, *, recovery=False):
+        self.report(
+            "restarting",
+            "恢复原版本实例，等待网页服务就绪"
+            if recovery
+            else "恢复实例，等待网页服务就绪",
+        )
         processes = []
-        if verify:
-            self.new_processes = processes
-        else:
+        if recovery:
             self.recovery_processes = processes
+        else:
+            self.new_processes = processes
         for record in records:
             if (
                 record["kind"] == "manager"
@@ -1433,7 +1457,7 @@ class Worker:
                 env["PATH"] = self.job["tool_path"]
             with (self.work / "restart.log").open("ab") as log:
                 process = subprocess.Popen(
-                    self.command_for(record, recovery=not verify),
+                    self.command_for(record, recovery=recovery),
                     cwd=record.get("cwd") or self.root,
                     env=env,
                     stdin=subprocess.DEVNULL,
@@ -1469,11 +1493,11 @@ class Worker:
             except InstanceScanError:
                 ready = set()  # Retry within the existing readiness deadline.
             if requested <= ready:
-                if verify and requested:
+                if not recovery and requested:
                     self.verified_restart = True
                 return
-            if any(p.poll() is not None for p in processes):
-                break
+            # A Windows venv launcher can exit after re-execing Python. Wait
+            # for the replacement process's registration, not the wrapper PID.
             time.sleep(1)
         # Do not replace a runtime while a failed new launcher still has it open.
         current = [
@@ -1485,14 +1509,26 @@ class Worker:
                 {"job": self.job["id"]},
             )
         deadline = time.monotonic() + 90
-        while any(p.poll() is None for p in processes) and time.monotonic() < deadline:
+        remaining = current
+        while time.monotonic() < deadline:
+            remaining = [
+                r
+                for r in instances(self.state)
+                if r.get("restart_job") == self.job["id"]
+            ]
+            if not remaining and all(p.poll() is not None for p in processes):
+                break
             time.sleep(0.5)
-        if any(p.poll() is None for p in processes):
+        if remaining or any(p.poll() is None for p in processes):
             raise RuntimeError(
-                "新实例未就绪且无法退出；原版本备份已保留，请退出实例后按更新日志恢复"
+                "恢复实例未就绪且无法退出；原版本备份已保留，请退出实例后按更新日志恢复"
             )
         raise RuntimeError(
-            "新版本启动失败或不支持更新恢复协议，准备恢复原版本；详情见 restart.log"
+            (
+                "原版本恢复启动失败；详情见 restart.log"
+                if recovery
+                else "新版本启动失败或不支持更新恢复协议，准备恢复原版本；详情见 restart.log"
+            )
         )
 
     def rollback(self):
@@ -1543,6 +1579,13 @@ class Worker:
             return
         paths = {backup for _, backup in self.backups}
         paths.add(self.bundle_backup)
+        packages = []
+        if self.job.get("deployment") == "release":
+            paths.add(self.work / "runner")
+            for asset in (self.job.get("asset"), self.job.get("ota_asset")):
+                if asset and Path(asset["name"]).name == asset["name"]:
+                    packages.append(asset["name"])
+                    paths.add(self.work / asset["name"])
         entries = []
         for path in paths:
             try:
@@ -1563,6 +1606,8 @@ class Worker:
                 "verified": True,
                 "root": str(self.root.absolute()),
                 "id": self.job["id"],
+                "deployment": self.job.get("deployment"),
+                "packages": packages,
                 "paths": entries,
             },
         )
@@ -1626,7 +1671,7 @@ class Worker:
                     if self.original or self.switched or self.replacements:
                         self.rollback()
                         self.close_progress_servers()
-                        self.restart(self.stopped, verify=False)
+                        self.restart(self.stopped, recovery=True)
                 except Exception as recovery_error:
                     traceback.print_exc()
                     message += f"；恢复需要处理：{recovery_error}"
@@ -1677,7 +1722,15 @@ def retry_backup_cleanup(directory, root, manifests=None):
                     bundle_backup = path == root.with_name(
                         f"{root.name}.backup-{record['id']}"
                     )
-                    if not source_backup and not bundle_backup:
+                    release = record.get("deployment") == "release"
+                    runner = release and path == manifest.parent / "runner"
+                    package = (
+                        release
+                        and path.parent == manifest.parent
+                        and path.name in record.get("packages", [])
+                        and path.name not in {".", ".."}
+                    )
+                    if not (source_backup or bundle_backup or runner or package):
                         continue
                     try:
                         value = path.lstat()
@@ -1692,7 +1745,7 @@ def retry_backup_cleanup(directory, root, manifests=None):
                     except OSError as exc:
                         remaining.append(entry)
                         print(
-                            f"新版本已验证，回退备份暂无法清理，下次启动重试：{exc}",
+                            f"新版本已验证，更新备份或临时文件暂无法清理，下次启动重试：{exc}",
                             flush=True,
                         )
                 if remaining:

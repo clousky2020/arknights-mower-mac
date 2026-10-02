@@ -60,28 +60,17 @@ def test_cross_tier_takeover_matrix(op_data, incoming, occupant, mood):
     current = set_tier(data, "空爆", occupant, 12)
     current.current_room, current.current_index = ROOM, 4
     data.dorm[0].time = datetime.now() + timedelta(hours=4)
-    expected = False
-    if occupant > RestingTier.LOW_MAIN and incoming < occupant:
-        expected = incoming <= RestingTier.PRIORITY_REPLACEMENT
-        if incoming == RestingTier.STANDBY and occupant == RestingTier.REPLACEMENT:
-            expected = True
-        if (
-            incoming in (RestingTier.STANDBY, RestingTier.REPLACEMENT)
-            and occupant == RestingTier.IDLE
-        ):
-            expected = mood is not None and mood <= 22
-    assert (
-        data._find_dorm_slot(request.name, set(), group_resting=True) is not None
-    ) == expected
+    expected = incoming < occupant
+    assert (data._find_dorm_slot(request.name, set()) is not None) == expected
 
 
 @pytest.mark.parametrize("tier", [RestingTier.STANDBY, RestingTier.REPLACEMENT])
 @pytest.mark.parametrize("mood", [-1, 25])
-def test_invalid_cached_mood_defaults_full_and_preserves_idle(op_data, tier, mood):
+def test_unknown_cached_mood_does_not_override_identity_priority(op_data, tier, mood):
     op_data.dorm[0].time = datetime.now() + timedelta(hours=1)
     op_data.operators["空爆"].mood = 3
     set_tier(op_data, "红", tier, mood)
-    assert op_data.assign_dorm("红") is None
+    assert op_data.assign_dorm("红") is not None
 
 
 def test_free_selection_keeps_idle_bed_with_unknown_replacement(op_data):
@@ -176,14 +165,6 @@ def test_unknown_mood_remains_full_and_priority_still_precedes_gap(op_data):
     assert resting_key(op_data, "银灰") < resting_key(op_data, "红")
 
 
-def test_legacy_resting_key_retains_raw_mood_order(op_data):
-    op_data.config.experimental_dorm_logic = False
-    first = set_tier(op_data, "银灰", RestingTier.PRIORITY, 10)
-    first.upper_limit = 12
-    set_tier(op_data, "红", RestingTier.PRIORITY, 12)
-    assert resting_key(op_data, "银灰") < resting_key(op_data, "红")
-
-
 def test_dorm_reorder_keeps_existing_beds_and_only_places_new_resters(op_data):
     set_tier(op_data, "陈", RestingTier.REPLACEMENT, 3)
     op_data.plan[ROOM][3] = Room("Free", "", [])
@@ -242,6 +223,28 @@ def test_workshop_selection_does_not_override_schedule_identity(op_data):
     assert resting_tier(op_data, "红") == RestingTier.PRIORITY
 
 
+@pytest.mark.parametrize("state", ["rescue_mode", "rescue_plan_active"])
+@pytest.mark.parametrize(
+    "mood,known,temporary,expected",
+    [
+        (8, True, False, RestingTier.PRIORITY_REPLACEMENT),
+        (20, True, False, RestingTier.PRIORITY_REPLACEMENT),
+        (24, False, False, RestingTier.PRIORITY_REPLACEMENT),
+        (8, True, True, RestingTier.PRIORITY_REPLACEMENT),
+    ],
+)
+def test_rescue_retains_configured_priority_for_every_admission_source(
+    op_data, state, mood, known, temporary, expected
+):
+    op = set_tier(op_data, "红", RestingTier.PRIORITY_REPLACEMENT, mood)
+    op.upper_limit = 20
+    op.time_stamp = datetime.now() if known else None
+    op.temporary_dorm_fill = temporary
+    op_data.main_rescue_priority = {op.name}
+    setattr(op_data, state, True)
+    assert resting_tier(op_data, op.name) == expected
+
+
 def test_explicit_priority_replacement_is_protected_from_equal_or_lower_tiers(op_data):
     op_data.dorm[0].name = "红"
     op_data.dorm[0].time = datetime.now() + timedelta(hours=2)
@@ -265,13 +268,11 @@ def test_priority_replacement_list_only_promotes_replacement_identity(op_data, t
     assert resting_tier(op_data, "陈") == expected
 
 
-def test_priority_replacement_disabled_in_legacy_and_never_overrides_exclusions(
+def test_priority_replacement_never_overrides_exclusions(
     op_data,
 ):
     set_tier(op_data, "红", RestingTier.PRIORITY_REPLACEMENT)
-    op_data.config.experimental_dorm_logic = False
-    assert resting_tier(op_data, "红") == RestingTier.REPLACEMENT
-    op_data.config.experimental_dorm_logic = True
+    assert resting_tier(op_data, "红") == RestingTier.PRIORITY_REPLACEMENT
     op_data.operators["红"].workaholic = True
     assert resting_tier(op_data, "红") == RestingTier.EXCLUDED
     op_data.operators["红"].workaholic = False

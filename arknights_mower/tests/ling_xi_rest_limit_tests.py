@@ -26,9 +26,9 @@ from arknights_mower.utils.scheduler_task import (  # noqa: E402
 NOW = datetime(2026, 9, 24, 6, 0)
 
 
-@pytest.fixture(params=[(False, 1), (True, 1), (False, 2), (True, 2)])
+@pytest.fixture(params=[1, 2])
 def solver(request, monkeypatch):
-    experimental, mode = request.param
+    mode = request.param
 
     class Clock(datetime):
         @classmethod
@@ -41,7 +41,6 @@ def solver(request, monkeypatch):
     monkeypatch.setattr(config, "save_conf", lambda: None)
     monkeypatch.setattr(base, "_is_mastery_busy", lambda name: False)
     config.conf.enable_mastery = False
-    config.conf.experimental_dorm_logic = experimental
     limited = "令" if mode == 1 else "夕"
     instance = object.__new__(base.BaseSchedulerSolver)
     instance.global_plan = {
@@ -52,9 +51,7 @@ def solver(request, monkeypatch):
                 "dormitory_1": [Room("冰酿", "", []), Room("闪灵", "", [])]
                 + [Room("Free", "", []) for _ in range(3)],
             },
-            PlanConfig(
-                "絮雨", "", "", ling_xi=mode, experimental_dorm_logic=experimental
-            ),
+            PlanConfig("絮雨", "", "", ling_xi=mode),
         ),
         "backup_plans": [],
     }
@@ -135,11 +132,12 @@ def test_unknown_mood_without_timer_does_not_release(solver):
     assert not any(t.strict_mood_limit for t in solver.tasks)
 
 
+@pytest.mark.parametrize("mood", [11, 20.8])
 def test_departed_operator_waits_without_recalling_group_or_refilling(
-    solver, monkeypatch
+    solver, monkeypatch, mood
 ):
     name = limited_name(solver)
-    solver.op_data.operators[name].mood = 20.8
+    solver.op_data.operators[name].mood = mood
     solver.plan_metadata()
     task = release(solver)
     solver.task = task
@@ -151,8 +149,11 @@ def test_departed_operator_waits_without_recalling_group_or_refilling(
     )
     agents = task.plan["dormitory_1"].copy()
     solver.preserve_resting_crafters(agents, "dormitory_1")
-    assert agents[3] == ("" if solver.op_data.experimental_dorm_logic else "Free")
+    assert agents[3] == ("")
     solver.op_data = solver.op_data.project_arrangements([task.plan])
+    if mood < 12:
+        # 实际读房确认离宿后会记录本轮提前清退，心情仍保留真实值。
+        solver.op_data.operators[name].rest_mood_release_limit = 12
     assert solver.op_data.operators[name].current_room == ""
     assert solver.op_data.operators["絮雨"].is_resting()
     solver.task, solver.tasks = None, []
@@ -183,6 +184,60 @@ def test_equal_mode_removes_old_limit_and_release(solver):
     assert not any(t.strict_mood_limit for t in solver.tasks)
 
 
+@pytest.mark.parametrize("projected", [False, True])
+def test_early_release_wait_ends_on_next_work_assignment(solver, projected):
+    data = solver.op_data
+    op = data.operators[limited_name(solver)]
+    op.current_room, op.current_index = "", -1
+    op.mood, op.rest_mood_release_limit = 11, 12
+    assert data.rest_mood_complete(op.name) is True
+    assert op.name not in solver.get_free_list([])
+    if projected:
+        data = data.project_arrangements(
+            [{"central": [op.name]}, {"central": ["Free"]}]
+        )
+        op = data.operators[op.name]
+    else:
+        op.current_room = "central"
+        op.current_room = ""
+    assert op.rest_mood_release_limit is None
+    assert not data.rest_mood_complete(op.name)
+    assert op.mood == 11
+
+
+def test_early_release_wait_survives_plan_rebuild_but_not_higher_cap(solver):
+    data = solver.op_data
+    name = limited_name(solver)
+    op = data.operators[name]
+    op.current_room, op.current_index = "", -1
+    op.mood, op.rest_mood_release_limit = 11, 12
+    assert data.swap_plan([], refresh=True) is None
+    op = data.operators[name]
+    assert op.rest_mood_release_limit == 12
+    assert op.mood == 11
+    assert data.rest_mood_complete(name) is True
+    data.set_mood_limit(name, upper_limit=20)
+    assert not data.rest_mood_complete(name)
+
+
+def test_early_release_preparation_keeps_actual_mood_and_return_task(solver):
+    name = limited_name(solver)
+    op = solver.op_data.operators[name]
+    op.mood = 11
+    solver.plan_metadata()
+    task = release(solver)
+    idx, bed = solver.op_data.get_dorm_by_name(name)
+    returning = next(t for t in solver.tasks if t.type == TaskTypes.SHIFT_ON)
+    returning.meta_data = f"dorm{idx}"
+    original_time = returning.time
+    assert solver.prepare_release_dorm(task)
+    assert returning in solver.tasks
+    assert returning.time == original_time
+    assert returning.plan["central"] == [name]
+    assert op.rest_mood_release_limit is None
+    assert (op.mood, op.time_stamp) == (11, NOW)
+
+
 def test_strict_release_is_not_delayed_by_merging_or_run_order(solver):
     solver.op_data.operators[limited_name(solver)].mood = 12
     solver.plan_metadata()
@@ -193,7 +248,7 @@ def test_strict_release_is_not_delayed_by_merging_or_run_order(solver):
     tasks = [task, order]
     merge_release_dorm(tasks, 10)
     scheduling(tasks, time_now=NOW)
-    assert task.time == NOW
+    assert task.time <= NOW
 
 
 def test_rebuild_uses_confirmed_new_bed(solver):
@@ -204,23 +259,20 @@ def test_rebuild_uses_confirmed_new_bed(solver):
         [{"dormitory_1": ["Current", "Current", "Current", "Free", name]}]
     )
     solver.plan_metadata()
-    if solver.op_data.experimental_dorm_logic:
-        # 换床后的旧倒计时失效；实际读房取得新时间后才重建上限任务。
-        assert not any(t.strict_mood_limit for t in solver.tasks)
-        _, bed = solver.op_data.get_dorm_by_name(name)
-        assert bed.time is None
-        solver.op_data.refresh_dorm_time(
-            *bed.position,
-            {"agent": name, "time": NOW + timedelta(hours=3)},
-        )
-        solver.plan_metadata()
+    # 换床后的旧倒计时失效；实际读房取得新时间后才重建上限任务。
+    assert not any(t.strict_mood_limit for t in solver.tasks)
+    _, bed = solver.op_data.get_dorm_by_name(name)
+    assert bed.time is None
+    solver.op_data.refresh_dorm_time(
+        *bed.position,
+        {"agent": name, "time": NOW + timedelta(hours=3)},
+    )
+    solver.plan_metadata()
     task = release(solver)
     assert task is not old
     assert task.plan["dormitory_1"] == ["Current"] * 4 + ["Free"]
     # 当前心情 6、上限 12：读到回满 24 需三小时，换算到上限需一小时。
-    assert task.time == (
-        NOW + timedelta(hours=1) if solver.op_data.experimental_dorm_logic else old.time
-    )
+    assert task.time == (NOW + timedelta(hours=1))
 
 
 @pytest.mark.parametrize("stale", [False, True])

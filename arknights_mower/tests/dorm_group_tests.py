@@ -32,7 +32,7 @@ def solver(monkeypatch):
     monkeypatch.setattr(config, "save_conf", lambda: None)
     monkeypatch.setattr(base_schedule, "_is_mastery_busy", lambda name: False)
     config.conf.enable_mastery = False
-    config.conf.experimental_dorm_logic = True
+    config.conf.rescue_threshold = 0
     instance = object.__new__(BaseSchedulerSolver)
     instance.global_plan = {
         "default_plan": Plan(
@@ -48,7 +48,7 @@ def solver(monkeypatch):
                     *[Room("Free", "", []) for _ in range(3)],
                 ],
             },
-            PlanConfig("", "", "", experimental_dorm_logic=True),
+            PlanConfig("", "", ""),
         ),
         "backup_plans": [],
     }
@@ -152,6 +152,7 @@ def test_group_larger_than_bed_count_validates_and_round_trip_converges(solver):
 
 
 def test_group_mood_gap_full_rest_can_be_disabled(solver):
+    config.conf.rescue_threshold = 0
     shift_off(solver)
     data = solver.op_data
     now = datetime.now()
@@ -228,12 +229,12 @@ def test_idle_release_of_main_keeps_later_group_return(solver, priority):
     ] == ["伊内丝", "银灰"]
 
 
-@pytest.mark.parametrize("protection", ["excluded", "disabled", "legacy"])
+@pytest.mark.parametrize("protection", ["excluded", "disabled"])
 def test_main_idle_release_respects_switch_and_exclusions(solver, protection):
+    config.conf.rescue_threshold = 0
     shift_off(solver)
     data = solver.op_data
     data.config.free_room = protection != "disabled"
-    data.config.experimental_dorm_logic = protection != "legacy"
     if protection == "excluded":
         data.config.free_room_exclusions = ["银灰"]
     member = data.operators["银灰"]
@@ -264,9 +265,9 @@ def test_main_idle_releases_keep_ten_minute_merge(solver):
     tasks = plan_metadata(data, [])
 
     releases = [task for task in tasks if task.type == TaskTypes.RELEASE_DORM]
-    assert {task.meta_data for task in releases} == {"银灰", "讯使"}
-    assert releases[0].time >= now + timedelta(minutes=15)
-    assert releases[1].time - releases[0].time == timedelta(seconds=1)
+    assert len(releases) == 1
+    assert set(releases[0].release_dorm_targets()) == {"银灰", "讯使"}
+    assert releases[0].time == now + timedelta(minutes=15)
     assert next(task for task in tasks if task.type == TaskTypes.SHIFT_ON).plan[
         "meeting"
     ] == ["伊内丝", "银灰"]
@@ -313,7 +314,11 @@ def test_released_main_can_still_trigger_its_own_return_batch(solver):
     assert tasks[1].plan["meeting"] == ["伊内丝", "银灰"]
 
 
-def test_zero_mood_worker_only_follows_group_shift(solver):
+@pytest.mark.parametrize("rescue", [False, True])
+def test_zero_mood_worker_only_follows_group_shift(solver, rescue):
+    if rescue:
+        config.conf.rescue_threshold = 0.75
+        assert solver.op_data.rescue_needed()
     worker = solver.op_data.operators["讯使"]
     worker.workaholic = True
     worker.mood = 0
@@ -385,7 +390,7 @@ def test_working_group_does_not_treat_resident_as_resting_witness(solver):
     }
 
 
-def test_experimental_correction_does_not_duplicate_pending_plan(solver):
+def test_unified_correction_does_not_duplicate_pending_plan(solver):
     solver.op_data.operators["冰酿"].current_room = ""
     solver.op_data.operators["冰酿"].current_index = -1
 
@@ -892,21 +897,6 @@ def test_closing_bed_keeps_existing_single_recovery_target(solver):
     assert target.dorm_recovery_room == "dormitory_1"
 
 
-def test_closing_bed_rebalance_is_disabled_with_stable_logic(solver):
-    configure_explicit_free_bed(solver)
-    data = solver.op_data
-    data.config.experimental_dorm_logic = False
-    data.dorm[0].name = "泥岩"
-    before = [(bed.name, bed.time) for bed in data.dorm]
-    plan = {"dormitory_1": ["塑心", "Current", "Current", "Current", "Current"]}
-
-    recalled = rebalance_closing_dorm_slots(data, plan, {"伊内丝"})
-
-    assert recalled == {"伊内丝"}
-    assert plan == {"dormitory_1": ["塑心", "Current", "Current", "Current", "Current"]}
-    assert [(bed.name, bed.time) for bed in data.dorm] == before
-
-
 def test_auto_free_occupant_can_be_replaced_after_recovery_finishes(solver):
     configure_explicit_free_bed(solver)
     data = solver.op_data
@@ -931,6 +921,7 @@ def test_auto_free_occupant_can_be_replaced_after_recovery_finishes(solver):
 
 
 def test_mood_driven_resting_schedules_resident_cover(solver, monkeypatch):
+    config.conf.rescue_threshold = 0
     monkeypatch.setattr(solver, "plan_metadata", lambda: None)
     solver.total_agent = [
         op
@@ -1023,6 +1014,59 @@ def test_normal_workplace_keeps_configured_replacement_order(solver):
     assert shift_off(solver)[0]["meeting"][0] == "陈"
 
 
+def configure_work_cover_mood_limits(solver, second_mood):
+    data = solver.op_data
+    data.add(Operator("砾", ""))
+    worker = data.operators["伊内丝"]
+    worker.replacement = ["陈", "砾"]
+    data.plan["meeting"][0].replacement = worker.replacement.copy()
+    data.config.operator_mood_limits = {"砾": {"lower": 12, "upper": 16}}
+    data.init_mood_limit()
+
+    now = datetime.now()
+    first = data.operators["陈"]
+    first.current_room, first.current_index = "", -1
+    first.mood, first.time_stamp = 0, now
+    second = data.operators["砾"]
+    second.current_room, second.current_index = "", -1
+    second.mood, second.time_stamp = second_mood, now
+    return data
+
+
+def test_work_replacement_all_exhausted_aborts_group_shift(solver):
+    data = configure_work_cover_mood_limits(solver, 11)
+    plan, replacements = {}, []
+
+    solver.get_resting_plan(data.groups["联动"], replacements, plan, 0)
+
+    assert plan == {}
+    assert replacements == []
+
+
+@pytest.mark.parametrize("blocked", ["busy", "reserved"])
+def test_work_replacement_never_falls_back_to_exhausted_when_healthy_is_blocked(
+    solver, monkeypatch, blocked
+):
+    data = configure_work_cover_mood_limits(solver, 13)
+    if blocked == "busy":
+        monkeypatch.setattr(
+            base_schedule, "_is_mastery_busy", lambda name: name == "砾"
+        )
+    else:
+        task = SchedulerTask(
+            task_type=TaskTypes.SHIFT_OFF, task_plan={"meeting": ["砾"]}
+        )
+        task.product_shift_locked = True
+        task.product_lock_names = {"砾"}
+        solver.tasks.append(task)
+    plan, replacements = {}, []
+
+    solver.get_resting_plan(data.groups["联动"], replacements, plan, 0)
+
+    assert plan == {}
+    assert replacements == []
+
+
 def test_dorm_correction_selects_low_mood_cover_but_does_not_churn(solver):
     set_resident_candidates(solver, ["黑角", "泥岩"])
     solver.op_data.operators["黑角"].mood = 20
@@ -1057,7 +1101,8 @@ def test_resident_mood_does_not_compete_for_worker_replacements(
     solver.op_data.groups["联动"].remove("塑心")
     solver.op_data.groups["联动"].insert(0, "塑心")
     set_resident_candidates(solver, ["陈", "黑角"])
-    solver.op_data.operators["陈"].mood = 0
+    # 这个用例只验证宿舍成员心情不参与工作替班竞争；工作替班本身需保持可用。
+    solver.op_data.operators["陈"].mood = 1
     monkeypatch.setattr(
         resident,
         "current_mood",
@@ -1091,6 +1136,7 @@ def test_resting_priority_ignores_resident_mood_and_priority(solver, monkeypatch
 
 
 def test_fia_working_target_does_not_compare_resident_mood(solver, monkeypatch):
+    solver.op_data.operators["伊内丝"].depletion_rate = 1
     resident = solver.op_data.operators["塑心"]
     monkeypatch.setattr(
         resident,
@@ -1112,6 +1158,8 @@ def test_fia_keeps_group_comparison_relative_to_lower_limit(
     for name, mood in [("伊内丝", 10), ("银灰", 8), ("讯使", 24)]:
         solver.op_data.operators[name].mood = mood
     solver.op_data.operators["伊内丝"].lower_limit = lower_limit
+    # 此用例只验证阈值比较，读房更新由专门的充能回归覆盖。
+    solver._refresh_fia_candidate_moods = MagicMock()
     monkeypatch.setattr(config.conf, "fia_fool", True)
     monkeypatch.setattr(solver, "check_fia", lambda: (["伊内丝"], "dormitory_1"))
     solver.task = SchedulerTask(task_type=TaskTypes.FIAMMETTA)
@@ -1152,6 +1200,7 @@ def test_fia_keeps_original_priority_instead_of_dorm_candidate_mood_sort(
         operator = solver.op_data.operators[name]
         operator.group = ""
         operator.mood = mood
+        operator.depletion_rate = 1
     monkeypatch.setattr(solver, "check_fia", lambda: (candidates, "dormitory_1"))
     monkeypatch.setattr(
         solver.op_data,
@@ -1169,7 +1218,7 @@ def test_fia_keeps_original_priority_instead_of_dorm_candidate_mood_sort(
 
 
 @pytest.fixture
-def legacy_solver(solver):
+def ungrouped_solver(solver):
     solver.global_plan["default_plan"].plan["dormitory_1"][0].group = ""
     solver.op_data.plan["dormitory_1"][0].group = ""
     solver.op_data.operators["塑心"].group = ""
@@ -1177,67 +1226,65 @@ def legacy_solver(solver):
     return solver
 
 
-def test_ungrouped_dorm_does_not_run_group_correction(legacy_solver, monkeypatch):
+def test_ungrouped_dorm_does_not_run_group_correction(ungrouped_solver, monkeypatch):
     from arknights_mower.utils import resting_correction
 
     correction = MagicMock(side_effect=AssertionError("dorm groups are disabled"))
     monkeypatch.setattr(resting_correction, "correct_group_dorms", correction)
-    assert not legacy_solver.op_data.has_dorm_groups()
-    assert legacy_solver.agent_get_mood() is None
-    assert legacy_solver.tasks == []
+    assert not ungrouped_solver.op_data.has_dorm_groups()
+    assert ungrouped_solver.agent_get_mood() is None
+    assert ungrouped_solver.tasks == []
     correction.assert_not_called()
 
 
-def test_ungrouped_absent_resident_keeps_legacy_average_mood(legacy_solver):
-    data = legacy_solver.op_data
+def test_ungrouped_absent_resident_keeps_average_mood(ungrouped_solver):
+    data = ungrouped_solver.op_data
     data.operators["塑心"].current_room = ""
     assert data.average_mood() == pytest.approx(39 / 96)
 
 
-def test_ungrouped_resident_keeps_legacy_exhaust_flag(legacy_solver):
-    legacy_solver.global_plan["default_plan"].config.exhaust_require = ["塑心"]
-    assert legacy_solver.initialize_operators() is None
-    assert "塑心" in legacy_solver.op_data.exhaust_agent
-    assert not legacy_solver.op_data.has_dorm_groups()
+def test_ungrouped_resident_keeps_exhaust_flag(ungrouped_solver):
+    ungrouped_solver.global_plan["default_plan"].config.exhaust_require = ["塑心"]
+    assert ungrouped_solver.initialize_operators() is None
+    assert "塑心" in ungrouped_solver.op_data.exhaust_agent
+    assert not ungrouped_solver.op_data.has_dorm_groups()
 
 
 def test_ungrouped_fixed_slot_keeps_legacy_full_mood_release(
-    legacy_solver, monkeypatch
+    ungrouped_solver, monkeypatch
 ):
     agents = ["黑角", "冰酿", "陈", "红", "初雪"]
-    legacy_solver.op_data.config.free_room = True
+    ungrouped_solver.op_data.config.free_room = True
     monkeypatch.setattr(
-        legacy_solver, "preserve_resting_crafters", lambda agents, room: None
+        ungrouped_solver, "preserve_resting_crafters", lambda agents, room: None
     )
     monkeypatch.setattr(
-        legacy_solver.op_data,
+        ungrouped_solver.op_data,
         "get_current_room",
         MagicMock(side_effect=RuntimeError("before UI")),
     )
     with pytest.raises(RuntimeError, match="before UI"):
-        legacy_solver.choose_agent(agents, "dormitory_1")
+        ungrouped_solver.choose_agent(agents, "dormitory_1")
     assert agents == ["Free", "冰酿", "Free", "Free", "Free"]
 
 
 @pytest.mark.parametrize("operation", ["shift", "priority"])
-def test_normal_group_keeps_legacy_in_place_order(legacy_solver, operation):
-    data = legacy_solver.op_data
+def test_normal_group_keeps_legacy_in_place_order(ungrouped_solver, operation):
+    data = ungrouped_solver.op_data
     original = data.groups["联动"]
     for name, mood in [("伊内丝", 10), ("银灰", 8), ("讯使", 3)]:
         data.operators[name].mood = mood
     if operation == "shift":
-        plan, _ = shift_off(legacy_solver)
+        plan, _ = shift_off(ungrouped_solver)
         assert "dormitory_1" not in plan
     else:
-        legacy_solver.rearrange_resting_priority("联动")
+        ungrouped_solver.rearrange_resting_priority("联动")
     assert data.groups["联动"] is original
     assert original == ["讯使", "银灰", "伊内丝"]
 
 
-@pytest.mark.parametrize("experimental", [False, True])
-def test_multiple_idle_beds_finishing_together_generate_release(solver, experimental):
+def test_multiple_idle_beds_finishing_together_generate_release(solver):
     data = solver.op_data
-    data.config.experimental_dorm_logic = experimental
     data.config.free_room = True
     completed_at = datetime.now() + timedelta(hours=1)
     for bed in data.dorm:
@@ -1245,23 +1292,9 @@ def test_multiple_idle_beds_finishing_together_generate_release(solver, experime
         data.operators[bed.name].mood = 10
 
     solver.plan_metadata()
-
-    if experimental:
-        assert len(solver.tasks) == 3
-        assert {task.meta_data for task in solver.tasks} == {
-            bed.name for bed in data.dorm
-        }
-        for task in solver.tasks:
-            assert task.type == TaskTypes.RELEASE_DORM
-            assert completed_at <= task.time <= completed_at + timedelta(seconds=1)
-            op = data.operators[task.meta_data]
-            expected = ["Current"] * 5
-            expected[op.current_index] = "Free"
-            assert task.plan == {op.current_room: expected}
-    else:
-        assert len(solver.tasks) == 1
-        assert solver.tasks[0].type == TaskTypes.RELEASE_DORM
-        assert solver.tasks[0].time == completed_at
-        assert solver.tasks[0].plan == {
-            "dormitory_1": ["Current", "Current", "Free", "Free", "Free"]
-        }
+    assert len(solver.tasks) == 1
+    task = solver.tasks[0]
+    assert task.type == TaskTypes.RELEASE_DORM
+    assert task.time == completed_at
+    assert task.release_dorm_targets() == {bed.name: bed.position for bed in data.dorm}
+    assert task.plan == {"dormitory_1": ["Current", "Current", "Free", "Free", "Free"]}

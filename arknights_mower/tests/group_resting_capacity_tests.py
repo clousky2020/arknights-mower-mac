@@ -63,7 +63,6 @@ def solver(monkeypatch):
     monkeypatch.setattr(config, "save_conf", lambda: None)
     monkeypatch.setattr(base_schedule, "_is_mastery_busy", lambda name: False)
     config.conf.enable_mastery = False
-    config.conf.experimental_dorm_logic = True
     for field in (
         "fodder_operators",
         "t5_operators",
@@ -91,6 +90,7 @@ def solver(monkeypatch):
             *[Room("Free", "", []) for _ in range(3)],
         ]
     instance = object.__new__(BaseSchedulerSolver)
+    instance._scan_card_moods = MagicMock()
     instance.global_plan = {
         "default_plan": Plan(
             rooms,
@@ -100,7 +100,6 @@ def solver(monkeypatch):
                 "",
                 resting_standby=",".join(DEEP[1:]),
                 ope_resting_priority=DEEP[0],
-                experimental_dorm_logic=True,
             ),
         ),
         "backup_plans": [],
@@ -210,7 +209,7 @@ def test_unrelated_correction_does_not_recall_standby_group(solver):
 
 
 @pytest.mark.parametrize(
-    "failure", ["no_bed", "exhaust", "full", "no_anchor", "full_anchor", "cover"]
+    "failure", ["no_bed", "exhaust", "full", "full_anchor", "cover"]
 )
 def test_required_beds_and_replacements_fail_without_partial_assignment(
     solver, failure
@@ -229,13 +228,13 @@ def test_required_beds_and_replacements_fail_without_partial_assignment(
         names[index] = "年"
         apply_plan(solver, {room: names})
     elif failure in ("exhaust", "full"):
+        if failure == "full":
+            data.config.rest_in_full.append(DEEP[1])
         setattr(
             data.operators[DEEP[1]],
             "exhaust_require" if failure == "exhaust" else "rest_in_full",
             True,
         )
-    elif failure == "no_anchor":
-        data.operators[DEEP[0]].resting_priority = "low"
     elif failure == "full_anchor":
         data.operators[DEEP[0]].mood = 24
     else:
@@ -380,6 +379,7 @@ def test_workshop_selection_does_not_disable_group_standby(solver):
 
 
 def test_ungrouped_candidate_waits_without_bed_and_fills_later_free_bed(solver):
+    config.conf.rescue_threshold = 0
     name = OTHERS[0]
     observed = {
         room: [slot.agent for slot in slots]
@@ -397,7 +397,7 @@ def test_ungrouped_candidate_waits_without_bed_and_fills_later_free_bed(solver):
         occupant = data.operators[occupant_name]
         occupant.current_room, occupant.current_index = bed.position
         occupant.resting_priority = "high"
-        occupant.mood = 5
+        occupant.mood = 10
         occupant.time_stamp = now
         bed.name = occupant_name
         bed.time = now + timedelta(hours=1 if index == 0 else 2)
@@ -407,6 +407,7 @@ def test_ungrouped_candidate_waits_without_bed_and_fills_later_free_bed(solver):
     candidate.mood = 10
     candidate.time_stamp = now
     solver.total_agent = [candidate]
+    assert not data.rescue_needed()
 
     plan = solver.resting()
 
@@ -510,7 +511,7 @@ def test_candidate_below_rescue_line_stays_low_until_return(solver):
     data.update_standby_low_priority(candidate, now)
     assert candidate.standby_low_priority
     assert solver._resting_tier(candidate).name == "LOW_MAIN"
-    assert not data._can_standby(candidate)
+    assert data._can_standby(candidate)
 
     # 恢复越过急救线也不在休息途中降回候补。
     candidate.current_room, candidate.current_index = data.dorm[0].position
@@ -543,10 +544,10 @@ def test_low_mood_return_resets_rescue_but_working_candidate_can_escalate(
     # 下一次在岗读数仍低于急救线时，可开启新一轮急救，不能永久豁免。
     data.update_detail(candidate.name, 8.8, candidate.room, candidate.index)
     assert candidate.standby_low_priority
-    assert not data._can_standby(candidate)
+    assert data._can_standby(candidate)
 
 
-def test_candidate_below_rescue_line_cannot_wait_without_bed(solver):
+def test_candidate_below_rescue_line_can_wait_when_higher_tiers_need_beds(solver):
     occupy_beds(solver, "high")
     data = solver.op_data
     candidate = data.operators[DEEP[1]]
@@ -558,20 +559,12 @@ def test_candidate_below_rescue_line_cannot_wait_without_bed(solver):
     plan, replacements = {}, []
     solver.get_resting_plan(data.groups["深海"], replacements, plan, 0)
 
-    assert plan == {}
-    assert replacements == []
-    assert [(bed.name, bed.time) for bed in data.dorm] == before
-
-
-def test_ungrouped_candidate_extension_is_disabled_with_stable_logic(solver):
-    name = OTHERS[0]
-    conf = solver.global_plan["default_plan"].config
-    conf.resting_standby = [name]
-    conf.experimental_dorm_logic = False
-
-    assert solver.initialize_operators() is None
-    assert solver.op_data.operators[name].resting_priority != "standby"
-    assert not solver.op_data._can_standby(solver.op_data.operators[name])
+    assert plan
+    assert len(replacements) == len(DEEP)
+    assert data.is_standby(DEEP[1]) is False  # 尚未执行离岗。
+    assert sum(bed.name in DEEP for bed in data.dorm) == 1
+    assert data.operators[DEEP[1]].standby_low_priority
+    assert len(before) == len(data.dorm)
 
 
 def test_normal_low_gets_last_spare_bed_before_candidate(solver):

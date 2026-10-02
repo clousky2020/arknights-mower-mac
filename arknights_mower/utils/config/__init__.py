@@ -14,8 +14,13 @@ import yaml
 from pydantic import BaseModel
 from yamlcore import CoreDumper, CoreLoader
 
+from arknights_mower import __system__
 from arknights_mower.utils.config.conf import Conf
-from arknights_mower.utils.config.plan import PlanModel, migrate_legacy_dorm_order
+from arknights_mower.utils.config.plan import (
+    PlanModel,
+    has_retired_dorm_options,
+    migrate_legacy_dorm_order,
+)
 from arknights_mower.utils.network_settings import apply_http_proxy
 from arknights_mower.utils.path import get_path
 
@@ -114,6 +119,8 @@ migrate_app_config_paths()
 
 
 def save_conf():
+    conf.sync_legacy_device_fields()
+
     def dump(f):
         yaml.dump(
             conf.model_dump(exclude_unset=True),
@@ -128,6 +135,7 @@ def save_conf():
 
 
 _legacy_dorm_order = ""
+_retired_dorm_conf = False
 operation_feedback_avg: Optional[float] = None
 operation_feedback_count: int = 0
 operation_feedback_mode: Optional[str] = None
@@ -137,12 +145,13 @@ operation_recovery_successes: int = 0
 
 
 def load_conf():
-    """读取全局配置，并保留测试逻辑可迁入排班文件的宿舍顺序。"""
-    global conf, _legacy_dorm_order
+    """读取全局配置，暂存旧全局宿舍顺序供排班迁移。"""
+    global conf, _legacy_dorm_order, _retired_dorm_conf
     global operation_feedback_avg, operation_feedback_count, operation_feedback_mode
     global operation_feedback_cap, operation_failure_streak
     global operation_recovery_successes
     _legacy_dorm_order = ""
+    _retired_dorm_conf = False
     operation_feedback_avg = None
     operation_feedback_count = 0
     operation_feedback_mode = None
@@ -151,7 +160,14 @@ def load_conf():
     operation_recovery_successes = 0
     if not conf_path.is_file():
         conf_path.parent.mkdir(exist_ok=True)
-        conf = Conf()
+        # A fresh Mac/Linux host has no chosen endpoint. Keep legacy migration
+        # unchanged, but do not give new users the old MuMu default port.
+        conf = (
+            Conf(device={})
+            if __system__ in {"darwin", "linux"}
+            and os.environ.get("MOWER_ANDROID") != "1"
+            else Conf()
+        )
         save_conf()
         return
     with conf_path.open("r", encoding="utf-8") as f:
@@ -159,6 +175,15 @@ def load_conf():
         # 读文件与 /conf POST 等所有构造路径都走同一套迁移。
         raw = yaml.load(f, Loader=CoreLoader) or {}
     _legacy_dorm_order = str(raw.get("dorm_order", "") or "")
+    _retired_dorm_conf = bool(
+        {
+            "experimental_dorm_logic",
+            "refresh_backup_plan_after_mood",
+            "workshop_low_priority_rest",
+            "dorm_order",
+        }
+        & raw.keys()
+    )
     conf = Conf(**raw)
 
 
@@ -174,7 +199,7 @@ def save_plan():
 
 
 def load_plan():
-    global plan, _legacy_dorm_order
+    global plan, _legacy_dorm_order, _retired_dorm_conf
     created = not plan_path.is_file()
     if created:
         plan_path.parent.mkdir(exist_ok=True)
@@ -185,11 +210,13 @@ def load_plan():
         with plan_path.open("r", encoding="utf-8-sig") as f:
             data = json.load(f)
         plan = PlanModel(**data)
-    migrated = conf.experimental_dorm_logic and migrate_legacy_dorm_order(
-        plan, data, _legacy_dorm_order
-    )
-    if created or migrated:
+    migrated = migrate_legacy_dorm_order(plan, data, _legacy_dorm_order)
+    if created or migrated or has_retired_dorm_options(data):
         save_plan()
+    # 排班迁移落盘后再清除旧全局字段，避免迁移中断丢失顺序。
+    if _retired_dorm_conf:
+        save_conf()
+        _retired_dorm_conf = False
 
 
 plan: PlanModel
@@ -200,6 +227,8 @@ stop_mower = Event()
 stop_maa = Event()
 # 一键专精建计划后唤醒调度休眠（web 线程 set，_idle_sleep 轮询检查清掉）
 wake_scheduler = Event()
+# 维护开始或大版本预备阈值生效时，退出调度器交由主循环重新检查公告。
+maintenance_recheck = Event()
 
 # 日志
 log_queue = Queue()

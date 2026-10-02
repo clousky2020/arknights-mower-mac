@@ -15,14 +15,14 @@ from arknights_mower.utils.plan import Plan, PlanConfig, Room  # noqa: E402
 from arknights_mower.utils.scheduler_task import try_reorder  # noqa: E402
 
 
-@pytest.fixture(params=[False, True], ids=["legacy", "experimental"])
-def solver(request, monkeypatch):
+@pytest.fixture
+def solver(monkeypatch):
     monkeypatch.setattr(config, "conf", config.Conf())
     monkeypatch.setattr(config, "save_conf", lambda: None)
     monkeypatch.setattr(base, "_is_mastery_busy", lambda name: False)
     monkeypatch.setattr(logger, "disabled", True)
     config.conf.enable_mastery = False
-    config.conf.experimental_dorm_logic = request.param
+    config.conf.rescue_threshold = 0
     instance = object.__new__(base.BaseSchedulerSolver)
     instance.global_plan = {
         "default_plan": Plan(
@@ -49,7 +49,6 @@ def solver(request, monkeypatch):
                 "",
                 "",
                 ope_resting_priority="歌蕾蒂娅",
-                experimental_dorm_logic=request.param,
             ),
         ),
         "backup_plans": [],
@@ -91,6 +90,7 @@ def test_dorm_priority_does_not_take_shared_cover_from_exhausted_group(
 
 
 def test_shift_off_keeps_original_mood_margin_against_lower_limit(solver):
+    config.conf.rescue_threshold = 0
     data = solver.op_data
     data.operators["令"].mood = 8
     data.operators["令"].lower_limit = 12
@@ -131,6 +131,7 @@ def test_idle_fill_waits_until_working_group_has_reserved_beds(solver):
 
 @pytest.mark.parametrize("solver", [True], indirect=True)
 def test_newcomer_uses_vip_vacated_by_same_shift_replacement(solver):
+    config.conf.rescue_threshold = 0
     data = solver.op_data
     first, second = "dormitory_1", "dormitory_2"
     # 首个宿舍只剩一个动态床位，正被本轮即将上岗的替班占用。

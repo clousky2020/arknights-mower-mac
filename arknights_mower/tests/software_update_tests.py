@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 import zipfile
+from contextlib import ExitStack
 from itertools import product
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -443,11 +444,99 @@ class ReleaseDiscoveryTests(unittest.TestCase):
             patch.object(update, "__version__", "4.1.6-alpha.9.g87654321"),
             patch.object(runtime, "frozen", return_value=True),
             patch.object(update, "platform_asset", return_value=("windows", "x64")),
-            patch.object(update, "release_index", return_value=release_index(nightly)),
+            patch.object(
+                update,
+                "release_index",
+                return_value=release_index(
+                    nightly,
+                    [
+                        release(
+                            "v4.1.6-alpha.9.g87654321",
+                            True,
+                            system="windows",
+                            arch="x64",
+                            published_at="2026-08-31T00:00:00Z",
+                        )
+                    ],
+                ),
+            ),
         ):
             result = update.check("dev")
             self.assertTrue(result["available"])
             self.assertFalse(result["downgrade"])
+
+    def test_same_alpha_nightly_uses_exact_direct_ota_and_publication_order(self):
+        old = release(
+            "v4.1.6-alpha.10.gacfa1727",
+            True,
+            system="windows",
+            arch="x64",
+            published_at="2026-09-27T14:50:18Z",
+        )
+        target = release(
+            "v4.1.6-alpha.10.g75339a4b",
+            True,
+            system="windows",
+            arch="x64",
+            published_at="2026-09-28T00:32:24Z",
+        )
+        index = release_index(target, [old])
+        index["full_assets"][0]["size"] = 100
+        ota_name = (
+            "arknights-mower-ota_4.1.6-alpha.10.gacfa1727_to_"
+            "4.1.6-alpha.10.g75339a4b_windows_x64_v2.zip"
+        )
+        index["ota_assets"] = [
+            {
+                "name": ota_name,
+                "size": 9,
+                "digest": "sha256:" + "b" * 64,
+                "url": f"https://github.com/{update.OTA_REPO}/releases/download/{target['tag_name']}/{ota_name}",
+            }
+        ]
+        with (
+            patch.object(update, "__version__", old["tag_name"].removeprefix("v")),
+            patch.object(runtime, "frozen", return_value=True),
+            patch.object(update, "platform_asset", return_value=("windows", "x64")),
+            patch.object(update, "release_index", return_value=index),
+        ):
+            checked = update.check("dev")
+        self.assertTrue(checked["available"])
+        self.assertFalse(checked["downgrade"])
+        self.assertEqual(
+            update._checks[checked["check_id"]]["ota_asset"]["name"], ota_name
+        )
+        self.assertTrue(
+            update.release_is_downgrade(
+                "dev", release_index(old, [target]), target["tag_name"]
+            )
+        )
+
+    def test_unlisted_nightly_requires_manual_confirmation(self):
+        target = release(
+            "v4.1.6-alpha.10.g75339a4b", True, system="windows", arch="x64"
+        )
+        with (
+            patch.object(update, "__version__", "4.1.6-alpha.10.gacfa1727"),
+            patch.object(runtime, "frozen", return_value=True),
+            patch.object(update, "platform_asset", return_value=("windows", "x64")),
+            patch.object(update, "release_index", return_value=release_index(target)),
+        ):
+            checked = update.check("dev")
+        self.assertTrue(checked["available"])
+        self.assertTrue(checked["downgrade"])
+
+    def test_offline_nightly_requires_confirmation_when_sha_order_is_unknown(self):
+        package = runtime.state_dir() / "nightly.zip"
+        package.write_bytes(make_release_package("4.1.6-alpha.10.gacfa1727"))
+        with (
+            patch.object(update, "__version__", "4.1.6-alpha.10.g75339a4b"),
+            patch.object(runtime, "frozen", return_value=True),
+            patch.object(update, "platform_asset", return_value=("windows", "x64")),
+        ):
+            plan = update.manual_plan(package)
+        self.assertEqual(plan["channel"], "dev")
+        self.assertTrue(plan["downgrade"])
 
     def test_prerelease_check_uses_channel_index(self):
         with (
@@ -1044,6 +1133,7 @@ class WorkerTests(unittest.TestCase):
         worker.rollback = Mock()
         worker.execute()
         worker.rollback.assert_called_once()
+        worker.restart.assert_any_call(worker.stopped, recovery=True)
         worker.cleanup_verified_backups.assert_not_called()
         self.assertEqual(
             runtime.read_json(self.state / "status.json")["status"], "failed"
@@ -1085,6 +1175,52 @@ class WorkerTests(unittest.TestCase):
                         env["MOWER_RESTART_PORT"], str(record.get("port") or "")
                     )
                     self.assertEqual(env["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+
+    def test_restart_waits_for_registration_after_launcher_exits(self):
+        record = {
+            "kind": "instance",
+            "space": "space",
+            "name": "实例",
+            "port": 58100,
+            "running": True,
+        }
+        ready = {**record, "ready": True, "restart_job": self.job["id"]}
+        worker = self.worker()
+        with (
+            patch.object(subprocess, "Popen") as launch,
+            patch(
+                "arknights_mower.utils.software_update_worker.instances",
+                side_effect=[[], [ready]],
+            ),
+            patch("arknights_mower.utils.software_update_worker.time.sleep"),
+        ):
+            launch.return_value.poll.return_value = 0
+            worker.restart([record])
+        self.assertTrue(worker.verified_restart)
+
+    def test_missing_manager_in_package_is_rejected_before_shutdown(self):
+        self.job.update(deployment="release")
+        worker = self.worker()
+
+        def prepare(payload_dir):
+            payload = payload_dir / "mower"
+            (payload / "_internal/arknights_mower/utils").mkdir(parents=True)
+            (
+                payload / ("mower.exe" if sys.platform == "win32" else "mower")
+            ).write_bytes(b"launcher")
+            (payload / "_internal/arknights_mower/utils/update_runtime.py").write_bytes(
+                b"runtime"
+            )
+
+        with (
+            patch.object(worker, "prepare_full_package", side_effect=prepare),
+            patch(
+                "arknights_mower.utils.software_update_worker.instances",
+                return_value=[{"kind": "manager"}],
+            ),
+            self.assertRaisesRegex(ValueError, "缺少正在运行的多开管理器"),
+        ):
+            worker.prepare_package()
 
     def test_silent_restart_restores_unified_tray_and_managed_instances(self):
         records = [
@@ -1415,6 +1551,7 @@ class ArchiveAndLauncherTests(unittest.TestCase):
         import webview_ui
         from arknights_mower import utils
         from arknights_mower.utils import network, path
+        from arknights_mower.utils.lifecycle import Shutdown
 
         for system, background, tray_enabled, restart, managed in product(
             ("darwin", "linux", "win32"), *[(True, False)] * 4
@@ -1429,6 +1566,21 @@ class ArchiveAndLauncherTests(unittest.TestCase):
             server.stop.return_value = "true"
             registration = Mock(record={})
             registration.shutdown_requested.return_value = True
+            shutdown = Shutdown()
+
+            def make_thread(*args, **kwargs):
+                thread = Mock()
+                target = kwargs.get("target")
+                if target is not None and target.__name__ == "resume_after_update":
+
+                    def resume():
+                        registration.shutdown_requested.return_value = False
+                        target()
+                        registration.shutdown_requested.return_value = True
+
+                    thread.start.side_effect = resume
+                return thread
+
             with (
                 self.subTest(
                     system=system,
@@ -1436,49 +1588,83 @@ class ArchiveAndLauncherTests(unittest.TestCase):
                     tray=tray_enabled,
                     restart=restart,
                 ),
-                patch.object(sys, "platform", system),
-                patch.dict(
-                    os.environ,
-                    {
-                        "MOWER_BACKGROUND": "1" if background else "0",
-                        "MOWER_RESTART_JOB": "fixture" if restart else "",
-                        "MOWER_RESUME_RUN": "1",
-                        "MOWER_RESTART_PORT": "58100",
-                        "MOWER_MANAGED": "1" if managed else "0",
-                    },
-                ),
-                patch.dict(sys.modules, {"server": server}),
-                patch.object(sys, "argv", ["mower"]),
-                patch.object(utils, "config", config, create=True),
-                patch.object(path, "global_space", ""),
-                patch.object(runtime, "read_json", return_value={}),
-                patch.object(runtime, "active_job", return_value=False),
-                patch.object(runtime, "frozen", return_value=True),
-                patch.object(runtime, "RuntimeRegistration", return_value=registration),
-                patch.object(runtime, "hide_macos_dock_icon") as hide_dock,
-                patch.object(network, "is_port_in_use", side_effect=[False, True]),
-                patch.multiple(
-                    webview_ui,
-                    exit_if_webview_backend_missing=Mock(),
-                    close_child=Mock(),
-                ),
-                patch.object(update, "request_auto_check") as auto_check,
-                patch.object(webview_ui.mp, "Queue") as queue,
-                patch.object(
-                    webview_ui, "start_desktop_child", return_value=(Mock(), Mock())
-                ) as process,
-                patch(
-                    "arknights_mower.utils.desktop_process.log_channel",
-                    return_value=Mock(),
-                ),
-                patch.multiple(
-                    "arknights_mower.utils.log",
-                    init_file_logging=Mock(),
-                    start_mp_listener=Mock(),
-                    mp_listener=Mock(),
-                ),
-                patch("threading.Thread") as threads,
+                ExitStack() as stack,
             ):
+                stack.enter_context(patch.object(sys, "platform", system))
+                stack.enter_context(
+                    patch.dict(
+                        os.environ,
+                        {
+                            "MOWER_BACKGROUND": "1" if background else "0",
+                            "MOWER_RESTART_JOB": "fixture" if restart else "",
+                            "MOWER_RESUME_RUN": "1",
+                            "MOWER_RESTART_PORT": "58100",
+                            "MOWER_MANAGED": "1" if managed else "0",
+                            "MOWER_RESUME_MODE": "",
+                        },
+                    )
+                )
+                stack.enter_context(patch.dict(sys.modules, {"server": server}))
+                stack.enter_context(patch.object(sys, "argv", ["mower"]))
+                stack.enter_context(patch.object(utils, "config", config, create=True))
+                stack.enter_context(patch.object(path, "global_space", ""))
+                stack.enter_context(patch.object(runtime, "read_json", return_value={}))
+                stack.enter_context(
+                    patch.object(runtime, "active_job", return_value=False)
+                )
+                stack.enter_context(patch.object(runtime, "frozen", return_value=True))
+                stack.enter_context(
+                    patch.object(
+                        runtime, "RuntimeRegistration", return_value=registration
+                    )
+                )
+                hide_dock = stack.enter_context(
+                    patch.object(runtime, "hide_macos_dock_icon")
+                )
+                stack.enter_context(
+                    patch.object(network, "is_port_in_use", side_effect=[False, True])
+                )
+                stack.enter_context(
+                    patch.multiple(
+                        webview_ui,
+                        exit_if_webview_backend_missing=Mock(),
+                        close_child=Mock(),
+                        start_http_server=Mock(),
+                    )
+                )
+                stack.enter_context(
+                    patch("arknights_mower.utils.lifecycle.shutdown", shutdown)
+                )
+                auto_check = stack.enter_context(
+                    patch.object(update, "request_auto_check")
+                )
+                queue = stack.enter_context(patch.object(webview_ui.mp, "Queue"))
+                process = stack.enter_context(
+                    patch.object(
+                        webview_ui, "start_desktop_child", return_value=(Mock(), Mock())
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "arknights_mower.utils.desktop_process.log_channel",
+                        return_value=Mock(),
+                    )
+                )
+                stack.enter_context(
+                    patch.multiple(
+                        "arknights_mower.utils.log",
+                        init_file_logging=Mock(),
+                        start_mp_listener=Mock(),
+                        mp_listener=Mock(),
+                        close_logging=Mock(),
+                        close_mp_logging=Mock(),
+                        close_screenshot_store=Mock(),
+                    )
+                )
+                threads = stack.enter_context(
+                    patch("threading.Thread", side_effect=make_thread)
+                )
+                stack.enter_context(patch("time.sleep"))
                 webview_ui.run_desktop()
                 auto_check.assert_called_once()
                 self.assertEqual(server.resource_update.running.call_count, 2)
@@ -1500,8 +1686,10 @@ class ArchiveAndLauncherTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(resumes), int(restart))
                 if resumes:
+                    server.start.assert_called_once_with("2")
                     registration.shutdown_requested.return_value = False
                     resumes[0]()
+                    # A late worker cannot restart automation after shutdown.
                     server.start.assert_called_once_with("2")
 
     def test_tray_always_hides_its_dock_icon(self):
@@ -1539,15 +1727,16 @@ class ArchiveAndLauncherTests(unittest.TestCase):
         )
 
     def test_closed_child_is_joined_without_forced_termination(self):
-        from webview_ui import close_child
+        from webview_ui import close_child, own_child
 
         process = Mock()
-        process.is_alive.side_effect = [True, False, False]
+        process.is_alive.side_effect = [True, False, False, False]
         connection = Mock()
+        own_child(process, connection)
         close_child(process, connection)
         connection.send.assert_called_once_with("exit")
         process.terminate.assert_not_called()
-        self.assertEqual(process.join.call_count, 2)
+        self.assertEqual(process.join.call_count, 1)
 
 
 class ThreeInstanceIntegrationTests(unittest.TestCase):

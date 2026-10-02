@@ -11,7 +11,12 @@ from arknights_mower.utils.csleep import MowerExit, csleep
 from arknights_mower.utils.csv_utils import EmptyDataError, read_csv_rows
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.depot import 创建csv, 创建json
-from arknights_mower.utils.device.recovery import DeviceRecoveryError
+from arknights_mower.utils.device.application import (
+    RECOVERABLE_DEVICE_ERRORS,
+    create_device_control,
+)
+from arknights_mower.utils.device.recovery import wait_for_recovery
+from arknights_mower.utils.device.touch_backend import TouchFailure
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.news_checker import MaintenanceInfo, NewsChecker
 from arknights_mower.utils.operators import Operator
@@ -20,14 +25,25 @@ from arknights_mower.utils.resource_pkg import (
     refresh_resource_at_boundary,
     resource_task_session,
 )
-from arknights_mower.utils.simulator import restart_simulator
 
 base_scheduler = None
+device_control = create_device_control()
 _maintenance_timer = None
 _maintenance_timer_key = None
 _maintenance_timer_lock = Lock()
 _notified_maintenance_ids = set()
 _flash_probe_ids = set()
+
+
+def _close_device_session():
+    if device_control.shutdown_requested:
+        # Application shutdown joins this worker before restoring preparation.
+        return device_control.status()
+    result = device_control.close()
+    if not result.ok:
+        logger.error(f"关闭设备会话失败：{result.error.message}")
+    return result
+
 
 _ADB_CONNECTION_FAILURES = {
     "Can't start adb server",
@@ -106,10 +122,12 @@ def _arm_maintenance_timer(info: MaintenanceInfo, now=None):
                 with _maintenance_timer_lock:
                     _maintenance_timer = None
                     _maintenance_timer_key = None
+                config.maintenance_recheck.set()
                 config.wake_scheduler.set()
             elif info.update_type == "major":
                 _stop_for_major_update(info)
             else:
+                config.maintenance_recheck.set()
                 config.wake_scheduler.set()
 
         timer = Timer(delay, begin_maintenance)
@@ -256,17 +274,22 @@ def _read_depot_scan_timestamp(path):
 
 
 # 执行自动排班
-def main(saved_state, restart_after_mood_read=False):
+def main(saved_state, *, preparation_serial=None):
     global base_scheduler
+    config.maintenance_recheck.clear()
     try:
-        with resource_task_session():
-            return _main(saved_state, restart_after_mood_read)
+        with (
+            device_control.run(preparation_serial=preparation_serial),
+            resource_task_session(),
+        ):
+            return _main(saved_state)
     finally:
+        _close_device_session()
         _cancel_maintenance_timer()
         base_scheduler = None
 
 
-def _main(saved_state, restart_after_mood_read=False):
+def _main(saved_state):
     logger.info("开始运行Mower")
     maintenance = NewsChecker.get_maintenance()
     if maintenance is not None:
@@ -279,21 +302,7 @@ def _main(saved_state, restart_after_mood_read=False):
     data = None
     if saved_state != {}:
         data = saved_state
-    result = simulate(data, restart_after_mood_read)
-    if result == "restart_after_mood_read":
-        from arknights_mower.solvers.record import load_state
-        from arknights_mower.utils.scheduler_task import TaskTypes
-
-        logger.info("正在按载入心情数据模式重启Mower")
-        saved_state = load_state() or {}
-        # simulate 已保存本次读取后的新状态。排班任务需要按新心情重建，但训练室
-        # 刚恢复的收取/换人任务必须保留，否则近期读过的训练室可能数小时不再进入。
-        saved_state["tasks"] = [
-            task
-            for task in saved_state.get("tasks", [])
-            if task.type in (TaskTypes.SKILL_UPGRADE, TaskTypes.SWAP_SUPPORT)
-        ]
-        simulate(saved_state)
+    simulate(data)
 
 
 def initialize(
@@ -306,7 +315,18 @@ def initialize(
         scheduler.handle_error(True)
         return scheduler
 
-    base_scheduler = BaseSchedulerSolver(connection_retries=connection_retries)
+    if not device_control.run_active:
+        _close_device_session().unwrap()
+    try:
+        device = device_control.start(connection_retries=connection_retries).unwrap()
+        return _initialize_scheduler(tasks, device)
+    except BaseException:
+        _close_device_session()
+        raise
+
+
+def _initialize_scheduler(tasks, device):
+    base_scheduler = BaseSchedulerSolver(device=device)
     from arknights_mower.utils.operators import build_global_plan
 
     plan, source_plan = build_global_plan(include_source=True)
@@ -327,58 +347,72 @@ def initialize(
     base_scheduler.drone_room = (
         None if config.conf.drone_room == "" else config.conf.drone_room
     )
-    base_scheduler.reload_room = list(
-        filter(None, config.conf.reload_room.replace("，", ",").split(","))
-    )
-
     # 关闭游戏次数计数器
     base_scheduler.task_count = 0
 
     return base_scheduler
 
 
-def simulate(saved, restart_after_mood_read=False):
+def _resume_device_dispatch(scheduler=None, failure=None):
+    def resume():
+        if device_control.shutdown_requested or config.stop_mower.is_set():
+            raise MowerExit
+        device = device_control.recover().unwrap()
+        if scheduler is not None:
+            scheduler.device = device
+            scheduler.recog.device = device
+            scheduler.recog.update()
+        return device
+
+    csleep(30)
+    device = wait_for_recovery(resume, retry_errors=RECOVERABLE_DEVICE_ERRORS)
+    if isinstance(failure, TouchFailure) and failure.delivery_unknown:
+        logger.warning("输入结果待核实：保留当前任务，暂停设备调度，不重复提交副作用")
+        while not config.stop_mower.is_set():
+            device_control.pause_dispatch(failure)
+            csleep(30)
+            if device_control.shutdown_requested:
+                raise MowerExit
+            if scheduler is not None:
+                wait_for_recovery(resume, retry_errors=RECOVERABLE_DEVICE_ERRORS)
+        raise MowerExit
+    return device
+
+
+def simulate(saved):
     """
     具体调用方法可见各个函数的参数说明
     """
     logger.info(f"正在使用全局配置空间: {path.global_space}")
     tasks = saved["tasks"] if saved else []
-    reconnect_max_tries = 10
-    reconnect_tries = 0
     connection_retries = 1
     global base_scheduler
     if config.stop_mower.is_set():
         return
-    if config.conf.close_simulator_when_idle:
-        connection_retries = 3
-        logger.info("已启用任务结束后关闭模拟器，任务开始前直接启动模拟器")
-        try:
-            if not restart_simulator(stop=False, start=True):
-                raise ConnectionError("任务开始前启动模拟器失败")
-        except MowerExit:
-            return
     success = False
     while not success:
         try:
             if config.stop_mower.is_set():
                 raise MowerExit
             base_scheduler = initialize([], connection_retries=connection_retries)
-            base_scheduler.restart_after_mood_read = (
-                restart_after_mood_read and not config.conf.experimental_dorm_logic
-            )
             # saved=None 表示没有可载入的运行缓存。此时干员 current_room 尚未读取，
             # 首轮任务开始前必须暂缓副表判断，避免把“未知”误判成“不在工作”。
             base_scheduler.defer_backup_plan_until_mood_read = saved is None or bool(
                 saved.get("initial_mood_pending", False)
             )
-            base_scheduler._initial_mood_probe_layout = copy.deepcopy(
-                saved.get("initial_mood_probe_layout", {}) if saved else {}
-            )
+            # 旧补读快照的实际宿舍可能已换人，只重读房态，不续跑临时试住。
+            base_scheduler._initial_mood_refresh_rooms = set(
+                saved.get("initial_mood_refresh_rooms", ()) if saved else ()
+            ) | set(saved.get("initial_mood_probe_layout", {}) if saved else {})
             success = True
+        except RECOVERABLE_DEVICE_ERRORS as exc:
+            try:
+                _resume_device_dispatch(failure=exc)
+            except MowerExit:
+                return
+            continue
         except MowerExit:
             return
-        except DeviceRecoveryError:
-            raise
         except Exception as e:
             logger.exception(e)
             if config.stop_mower.is_set():
@@ -386,27 +420,20 @@ def simulate(saved, restart_after_mood_read=False):
             if _wait_before_early_login_retry():
                 if config.stop_mower.is_set():
                     return
-                reconnect_tries = 0
                 connection_retries = 3
                 continue
-            reconnect_tries += 1
-            if reconnect_tries < 3:
-                logger.warning("初始化失败，尝试重启模拟器后重新连接")
-                if not restart_simulator():
-                    raise ConnectionError("首次初始化重启模拟器失败") from e
-                # 首次快速失败只生效一次，恢复后的初始化均先重试三次连接。
-                connection_retries = 3
-                # 下一次 initialize 会新建 Device，不重连上次运行残留的 scheduler。
-                continue
-            else:
-                raise e
+            # Session startup owns the shared recovery budget. Initialization
+            # failures (including recognition errors) must not open a new one.
+            raise
     # base_scheduler.仓库扫描() #别删了 方便我找
     validation_msg = base_scheduler.initialize_operators()
     if validation_msg is not None:
         logger.error(validation_msg)
         return
     validation_msg = base_scheduler.op_data.validate_backup_plans()
-    if not validation_msg["success"]:
+    if validation_msg.get("status") == "incomplete":
+        logger.warning(f"排班校验未完成: {validation_msg['message']}")
+    elif not validation_msg["success"]:
         logger.error(f"排班验证失败: {validation_msg['message']}")
         return
     _apply_version_update_resting_threshold(
@@ -435,12 +462,38 @@ def simulate(saved, restart_after_mood_read=False):
                 base_scheduler.op_data.operators[k].resting_from_train = getattr(
                     v, "resting_from_train", False
                 )
+                for attr, default in (
+                    ("rest_mood_release_limit", None),
+                    ("dorm_mood_fallback", ""),
+                    ("dorm_mood_peers", {}),
+                    ("idle_rest_check", None),
+                    ("temporary_dorm_fill", False),
+                ):
+                    setattr(
+                        base_scheduler.op_data.operators[k],
+                        attr,
+                        copy.deepcopy(getattr(v, attr, default)),
+                    )
                 base_scheduler.op_data.operators[k].dorm_recovery_fixed = getattr(
                     v, "dorm_recovery_fixed", ()
                 )
             base_scheduler.op_data.restore_dorm_state(saved["dorm"])
             base_scheduler.op_data.facility_states = copy.deepcopy(
                 saved.get("facility_states", {})
+            )
+            rescue = saved.get("rescue_state", {})
+            if rescue.get("main_limits") == base_scheduler.op_data.main_recovery_limits:
+                base_scheduler.op_data.rescue_mode = bool(rescue.get("active", False))
+                base_scheduler.op_data.rescue_armed = bool(rescue.get("armed", True))
+                base_scheduler.op_data.rescue_completed = (
+                    set(rescue.get("completed", ()))
+                    & base_scheduler.op_data.main_recovery_limits.keys()
+                )
+            base_scheduler.op_data.idle_dorm_search_exhausted = saved.get(
+                "idle_dorm_search_exhausted", False
+            )
+            base_scheduler.op_data.idle_dorm_search_stopped_at = saved.get(
+                "idle_dorm_search_stopped_at"
             )
             base_scheduler.party_time = saved["party_time"]
             base_scheduler.daily_visit_friend = saved["daily_visit_friend"]
@@ -456,6 +509,7 @@ def simulate(saved, restart_after_mood_read=False):
             logger.exception(ex)
     while True:
         try:
+            config.maintenance_recheck.clear()
             refresh_resource_at_boundary()
             maintenance = NewsChecker.get_maintenance()
             _apply_version_update_resting_threshold(maintenance, base_scheduler)
@@ -612,20 +666,19 @@ def simulate(saved, restart_after_mood_read=False):
                             ).total_seconds()
 
                     base_scheduler.rest_until_next_task()
+                    # A maintenance timer may have ended this sleep. Recheck the
+                    # announcement before dispatching another scheduler task.
+                    continue
 
-            result = base_scheduler.run()
-            if result == "restart_after_mood_read":
-                from arknights_mower.solvers.record import save_current_state
-
-                if save_current_state():
-                    return result
-                logger.warning("心情数据保存失败，直接刷新副表后继续当前Mower流程")
-                base_scheduler.backup_plan_solver()
-            reconnect_tries = 0
+            base_scheduler.run()
+        except RECOVERABLE_DEVICE_ERRORS as exc:
+            try:
+                _resume_device_dispatch(base_scheduler, exc)
+            except MowerExit:
+                return
+            continue
         except MowerExit:
             return
-        except DeviceRecoveryError:
-            raise
         except (ConnectionError, ConnectionAbortedError, AttributeError) as e:
             logger.exception(
                 "设备连接或页面识别失败：%s",
@@ -635,28 +688,12 @@ def simulate(saved, restart_after_mood_read=False):
             if _wait_before_early_login_retry():
                 if config.stop_mower.is_set():
                     return
-                reconnect_tries = 0
                 continue
-            reconnect_tries += 1
-            if reconnect_tries < reconnect_max_tries:
-                logger.warning("正在重新连接设备并恢复运行")
-                # 内层重连循环加次数上限，最后失败抛错而非无限重启
-                retry = 0
-                while retry < reconnect_max_tries:
-                    retry += 1
-                    try:
-                        base_scheduler = initialize([], base_scheduler)
-                        break
-                    except (MowerExit, DeviceRecoveryError):
-                        raise
-                    except Exception as e:
-                        if retry >= reconnect_max_tries:
-                            raise
-                        logger.exception("重新连接设备失败，将再次尝试：%s", e)
-                        base_scheduler.device.reconnect()
-                continue
-            else:
-                raise e
+            try:
+                _resume_device_dispatch(base_scheduler, e)
+            except MowerExit:
+                return
+            continue
         except RuntimeError as e:
             logger.exception(
                 "运行时发生错误，正在尝试恢复设备连接：%s",
@@ -667,7 +704,10 @@ def simulate(saved, restart_after_mood_read=False):
                 if config.stop_mower.is_set():
                     return
                 continue
-            base_scheduler.device.reconnect()
+            try:
+                _resume_device_dispatch(base_scheduler, e)
+            except MowerExit:
+                return
         except Exception as e:
             logger.exception(
                 "任务执行失败，正在刷新画面后继续：%s",
@@ -678,4 +718,10 @@ def simulate(saved, restart_after_mood_read=False):
                 if config.stop_mower.is_set():
                     return
                 continue
-            base_scheduler.recog.update()
+            try:
+                base_scheduler.recog.update()
+            except RECOVERABLE_DEVICE_ERRORS as exc:
+                try:
+                    _resume_device_dispatch(base_scheduler, exc)
+                except MowerExit:
+                    return

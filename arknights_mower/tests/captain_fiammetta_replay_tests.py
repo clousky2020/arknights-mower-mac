@@ -29,7 +29,6 @@ def captain(monkeypatch):
     for module in (base, operators, scheduler_task):
         monkeypatch.setattr(module, "datetime", Clock)
     monkeypatch.setattr(config, "conf", config.Conf())
-    config.conf.experimental_dorm_logic = True
     config.conf.enable_mastery = False
     monkeypatch.setattr(
         config,
@@ -118,8 +117,8 @@ def test_logged_charge_replaces_old_rest_in_one_final_arrangement(captain):
     captain.agent_arrange = MagicMock(side_effect=arrange)
     captain.infra_main()
     assert len(seen) == 1
-    assert seen[0]["central"][1] == "歌蕾蒂娅"
-    assert captain.op_data.operators["歌蕾蒂娅"].current_room == "central"
+    # 完整收敛只提交实际差异；原本就在目标岗位的人可以保留 Current。
+    assert captain.op_data.get_current_operator("central", 1).name == "歌蕾蒂娅"
     assert all(captain.op_data.operators[n].is_working() for n in deepsea)
     assert captain.op_data.operators["信仰搅拌机"].is_resting()
 
@@ -270,13 +269,3 @@ def test_connected_old_tasks_converge_without_duplicate_operator(captain):
     ]
     assert len(assigned) == len(set(assigned))
     assert "阿罗玛" in final.plan["room_2_2"]
-
-
-def test_legacy_backup_keeps_existing_dispatch(captain):
-    captain.op_data.config.experimental_dorm_logic = False
-    captain._legacy_backup_plan_solver = MagicMock(return_value=True)
-    captain._coalesce_backup_transition = MagicMock(
-        side_effect=AssertionError("legacy")
-    )
-    assert captain.backup_plan_solver()
-    captain._legacy_backup_plan_solver.assert_called_once()

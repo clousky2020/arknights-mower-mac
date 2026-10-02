@@ -156,6 +156,7 @@ def save_action_to_sqlite_decorator(func):
         related_operator=None,
         mood_event=None,
         recorded_at=None,
+        preserve_depletion_rate=False,
     ):
         agent = self.operators[name]  # 干员
 
@@ -163,7 +164,15 @@ def save_action_to_sqlite_decorator(func):
         agent_is_high = agent.is_high()  # 是否高优先级
 
         # 调用原函数
-        result = func(self, name, mood, current_room, current_index, update_time)
+        result = func(
+            self,
+            name,
+            mood,
+            current_room,
+            current_index,
+            update_time,
+            preserve_depletion_rate=preserve_depletion_rate,
+        )
         if not update_time:
             return
         save_agent_action(
@@ -188,20 +197,30 @@ def current_state():
 
     if base_scheduler is None or base_scheduler.op_data is None:
         return None
-    original = getattr(base_scheduler, "_initial_mood_original_state", None)
-    data, tasks = original or (base_scheduler.op_data, base_scheduler.tasks)
+    data, tasks = base_scheduler.op_data, base_scheduler.tasks
     return {
         "dorm": data.all_dorms(),
         "tasks": tasks,
         "party_time": data.party_time,
         "operators": data.operators,
         "facility_states": getattr(data, "facility_states", {}),
+        "rescue_state": {
+            "active": getattr(data, "rescue_mode", False),
+            "armed": getattr(data, "rescue_armed", True),
+            "completed": sorted(getattr(data, "rescue_completed", ())),
+            "main_limits": getattr(data, "main_recovery_limits", {}),
+        },
+        "idle_dorm_search_exhausted": getattr(
+            data, "idle_dorm_search_exhausted", False
+        ),
+        "idle_dorm_search_stopped_at": getattr(
+            data, "idle_dorm_search_stopped_at", None
+        ),
         "initial_mood_pending": bool(
             getattr(base_scheduler, "defer_backup_plan_until_mood_read", False)
-            or getattr(base_scheduler, "_initial_mood_probe_active", False)
         ),
-        "initial_mood_probe_layout": getattr(
-            base_scheduler, "_initial_mood_probe_layout", {}
+        "initial_mood_refresh_rooms": sorted(
+            getattr(base_scheduler, "_initial_mood_refresh_rooms", ())
         ),
         "daily_visit_friend": base_scheduler.daily_visit_friend,
         "daily_report": base_scheduler.daily_report,

@@ -45,11 +45,13 @@ def scheduler(monkeypatch):
     )
     solver.tasks = [shift, recheck]
     solver.op_data = SimpleNamespace(
+        config=SimpleNamespace(free_room=False),
         plan={},
         operators={},
         dorm=[],
         correct_dorm=MagicMock(),
-        experimental_dorm_logic=False,
+        rescue_needed=MagicMock(return_value=False),
+        rescue_mode=False,
     )
     solver.recog = MagicMock()
     solver._simulator_closed_for_idle = False
@@ -59,12 +61,15 @@ def scheduler(monkeypatch):
     solver.check_current_focus = MagicMock()
     solver.backup_plan_solver = MagicMock(return_value=False)
     solver.queue_product_switches = MagicMock()
+    solver._sync_run_order_tasks = MagicMock()
+    solver._switch_products_before_arrangement = MagicMock()
+    solver._prepare_shift_cycle = MagicMock()
     solver.agent_get_mood = MagicMock(return_value=True)
-    solver.restart_after_mood_read = False
     solver.agent_arrange = MagicMock(side_effect=lambda *args: solver.skip())
     solver.craft_material = MagicMock(side_effect=solver.skip)
     wake = Event()
     monkeypatch.setattr(config, "wake_scheduler", wake)
+    monkeypatch.setattr(config, "maintenance_recheck", Event())
     monkeypatch.setattr(config, "stop_mower", Event())
     monkeypatch.setattr(config.conf, "enable_mastery", False)
     monkeypatch.setattr(base_schedule, "datetime", Clock)
@@ -121,9 +126,11 @@ def scheduler(monkeypatch):
 @pytest.mark.parametrize("during_wait", [False, True])
 def test_invalid_run_order_is_removed_before_scheduling(scheduler, during_wait):
     solver = scheduler.solver
-    solver.op_data.experimental_dorm_logic = True
     solver.op_data.run_order_rooms = {"room_1_1": {}} if during_wait else {}
     solver.op_data.refresh_run_order_rooms = MagicMock()
+    solver._sync_run_order_tasks = (
+        base_schedule.BaseSchedulerSolver._sync_run_order_tasks.__get__(solver)
+    )
     stale = SchedulerTask(
         scheduler.clock.now() + timedelta(minutes=2 if during_wait else -1),
         {"room_1_1": ["Current"]},
@@ -157,6 +164,161 @@ def test_http_workshop_wake_reselects_task_before_dispatch(scheduler):
     assert all(task is not scheduler.shift for task in scheduler.solver.tasks)
 
 
+def primary_with_vacancies(scheduler, monkeypatch):
+    from arknights_mower.utils.operators import Operator, Operators
+    from arknights_mower.utils.plan import Plan, PlanConfig, Room
+
+    solver = scheduler.solver
+    scheduler.clock.current = datetime.now()
+    rooms = {
+        "meeting": [Room("银灰", "", ["红"])],
+        "dormitory_1": [
+            Room(name, "", []) for name in ["杜林", "闪灵", "Free", "Free", "Free"]
+        ],
+    }
+    solver.op_data = Operators(
+        {
+            "default_plan": Plan(rooms, PlanConfig("", "", "")),
+            "backup_plans": [],
+        }
+    )
+    assert solver.op_data.init_and_validate() is None
+    solver.op_data.add(Operator("陈", "", mood=5))
+    for room, row in rooms.items():
+        for index, slot in enumerate(row):
+            if slot.agent != "Free":
+                op = solver.op_data.operators[slot.agent]
+                op.current_room, op.current_index = room, index
+    for op in solver.op_data.operators.values():
+        op.time_stamp = scheduler.clock.now()
+        op.mood = 0 if op.name == "银灰" else 5 if op.name == "陈" else 24
+    solver.tasks = [
+        SchedulerTask(
+            scheduler.clock.now() + timedelta(hours=1),
+            task_type=TaskTypes.SKILL_UPGRADE,
+        )
+    ]
+    solver.last_train_mood_read = scheduler.clock.now()
+    solver._suppress_train_correction = lambda plan: None
+    return solver
+
+
+@pytest.mark.parametrize("deferred_fill", [False, True])
+def test_run_dispatches_fresh_primary_shift_before_ordinary_dorm_fill(
+    scheduler, monkeypatch, deferred_fill
+):
+    solver = primary_with_vacancies(scheduler, monkeypatch)
+    if deferred_fill:
+        solver.tasks.append(
+            SchedulerTask(
+                scheduler.clock.now(),
+                {"dormitory_1": ["Current", "Current", "陈", "Current", "Current"]},
+                TaskTypes.FILL_DORM,
+            )
+        )
+
+    solver.run()
+
+    solver.agent_arrange.assert_called_once()
+    plan, read_time = solver.agent_arrange.call_args.args
+    assert read_time is True
+    assert plan["meeting"] == ["红"]
+    assert "银灰" in plan["dormitory_1"]
+    assert not any(task.type == TaskTypes.FILL_DORM for task in solver.tasks)
+
+
+def test_due_fill_preflight_preserves_original_task_without_new_primary(
+    scheduler, monkeypatch
+):
+    solver = primary_with_vacancies(scheduler, monkeypatch)
+    solver.op_data.operators["银灰"].mood = 24
+    fill = SchedulerTask(
+        scheduler.clock.now(),
+        {"dormitory_1": ["Current", "Current", "陈", "Current", "Current"]},
+        TaskTypes.FILL_DORM,
+    )
+    fill.simple_dorm_fill = True
+    solver.tasks.append(fill)
+    preflight = MagicMock(wraps=solver._plan_primary_recovery)
+    solver._plan_primary_recovery = preflight
+    before = fill.time
+
+    assert not solver._fill_empty_dorms()
+
+    preflight.assert_called_once_with()
+    assert any(task is fill for task in solver.tasks)
+    assert fill.time == before
+    assert fill.simple_dorm_fill
+
+
+@pytest.mark.parametrize("protected", ["retry", "restore", "product", "partial"])
+def test_due_fill_preserves_in_progress_arrangement(scheduler, monkeypatch, protected):
+    solver = primary_with_vacancies(scheduler, monkeypatch)
+    fill = SchedulerTask(
+        scheduler.clock.now(),
+        {"dormitory_1": ["Current"] * 4 + ["陈"]},
+        TaskTypes.FILL_DORM,
+    )
+    if protected == "retry":
+        fill.arrangement_retry_room = "dormitory_1"
+    elif protected == "restore":
+        fill.dorm_recovery_restore = ["dormitory_1"]
+    elif protected == "product":
+        fill.product_shift_locked = True
+    else:
+        fill.dorm_fill_plan = fill.plan | {"dormitory_2": ["Current"] * 4 + ["红"]}
+    solver.tasks.append(fill)
+    solver._plan_primary_recovery = MagicMock()
+
+    assert not solver._fill_empty_dorms()
+
+    solver._plan_primary_recovery.assert_not_called()
+    assert any(task is fill for task in solver.tasks)
+
+
+def test_due_fill_preflight_restores_task_when_planning_raises(scheduler, monkeypatch):
+    solver = primary_with_vacancies(scheduler, monkeypatch)
+    fill = SchedulerTask(
+        scheduler.clock.now(),
+        {"dormitory_1": ["Current"] * 4 + ["陈"]},
+        TaskTypes.FILL_DORM,
+    )
+    solver.tasks.append(fill)
+    solver._plan_primary_recovery = MagicMock(
+        side_effect=RuntimeError("planning failed")
+    )
+
+    with pytest.raises(RuntimeError, match="planning failed"):
+        solver._fill_empty_dorms()
+
+    assert any(task is fill for task in solver.tasks)
+
+
+def test_plan_solver_runs_primary_phase_once_before_both_idle_stages(
+    scheduler, monkeypatch
+):
+    solver = scheduler.solver
+    solver.tasks = []
+    order = []
+    solver._plan_primary_recovery = MagicMock(
+        side_effect=lambda **kwargs: order.append("primary") or True
+    )
+    solver._fill_empty_dorms = MagicMock(
+        side_effect=lambda **kwargs: order.append("fill")
+    )
+    monkeypatch.setattr(
+        base_schedule, "try_add_release_dorm", lambda *args: order.append("replace")
+    )
+    monkeypatch.setattr(
+        base_schedule, "try_workshop_tasks", lambda *args: order.append("workshop")
+    )
+
+    solver.plan_solver()
+
+    assert order == ["primary", "fill", "replace", "workshop"]
+    solver._plan_primary_recovery.assert_called_once_with(scan_moods=True)
+
+
 def test_maintenance_sleep_ignores_regular_scheduler_wakeup(scheduler):
     started_at = scheduler.clock.now()
     scheduler.wake.set()
@@ -165,6 +327,21 @@ def test_maintenance_sleep_ignores_regular_scheduler_wakeup(scheduler):
 
     assert scheduler.clock.now() == started_at + timedelta(seconds=2)
     assert scheduler.wake.is_set()
+    assert not scheduler.solver.sleeping
+
+
+def test_maintenance_wake_returns_to_main_before_dispatch(scheduler):
+    def start_maintenance():
+        config.maintenance_recheck.set()
+        scheduler.wake.set()
+
+    scheduler.on_sleep = start_maintenance
+    scheduler.solver.run()
+
+    scheduler.solver.agent_arrange.assert_not_called()
+    assert scheduler.shift in scheduler.solver.tasks
+    assert scheduler.clock.now() < scheduler.shift.time
+    assert config.maintenance_recheck.is_set()
     assert not scheduler.solver.sleeping
 
 

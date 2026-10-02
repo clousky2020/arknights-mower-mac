@@ -95,7 +95,9 @@ class TestInitDeviceWaitsForDevice(unittest.TestCase):
                 patch("arknights_mower.utils.device.adb_client.core.csleep") as sleep,
             ):
                 session.return_value.devices_list.return_value = devices
-                with self.assertRaisesRegex(RuntimeError, "Device connection failure"):
+                with self.assertRaisesRegex(
+                    ConnectionError, "Device connection failure"
+                ):
                     Device(wait_for_device=False)
                 # 只保留 ADB server 的初始探测延时，不耗完 60 秒的模拟器启动窗口。
                 sleep.assert_called_once_with(1)
@@ -134,6 +136,7 @@ class TestInitDeviceWaitsForDevice(unittest.TestCase):
 
     def test_waits_and_rediscovers_drifted_port(self):
         client = self._client()
+        client.device_id = "127.0.0.1:16928"
         ready = {"flag": False}
 
         def choose_devices(devices=None):
@@ -167,7 +170,7 @@ class TestInitDeviceWaitsForDevice(unittest.TestCase):
         # 等待窗口内重新探测：初始 csleep(1) + 至少一次 csleep(2)
         self.assertGreaterEqual(csleep.call_count, 2)
 
-    def test_adopts_single_live_device_when_no_preferred_port(self):
+    def test_rejects_single_live_device_when_no_explicit_serial(self):
         client = self._client()
         with (
             patch.object(client, "_Client__exec"),
@@ -185,9 +188,9 @@ class TestInitDeviceWaitsForDevice(unittest.TestCase):
             patch("arknights_mower.utils.device.adb_client.core.Session"),
             patch("arknights_mower.utils.device.adb_client.core.csleep"),
         ):
-            client._Client__init_device()
-        # 未配置首选端口时，认领唯一存活设备
-        self.assertEqual(client.device_id, "127.0.0.1:16928")
+            with self.assertRaisesRegex(ConnectionError, "Device connection failure"):
+                client._Client__init_device()
+        self.assertIsNone(client.device_id)
 
     def test_raises_when_device_never_registers(self):
         client = self._client()
@@ -199,7 +202,7 @@ class TestInitDeviceWaitsForDevice(unittest.TestCase):
             patch("arknights_mower.utils.device.adb_client.core.Session"),
             patch("arknights_mower.utils.device.adb_client.core.csleep"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "Device connection failure"):
+            with self.assertRaisesRegex(ConnectionError, "Device connection failure"):
                 client._Client__init_device()
 
 

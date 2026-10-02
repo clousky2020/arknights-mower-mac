@@ -105,6 +105,16 @@
               />
             </n-layout-sider>
             <n-layout-content class="layout-content-container">
+              <n-alert v-if="config_save_error" type="error" title="配置保存失败" role="alert">
+                {{ config_save_error }}。修改仍保留在当前页面。
+                <template #action>
+                  <n-button
+                    :loading="config_saving"
+                    @click="config_store.save_config().catch(() => {})"
+                    >重试保存</n-button
+                  >
+                </template>
+              </n-alert>
               <router-view v-if="loaded" />
               <ChatBot v-if="chatBotMounted" v-model:show="showChatBot" />
               <Feedback />
@@ -320,7 +330,11 @@ import {
   mowerLightThemeOverrides
 } from '@/theme/mower'
 import '@/theme/mower.css'
-import { createWindowShellAdapter, formatWindowTitle } from '@/window-shell/adapter.js'
+import {
+  createWindowShellAdapter,
+  formatWindowTitle,
+  formatEmulatorLabel
+} from '@/window-shell/adapter.js'
 import { createSaveCoordinator } from '@/utils/configPersistence'
 import { readProcessActionStatus, submitProcessAction } from '@/utils/processAction'
 import { resolveCloseIntent } from '@/utils/closePreference'
@@ -526,6 +540,8 @@ const { load_config, load_shop, load_item } = config_store
 const {
   resource_update_enable,
   resource_update_auto_update,
+  config_save_error,
+  config_saving,
   simulator,
   start_automatically,
   theme,
@@ -594,7 +610,14 @@ const windowShellTitle = computed(() =>
 // 这里标题栏内再补两个 @端口：mower 端口 = 前端服务所在端口（webview 与后端同源），
 // adb 端口 = ADB 连接地址（形如 127.0.0.1:62001）的端口段。
 const mowerPort = computed(() => window.location.port || '')
-const emulatorName = computed(() => simulator.value?.name || '')
+// 模拟器标题带上多开实例名称：同一模拟器的多个多开实例只写 MuMu12@16384 无法区分。
+// 没填实例名称时保持原样。
+const emulatorName = computed(() =>
+  formatEmulatorLabel({
+    name: simulator.value?.name,
+    instanceName: config_store.device_profile?.instance_name
+  })
+)
 const adbPort = computed(() => {
   const addr = adb.value || ''
   const idx = addr.lastIndexOf(':')
@@ -752,6 +775,8 @@ function start() {
 function apply_zoom(scale) {
   const s = Number(scale) || 1.0
   document.documentElement.style.zoom = s
+  document.documentElement.style.setProperty('--mower-zoom', String(s))
+  document.documentElement.style.setProperty('--mower-zoom-inverse', String(1 / s))
   actions_on_resize()
 }
 
@@ -1192,33 +1217,63 @@ html.mower-theme-changing *::after {
   --window-shell-scrollbar-thumb: rgba(46, 43, 40, 0.2);
   --window-shell-scrollbar-thumb-hover: rgba(46, 43, 40, 0.34);
 }
+html[data-mower-theme='dark'],
 html[data-window-shell-theme='dark'] {
-  --window-shell-scrollbar-thumb: rgba(255, 255, 255, 0.18);
-  --window-shell-scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
+  --window-shell-scrollbar-thumb: rgba(255, 255, 255, 0.22);
+  --window-shell-scrollbar-thumb-hover: rgba(255, 255, 255, 0.36);
 }
 
+.provider *,
 .provider--window-shell *,
 .n-modal,
-.n-modal * {
+.n-modal *,
+.n-drawer,
+.n-drawer *,
+.n-popover,
+.n-popover *,
+.n-dropdown-menu,
+.n-dropdown-menu *,
+.n-select-menu,
+.n-select-menu * {
   scrollbar-color: var(--window-shell-scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
 
+.provider *::-webkit-scrollbar,
 .provider--window-shell *::-webkit-scrollbar,
-.n-modal *::-webkit-scrollbar {
+.n-modal *::-webkit-scrollbar,
+.n-drawer *::-webkit-scrollbar,
+.n-popover *::-webkit-scrollbar,
+.n-dropdown-menu *::-webkit-scrollbar,
+.n-select-menu *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 
+.provider *::-webkit-scrollbar-track,
+.provider *::-webkit-scrollbar-corner,
 .provider--window-shell *::-webkit-scrollbar-track,
 .provider--window-shell *::-webkit-scrollbar-corner,
 .n-modal *::-webkit-scrollbar-track,
-.n-modal *::-webkit-scrollbar-corner {
+.n-modal *::-webkit-scrollbar-corner,
+.n-drawer *::-webkit-scrollbar-track,
+.n-drawer *::-webkit-scrollbar-corner,
+.n-popover *::-webkit-scrollbar-track,
+.n-popover *::-webkit-scrollbar-corner,
+.n-dropdown-menu *::-webkit-scrollbar-track,
+.n-dropdown-menu *::-webkit-scrollbar-corner,
+.n-select-menu *::-webkit-scrollbar-track,
+.n-select-menu *::-webkit-scrollbar-corner {
   background: transparent;
 }
 
+.provider *::-webkit-scrollbar-thumb,
 .provider--window-shell *::-webkit-scrollbar-thumb,
-.n-modal *::-webkit-scrollbar-thumb {
+.n-modal *::-webkit-scrollbar-thumb,
+.n-drawer *::-webkit-scrollbar-thumb,
+.n-popover *::-webkit-scrollbar-thumb,
+.n-dropdown-menu *::-webkit-scrollbar-thumb,
+.n-select-menu *::-webkit-scrollbar-thumb {
   min-height: 36px;
   background: var(--window-shell-scrollbar-thumb);
   background-clip: content-box;
@@ -1226,17 +1281,36 @@ html[data-window-shell-theme='dark'] {
   border-radius: 999px;
 }
 
+.provider *::-webkit-scrollbar-thumb:hover,
 .provider--window-shell *::-webkit-scrollbar-thumb:hover,
-.n-modal *::-webkit-scrollbar-thumb:hover {
+.n-modal *::-webkit-scrollbar-thumb:hover,
+.n-drawer *::-webkit-scrollbar-thumb:hover,
+.n-popover *::-webkit-scrollbar-thumb:hover,
+.n-dropdown-menu *::-webkit-scrollbar-thumb:hover,
+.n-select-menu *::-webkit-scrollbar-thumb:hover {
   background: var(--window-shell-scrollbar-thumb-hover);
   background-clip: content-box;
 }
 
+.provider *::-webkit-scrollbar-button,
 .provider--window-shell *::-webkit-scrollbar-button,
-.n-modal *::-webkit-scrollbar-button {
+.n-modal *::-webkit-scrollbar-button,
+.n-drawer *::-webkit-scrollbar-button,
+.n-popover *::-webkit-scrollbar-button,
+.n-dropdown-menu *::-webkit-scrollbar-button,
+.n-select-menu *::-webkit-scrollbar-button {
   display: none;
   width: 0;
   height: 0;
+}
+
+/* 修复界面缩放（CSS zoom）下 Naive UI / vueuc 浮层（popover / dropdown / select / tooltip / date-picker 等）坐标二次缩放漂移 */
+.v-binder-follower-container {
+  zoom: var(--mower-zoom-inverse, 1);
+}
+
+.v-binder-follower-content > * {
+  zoom: var(--mower-zoom, 1);
 }
 
 .n-tab-pane {

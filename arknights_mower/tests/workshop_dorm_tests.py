@@ -24,7 +24,6 @@ def dorm_solver(monkeypatch):
     config.conf.book_operators = []
     config.conf.workshop_manual_backup = None
     config.conf.enable_mastery = False
-    config.conf.experimental_dorm_logic = True
     solver = object.__new__(BaseSchedulerSolver)
     solver.global_plan = {
         "default_plan": Plan(
@@ -35,7 +34,7 @@ def dorm_solver(monkeypatch):
                     for name in ["塑心", "冰酿", "Free", "Free", "Free"]
                 ],
             },
-            PlanConfig("", "", "", experimental_dorm_logic=True),
+            PlanConfig("", "", ""),
         ),
         "backup_plans": [],
     }
@@ -64,9 +63,9 @@ def occupy(solver, name, index):
 
 
 @pytest.mark.parametrize(
-    "mood,allowed", [(0, True), (22, True), (22.01, False), (23, False), (24, False)]
+    "mood,allowed", [(0, True), (22, True), (22.01, True), (23, True), (24, True)]
 )
-def test_replacement_can_take_crafter_bed_only_at_most_22(dorm_solver, mood, allowed):
+def test_replacement_identity_can_take_lower_crafter_bed(dorm_solver, mood, allowed):
     occupy(dorm_solver, "空爆", 3)
     dorm_solver.op_data.operators["红"].mood = mood
     result = dorm_solver.op_data.assign_dorm("红")
@@ -107,7 +106,7 @@ def test_vacancy_fill_allocates_last_free_slot_to_regular_replacement_first(
     dorm_solver.total_agent = [crafter, replacement]
     dorm_solver.resting()
     assert next(d for d in dorm_solver.op_data.dorm if d.position[1] == 3).name == ""
-    assert dorm_solver._fill_empty_dorms()
+    assert dorm_solver._fill_empty_dorms(primary_planned=True)
     assert len(dorm_solver.tasks) == 1
     assert dorm_solver.tasks[0].type == TaskTypes.FILL_DORM
     assert dorm_solver.tasks[0].plan["dormitory_1"][3] == "红"
@@ -123,7 +122,7 @@ def test_crafter_uses_spare_slot_when_replacements_are_full(dorm_solver, free_ro
     dorm_solver.op_data.operators["陈"].mood = 24
     dorm_solver.total_agent = [crafter, replacement]
     dorm_solver.resting()
-    assert dorm_solver._fill_empty_dorms()
+    assert dorm_solver._fill_empty_dorms(primary_planned=True)
     assert len(dorm_solver.tasks) == 1
     assert dorm_solver.tasks[0].type == TaskTypes.FILL_DORM
     assert dorm_solver.tasks[0].plan["dormitory_1"][3] == "空爆"
@@ -166,8 +165,10 @@ def test_scheduled_main_bed_counts_as_protected_high_resting(dorm_solver):
     assert dorm_solver.op_data.assign_dorm("红") is None
 
 
-@pytest.mark.parametrize("mood,expected", [(22, "红"), (22.01, "空爆"), (24, "空爆")])
-def test_free_placeholder_also_preserves_crafter_above_22(dorm_solver, mood, expected):
+@pytest.mark.parametrize("mood,expected", [(22, "红"), (22.01, "红"), (24, "空爆")])
+def test_free_placeholder_uses_priority_for_any_recovering_replacement(
+    dorm_solver, mood, expected
+):
     occupy(dorm_solver, "空爆", 3)
     for name in ["红", "陈", "年"]:
         dorm_solver.op_data.operators[name].mood = mood if name == "红" else 24
@@ -177,7 +178,7 @@ def test_free_placeholder_also_preserves_crafter_above_22(dorm_solver, mood, exp
     assert agents[3] == expected
 
 
-def test_one_tired_replacement_does_not_evict_two_crafters(dorm_solver):
+def test_each_recovering_replacement_can_take_one_lower_crafter_bed(dorm_solver):
     config.conf.t5_operators = ["年"]
     occupy(dorm_solver, "空爆", 3)
     dorm_solver.op_data.operators["伊内丝"].current_room = ""
@@ -187,7 +188,7 @@ def test_one_tired_replacement_does_not_evict_two_crafters(dorm_solver):
     agents = ["塑心", "冰酿", "银灰", "Free", "Free"]
     dorm_solver.task = MagicMock(plan={"dormitory_1": agents})
     dorm_solver.preserve_resting_crafters(agents, "dormitory_1")
-    assert agents[3:] == ["红", "年"]
+    assert agents[3:] == ["红", "陈"]
 
 
 def test_replacement_identity_controls_bed_allocation_and_ui_selection(dorm_solver):

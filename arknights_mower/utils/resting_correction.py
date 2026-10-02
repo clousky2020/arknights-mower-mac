@@ -40,6 +40,7 @@ def _resting_members(op_data):
                 not op.current_room
                 and (
                     op_data._can_standby(op)
+                    or op_data.rest_mood_complete(op.name)
                     or op.time_stamp is not None
                     and op.mood >= op.upper_limit
                 )
@@ -88,6 +89,64 @@ def _can_move(op, room, plan, resting):
     return replacement not in PLACEHOLDERS | resting | {op.name}
 
 
+def reconsider_low_mood_replacements(op_data, fix_plan, is_busy):
+    """已在岗合法替班真正用尽后，再按排班表顺序寻找下一候补。"""
+    now = datetime.now()
+    reserved = {
+        name
+        for names in fix_plan.values()
+        for name in names
+        if name not in PLACEHOLDERS
+    } | set(getattr(op_data, "reserved_product_replacements", ()))
+    for room, slots in op_data.plan.items():
+        if room.startswith("dorm") or room == "train":
+            continue
+        actual = op_data.get_current_room(room, True)
+        if actual is None:
+            continue
+        for index, slot in enumerate(slots):
+            if index >= len(actual) or _requested(fix_plan, room, index) != "Current":
+                continue
+            current = actual[index]
+            if (
+                current not in getattr(slot, "replacement", ())
+                or current in TRADE_ORDER_AGENTS
+            ):
+                continue
+            cover = op_data.operators.get(current)
+            if cover is None or not op_data.replacement_exhausted(current, now):
+                # 当前替班只要还有可工作心情，就继续使用；后面的候补即使
+                # 心情更高，也不能越过排班表里已经配置好的效率顺序。
+                continue
+            owner = op_data.operators.get(slot.agent)
+            if owner is None:
+                continue
+            for name in op_data.replacement_candidates(owner):
+                candidate = op_data.operators.get(name)
+                if (
+                    candidate is None
+                    or name == current
+                    or name in reserved
+                    or name in TRADE_ORDER_AGENTS
+                    or candidate.is_high()
+                    or candidate.current_room
+                    and not candidate.is_resting()
+                    or candidate.time_stamp is None
+                    or not 0 <= candidate.mood <= 24
+                    or candidate.rest_in_full
+                    and candidate.is_resting()
+                    and candidate.current_mood(now) < candidate.upper_limit
+                    or op_data.is_dorm_replacement(name)
+                    or is_busy(name)
+                    or op_data.replacement_exhausted(name, now)
+                ):
+                    continue
+                fix_plan.setdefault(room, ["Current"] * len(slots))[index] = name
+                reserved.add(name)
+                logger.info("替班%s心情用尽，按顺序使用同岗位候补%s", current, name)
+                break
+
+
 def prefer_resting_replacements(op_data, fix_plan, is_busy):
     """完整轮休组优先维持替班；任一岗位无法替班时整组回班。"""
     if not fix_plan:
@@ -123,6 +182,7 @@ def prefer_resting_replacements(op_data, fix_plan, is_busy):
                     or candidate in reserved | resting
                     or candidate in TRADE_ORDER_AGENTS
                     or op_data.is_dorm_replacement(candidate)
+                    or op_data.replacement_exhausted(candidate)
                     or not _can_move(cover, room, requested, resting)
                     or is_busy(candidate)
                 ):
@@ -131,6 +191,10 @@ def prefer_resting_replacements(op_data, fix_plan, is_busy):
                 reserved.add(candidate)
                 break
             else:
+                if (not op.group) and op.exhaust_require and op.rest_in_full:
+                    # 独立暖机干员继续本轮恢复；正常规划按床位时间重建回班任务。
+                    slots[index] = "Current"
+                    continue
                 if op.group:
                     recalling_groups.add(op.group)
                 logger.debug(

@@ -11,7 +11,11 @@ import numpy as np
 from arknights_mower.data import workshop_formula
 from arknights_mower.solvers.record import save_inventory_counts
 from arknights_mower.utils import config, rapidocr, segment
-from arknights_mower.utils.character_recognize import operator_list, operator_list_train
+from arknights_mower.utils.character_recognize import (
+    estimate_agent_mood,
+    operator_list,
+    operator_list_train,
+)
 from arknights_mower.utils.csleep import MowerExit
 from arknights_mower.utils.image import cropimg, loadres, thres2
 from arknights_mower.utils.log import logger
@@ -69,17 +73,25 @@ def agent_card_selected(img, scope, *, train=False):
     else:
         # alexsun 归档普通选人页实测：姓名框 (631,488)-(820,520)，
         # 蓝框约 (609,113)-(834,536)。
-        left, right = name_left - 22, name_right + 14
+        # 选中蓝框会扩宽姓名分割区域；普通卡片宽度固定，不能随右边界移动。
+        left, right = name_left - 22, name_left + 203
         top, bottom = name_top - 375, name_bottom + 16
     if left < 0 or top < 0 or right > img.shape[1] or bottom > img.shape[0]:
         return None
     frame = cv2.cvtColor(img[top:bottom, left:right], cv2.COLOR_RGB2HSV)
-    blue = cv2.inRange(frame, (96, 140, 160), (105, 255, 255)) > 0
-    # 略过角落；青蓝描边应同时沿上下两条长边出现。
+    # 卡片右侧阴影使蓝框亮度降到约 140，仍须满足色相和饱和度条件。
+    blue = cv2.inRange(frame, (96, 140, 160 if train else 140), (105, 255, 255)) > 0
+    # 略过角落；完整边框用上下沿及任一侧确认。
     upper = blue[:8, 8:-8].mean()
     lower = blue[-8:, 8:-8].mean()
-    side = max(blue[8:-8, :8].mean(), blue[8:-8, -8:].mean())
-    if upper > 0.45 and lower > 0.45 and side > 0.45:
+    left_side = blue[8:-8, :8].mean()
+    right_side = blue[8:-8, -8:].mean()
+    if upper > 0.45 and lower > 0.45 and max(left_side, right_side) > 0.45:
+        return True
+    # 滚动通告只遮住上沿时，使用下沿靠上的像素和左右两侧确认。
+    # 相邻下排卡片的上沿会落在下沿靠下的像素，不能据此判为选中。
+    lower_inner = blue[-8:-5, 8:-8].mean()
+    if lower_inner > 0.45 and min(left_side, right_side) > 0.45:
         return True
     # 相邻卡片只隔几像素，前一张的边框可能擦到本卡一条边；
     # 另一条边仍明显缺失时判为未选中，避免整页校验一直等待。
@@ -641,6 +653,8 @@ class BaseMixin:
         train=False,
         observation=None,
         respect_train_selection=False,
+        mood_estimates=None,
+        skip_full_mood=False,
     ):
         if not self.low_frame_rate_mode:
             return self._scan_agent_fast(
@@ -650,6 +664,8 @@ class BaseMixin:
                 full_scan,
                 train,
                 respect_train_selection,
+                mood_estimates,
+                skip_full_mood,
             )
         # 无目标时仍返回已复核的页面供调用方判断，但不进行点击。
         ret = self.wait_for_agent_page(
@@ -657,7 +673,12 @@ class BaseMixin:
         )
         select_name = []
         while True:
-            target = next(((name, scope) for name, scope in ret if name in agent), None)
+            eligible = self.observe_agent_moods(
+                ret, agent, mood_estimates, skip_full_mood, train=train
+            )
+            target = next(
+                ((name, scope) for name, scope in ret if name in eligible), None
+            )
             if target is None:
                 return select_name, ret
             name, scope = target
@@ -690,6 +711,8 @@ class BaseMixin:
         full_scan,
         train,
         respect_train_selection=False,
+        mood_estimates=None,
+        skip_full_mood=False,
     ):
         """普通设备沿用单帧批量选人及缩小扫描区域的识别重试。"""
         try:
@@ -713,10 +736,15 @@ class BaseMixin:
                 False,
                 train,
                 respect_train_selection,
+                mood_estimates,
+                skip_full_mood,
             )
+        eligible = self.observe_agent_moods(
+            ret, agent, mood_estimates, skip_full_mood, train=train
+        )
         selected = []
         for name, scope in ret:
-            if name and name in agent:
+            if name and name in eligible:
                 is_selected = (
                     agent_card_selected(self.recog.img, scope, train=train)
                     if isinstance(self.recog.img, np.ndarray)
@@ -734,6 +762,26 @@ class BaseMixin:
                 if max_agent_count != -1 and len(selected) >= max_agent_count:
                     break
         return selected, ret
+
+    def observe_agent_moods(
+        self, page, candidates, estimates, skip_full, *, train=False
+    ):
+        """复用识别帧记录候选预估，不刷新截图或修改干员实读数据。"""
+        eligible = set(candidates)
+        if estimates is None or train:
+            return eligible
+        now = datetime.now()
+        for name, scope in page:
+            if name not in eligible:
+                continue
+            mood = estimate_agent_mood(self.recog.img, scope)
+            if mood is None:
+                estimates.pop(name, None)
+                continue
+            estimates[name] = (mood, now)
+            if skip_full and mood >= 24:
+                eligible.discard(name)
+        return eligible
 
     @timed_step("verify")
     def wait_for_arranged_agents(
@@ -1203,11 +1251,13 @@ class BaseMixin:
 
     def read_accurate_mood(self, img):
         try:
+            if not isinstance(img, np.ndarray) or img.ndim != 2 or not img.size:
+                return -1
             img = thres2(img, 200)
             return cv2.countNonZero(img) * 24 / 310
         except Exception as e:
             logger.exception(e)
-            return 24
+            return -1
 
     def detect_product_complete(self):
         for product in [

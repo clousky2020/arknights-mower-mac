@@ -2,6 +2,7 @@
 
 import sys
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,16 +11,21 @@ sys.modules.setdefault("arknights_mower.utils.skland", MagicMock())
 
 from arknights_mower.solvers.base_schedule import BaseSchedulerSolver  # noqa: E402
 from arknights_mower.utils.operators import Dormitory, Operator, Operators  # noqa: E402
-from arknights_mower.utils.plan import PlanConfig, Room  # noqa: E402
+from arknights_mower.utils.plan import Plan, PlanConfig, Room  # noqa: E402
 from arknights_mower.utils.resting_correction import (  # noqa: E402
     prefer_resting_replacements,
+    reconsider_low_mood_replacements,
 )
 
 
 @pytest.fixture
 def solver():
-    data = object.__new__(Operators)
-    data.config = PlanConfig("", "", "")
+    data = Operators(
+        {
+            "default_plan": Plan({}, PlanConfig("", "", "")),
+            "backup_plans": [],
+        }
+    )
     data.plan = {
         "central": [Room("歌蕾蒂娅", "深海", ["薇薇安娜"])],
         "room_2_2": [Room("引星棘刺", "自动化", ["淬羽赫默"])],
@@ -311,25 +317,23 @@ def test_correction_prefers_cached_healthy_cover(solver):
     solver.enter_room.assert_not_called()
 
 
-@pytest.mark.parametrize("experimental", [False, True])
 @pytest.mark.parametrize(
     "moods,expected",
     [
-        ([6, 12, 20], [1, 2, 0]),
-        ([9, 12, 20], [0, 1, 2]),
-        ([6, 5, 4], [0, 1, 2]),
-        ([6, None, 20], [1, 2, 0]),
+        ([6, 12, 20], [0, 1, 2]),
+        ([0, 12, 20], [1, 2, 0]),
+        ([0, 0, 20], [2, 0, 1]),
+        ([6, None, 20], [0, 1, 2]),
         ([None, 12, 20], [0, 1, 2]),
     ],
 )
-def test_work_replacement_cache_soft_preference(
-    solver, monkeypatch, experimental, moods, expected
+def test_work_replacement_preserves_configured_priority(
+    solver, monkeypatch, moods, expected
 ):
     from arknights_mower.utils import config
 
     monkeypatch.setattr(config.conf, "rescue_threshold", 0.75)
     data = solver.op_data
-    data.config.experimental_dorm_logic = experimental
     op = data.operators["斯卡蒂"]
     names = ["多萝西", "砾", "淬羽赫默"]
     op.replacement = names.copy()
@@ -345,5 +349,195 @@ def test_work_replacement_uses_own_mood_limits(solver):
     op = data.operators["斯卡蒂"]
     op.replacement = ["多萝西", "砾"]
     cover = data.operators["多萝西"]
+    cover.time_stamp = datetime.now()
     cover.lower_limit, cover.upper_limit, cover.mood = 12, 24, 15
+    assert data.replacement_candidates(op) == ["多萝西", "砾"]
+    cover.mood = 12
     assert data.replacement_candidates(op) == ["砾", "多萝西"]
+
+
+def test_work_replacement_accepts_measured_mood_above_recovery_upper_limit(solver):
+    data = solver.op_data
+    op = data.operators["斯卡蒂"]
+    op.replacement = ["多萝西", "砾"]
+    data.config = PlanConfig(
+        "",
+        "",
+        "",
+        operator_mood_limits={"多萝西": {"lower": 12, "upper": 16}},
+    )
+    data.init_mood_limit()
+
+    cover = data.operators["多萝西"]
+    cover.mood = 17
+    cover.time_stamp = datetime.now() - timedelta(hours=2)
+    cover.depletion_rate = 3
+    spare = data.operators["砾"]
+    spare.mood = 20
+    spare.time_stamp = datetime.now()
+
+    assert cover.upper_limit == 16
+    assert cover.current_mood() < cover.lower_limit
+    assert data.replacement_candidates(op) == ["砾", "多萝西"]
+
+
+def _redface_cover_scenario(solver, *, cover_mood=0, spare_mood=12):
+    """The primary is recovering and the current legal cover has run out of mood."""
+    data = solver.op_data
+    original = data.operators["歌蕾蒂娅"]
+    original.replacement = ["薇薇安娜", "赫默"]
+    data.plan["central"][0].replacement = original.replacement.copy()
+    cover = data.operators["薇薇安娜"]
+    cover.mood = cover_mood
+    cover.time_stamp = datetime.now()
+    spare = data.operators["赫默"]
+    spare.mood = spare_mood
+    spare.time_stamp = datetime.now()
+    return data, cover, spare
+
+
+def test_redface_legal_cover_rechecks_other_configured_replacements(solver):
+    data, cover, spare = _redface_cover_scenario(solver)
+    plan = {}
+    reconsider_low_mood_replacements(data, plan, MagicMock(return_value=False))
+    assert plan == {"central": ["赫默"]}
+    assert cover.current_room == "central"  # planning never directly moves an operator
+    assert data.operators["歌蕾蒂娅"].is_resting()
+    solver.enter_room.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "cover_mood,moods,expected",
+    [
+        (0, [1, 15], "赫默"),
+        (0, [1, 5], "赫默"),
+        (0, [5, 1], "赫默"),
+        (0, [15, 20], "赫默"),
+        (5, [1, 5], None),  # 当前替班未用尽，不因后面的候补更满而提前更换。
+    ],
+)
+def test_redface_recheck_preserves_configured_priority(
+    solver, monkeypatch, cover_mood, moods, expected
+):
+    from arknights_mower.utils import config
+
+    monkeypatch.setattr(config.conf, "rescue_threshold", 0.75)
+    data, _, _ = _redface_cover_scenario(solver, cover_mood=cover_mood)
+    owner = data.operators["歌蕾蒂娅"]
+    owner.rest_in_full = True
+    names = ["薇薇安娜", "赫默", "砾"]
+    owner.replacement = names.copy()
+    data.plan["central"][0].replacement = names.copy()
+    for name, mood in zip(names[1:], moods):
+        data.operators[name].mood = mood
+
+    plan = {}
+    reconsider_low_mood_replacements(data, plan, MagicMock(return_value=False))
+
+    assert plan == ({"central": [expected]} if expected else {})
+    assert owner.is_resting() and owner.mood == 0
+    assert owner.replacement == names
+    assert data.plan["central"][0].replacement == names
+    solver.enter_room.assert_not_called()
+
+
+@pytest.mark.parametrize("unavailable", ["working", "reserved", "busy", "rest_in_full"])
+def test_redface_recheck_skips_unavailable_best_candidate(solver, unavailable):
+    data, _, _ = _redface_cover_scenario(solver, spare_mood=3)
+    owner = data.operators["歌蕾蒂娅"]
+    owner.replacement.append("砾")
+    data.plan["central"][0].replacement = owner.replacement.copy()
+    best = data.operators["砾"]
+    best.mood = 15
+    if unavailable == "working":
+        best.current_room = "meeting"
+    elif unavailable == "reserved":
+        data.reserved_product_replacements = {best.name}
+    elif unavailable == "rest_in_full":
+        best.current_room = "dormitory_2"
+        best.rest_in_full = True
+    busy = MagicMock(side_effect=lambda name: unavailable == "busy" and name == "砾")
+
+    plan = {}
+    reconsider_low_mood_replacements(data, plan, busy)
+
+    assert plan == {"central": ["赫默"]}
+
+
+def test_redface_recheck_accepts_measured_mood_above_recovery_upper_limit(solver):
+    data, cover, spare = _redface_cover_scenario(solver, cover_mood=17, spare_mood=17)
+    cover.lower_limit, cover.upper_limit = 12, 16
+    cover.time_stamp = datetime.now() - timedelta(hours=2)
+    cover.depletion_rate = 3
+    spare.lower_limit, spare.upper_limit = 12, 16
+    plan = {}
+
+    reconsider_low_mood_replacements(data, plan, MagicMock(return_value=False))
+
+    assert cover.current_mood() < cover.lower_limit
+    assert spare.mood > spare.upper_limit
+    assert plan == {"central": ["赫默"]}
+
+
+@pytest.mark.parametrize("read_rooms", [True, False])
+def test_redface_recheck_runs_only_after_live_read_in_experimental_mode(
+    solver, monkeypatch, read_rooms
+):
+    monkeypatch.setattr(
+        "arknights_mower.solvers.base_schedule._is_mastery_busy", lambda name: False
+    )
+    apply_plan(solver, solver.agent_get_mood(read_rooms=False, return_plan=True))
+    data, _, spare = _redface_cover_scenario(solver, spare_mood=0)
+    owner = data.operators["歌蕾蒂娅"]
+    owner.rest_in_full = True
+    owner.replacement.append("砾")
+    data.plan["central"][0].replacement = owner.replacement.copy()
+    data.operators["砾"].mood = 15
+    solver._read_agent_mood = MagicMock()
+
+    plan = solver.agent_get_mood(read_rooms=read_rooms, return_plan=True)
+
+    assert plan == ({"central": ["砾"]} if (read_rooms) else {})
+    assert solver._read_agent_mood.call_count == int(read_rooms)
+    assert owner.is_resting()
+    assert spare.current_room == ""
+
+
+@pytest.mark.parametrize("reason", ["not_configured", "busy", "working", "same_mood"])
+def test_redface_cover_remains_when_other_candidate_unavailable(solver, reason):
+    data, cover, spare = _redface_cover_scenario(solver)
+    if reason == "not_configured":
+        data.plan["central"][0].replacement = [cover.name]
+        data.operators["歌蕾蒂娅"].replacement = [cover.name]
+    if reason == "working":
+        spare.current_room = "room_1_1"
+    if reason == "same_mood":
+        spare.mood = cover.mood
+    plan = {}
+    busy = MagicMock(side_effect=lambda name: reason == "busy" and name == spare.name)
+    reconsider_low_mood_replacements(data, plan, busy)
+    assert plan == {}
+    solver.enter_room.assert_not_called()
+
+
+def test_redface_recheck_respects_existing_correction_and_healthy_cover(solver):
+    data, cover, _ = _redface_cover_scenario(solver)
+    already_planned = {"central": ["歌蕾蒂娅"]}
+    reconsider_low_mood_replacements(
+        data, already_planned, MagicMock(return_value=False)
+    )
+    assert already_planned == {"central": ["歌蕾蒂娅"]}
+    cover.mood = 24
+    plan = {}
+    reconsider_low_mood_replacements(data, plan, MagicMock(return_value=False))
+    assert plan == {}
+
+
+def test_low_mood_recheck_ignores_partial_plan_room_without_replacement(solver):
+    """Temporary room snapshots in other correction paths may omit replacements."""
+    data, _, _ = _redface_cover_scenario(solver)
+    data.plan["central"][0] = SimpleNamespace(agent="歌蕾蒂娅")
+    plan = {}
+    reconsider_low_mood_replacements(data, plan, MagicMock(return_value=False))
+    assert plan == {}
+    solver.enter_room.assert_not_called()

@@ -7,6 +7,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from arknights_mower import __rootdir__, __system__
+from arknights_mower.utils.config.device_profile import (
+    LEGACY_NAMES,
+    DeviceProfile,
+    capture_compatibility_error,
+    profile_from_legacy,
+    updated_legacy_profile_fields,
+)
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.performance import (
     PERFORMANCE_PRESETS,
@@ -42,6 +49,18 @@ class ConfModel(BaseModel):
     # 校验、转成模型实例；配合 save_conf 的 model_dump(exclude_unset=True)，落盘的只有
     # 用户显式配置过的键，未配置的字段不写入磁盘（新字段默认值由运行时补齐）。
     model_config = ConfigDict(validate_default=True)
+
+
+def _merge_model_fields(model, updates):
+    data = model.model_dump()
+    for name, value in updates.items():
+        current = getattr(model, name, None)
+        data[name] = (
+            _merge_model_fields(current, value)
+            if isinstance(current, BaseModel) and isinstance(value, dict)
+            else value
+        )
+    return data
 
 
 class CluePart(ConfModel):
@@ -436,7 +455,7 @@ class RIICPart(ConfModel):
         drone_loss_seconds: int = Field(default=30, ge=0, le=180)
         "允许额外一架无人机浪费的加速秒数"
         waiting_seconds: int = Field(default=2, ge=0, le=60)
-        "测试宿舍逻辑下为制造计划确认前缓冲；旧逻辑沿用自然完成后的等待"
+        "制造计划取消确认前的缓冲时间"
 
     class WorkShopSetting(ConfModel):
         items: list[WorkShopItem] = []
@@ -474,8 +493,6 @@ class RIICPart(ConfModel):
     "无人机加速间隔"
     free_blacklist: str = ""
     "宿舍黑名单"
-    reload_room: str = ""
-    "搓玉补货房间"
     run_order_delay: float = Field(
         default_factory=lambda: default_performance_profile().run_order_delay
     )
@@ -499,9 +516,7 @@ class RIICPart(ConfModel):
         data = dict(data)
         if data.get("performance_mode") == "ultra":
             data["performance_mode"] = "xhigh"
-        if data.get("performance_mode") == "custom" or (
-            "performance_mode" not in data and "low_frame_rate_mode" in data
-        ):
+        if data.get("performance_mode") == "custom":
             if "low_frame_rate_mode" in data:
                 data["performance_mode"] = (
                     "medium" if data["low_frame_rate_mode"] else "high"
@@ -513,6 +528,9 @@ class RIICPart(ConfModel):
             mode = data["performance_mode"] = "medium"
         if mode in PERFORMANCE_PRESETS:
             data["low_frame_rate_mode"] = PERFORMANCE_PRESETS[mode].low_frame_rate
+        elif is_android_runtime() and "low_frame_rate_mode" in data:
+            # 自动档在 Android 从中档开始；旧布尔值不能覆盖这一平台基线。
+            data["low_frame_rate_mode"] = True
         return data
 
     product_switching: ProductSwitchingConf = Field(
@@ -522,8 +540,6 @@ class RIICPart(ConfModel):
 
     free_room: bool = False
     "宿舍不养闲人模式"
-    experimental_dorm_logic: bool = False
-    "测试宿舍逻辑；关闭时使用稳定版宿舍分配规则"
     group_rest_in_full_on_mood_gap: bool = True
     "组内高优先干员预计恢复时间差过大时，等待整组回满"
     group_mood_gap_max_extra_wait_hours: float = Field(default=0, ge=0, le=24)
@@ -573,8 +589,6 @@ class RIICPart(ConfModel):
     "加工站一键设置的副产品概率加成下限（百分比）"
     workshop_protect_t2_device_rock: bool = False
     "禁止加工消耗装置、固源岩（仅 T2），材料预算也排除对应合成配方"
-    workshop_low_priority_rest: bool = True
-    "稳定版加工干员最低宿舍恢复优先级"
     t5_operators: list[str] = ["年"]
     "自动专精 T5 加工干员"
     book_operators: list[str] = ["司霆惊蛰"]
@@ -583,10 +597,6 @@ class RIICPart(ConfModel):
     "自动专精 非 T5 材料加工干员"
     merge_interval: float = 10
     "不养闲人合并间隔"
-    dorm_order: str = ""
-    "稳定版全局宿舍优先级"
-    refresh_backup_plan_after_mood: bool = True
-    "仅旧宿舍逻辑：缓存清零后读取心情并重载调度器，默认开启"
     assistant_follows_schedule: bool = False
     "协助位跟随排班（专精时协助位不固定，由排班系统管理）"
     enable_mastery: bool = True
@@ -597,6 +607,9 @@ class RIICPart(ConfModel):
 
 
 class SimulatorPart(ConfModel):
+    device: DeviceProfile = Field(default_factory=DeviceProfile)
+    "稳定设备配置，字段集为投影视图"
+
     class SimulatorConf(ConfModel):
         name: str = ""
         "名称"
@@ -608,6 +621,8 @@ class SimulatorPart(ConfModel):
         "启动时间"
         hotkey: str = ""
         "老板键"
+        hotkey_delay: float = 3.0
+        "老板键延迟"
 
     class CustomScreenshotConf(ConfModel):
         command: str = "adb -s 127.0.0.1:5555 shell screencap -p 2>/dev/null"
@@ -707,10 +722,19 @@ class AIAgentPart(ConfModel):
     ai_type: str = ""
     "名称"
     ai_key: str = ""
-    "密钥"
+    "DeepSeek 密钥"
+    ai_custom_key: str = ""
+    "自定义接口密钥"
+    ai_base_url: str = ""
+    "自定义 OpenAI 兼容接口地址"
+    ai_model: str = ""
+    "自定义模型名称"
 
     @property
     def resolved_ai_key(self) -> str:
+        # A legacy Deepseek fallback key must never be sent to a custom endpoint.
+        if self.ai_type in {"custom-local", "custom-online"}:
+            return self.ai_custom_key.strip()
         if self.ai_key:
             return self.ai_key
         token_path = Path(__rootdir__).parent / "token.txt"
@@ -755,6 +779,133 @@ class Conf(
     MaaRewardPart,
     AIAgentPart,
 ):
+    @model_validator(mode="after")
+    def migrate_device_profile(self):
+        if "device" not in self.model_fields_set:
+            # A read must not mark default fields as explicitly saved or write disk.
+            object.__setattr__(self, "device", profile_from_legacy(self.model_dump()))
+        else:
+            self.sync_legacy_device_fields()
+        return self
+
+    def sync_legacy_device_fields(self):
+        """Keep old Device readers and downgrade saves on the selected backends."""
+        profile = self.device
+        if profile.preset_id in LEGACY_NAMES:
+            self.simulator.name = LEGACY_NAMES[profile.preset_id][0]
+        elif profile.preset_id != "manual.other":
+            self.simulator.name = ""
+        self.simulator.simulator_folder = profile.installation_path
+        self.simulator.index = profile.instance_id
+        # A stored profile that predates these two fields still carries its value in
+        # the legacy keys, so adopt it once. Afterwards the profile owns the field:
+        # an explicitly cleared boss key stays empty instead of being refilled from
+        # the legacy copy. Legacy form submissions are merged into the profile by
+        # ``updated`` before this runs, so nothing else is lost.
+        if "simulator_hotkey" not in profile.model_fields_set and self.simulator.hotkey:
+            profile.simulator_hotkey = self.simulator.hotkey
+        if (
+            "simulator_hotkey_delay" not in profile.model_fields_set
+            and self.simulator.hotkey_delay != 3.0
+        ):
+            profile.simulator_hotkey_delay = self.simulator.hotkey_delay
+        self.simulator.hotkey = profile.simulator_hotkey
+        self.simulator.hotkey_delay = profile.simulator_hotkey_delay
+        self.maa_adb_path = profile.adb_path
+        self.adb = profile.last_serial
+        self.package_type = (
+            1 if profile.game_package == "com.hypergryph.arknights" else 2
+        )
+        self.mumu12IPC = profile.screenshot_backend == "mumu_ipc"
+        self.droidcast.enable = profile.screenshot_backend == "droidcast"
+        self.custom_screenshot.enable = profile.screenshot_backend == "custom"
+        self.touch_method = (
+            "maatouch" if profile.touch_backend == "maatouch" else "scrcpy"
+        )
+        # Nested mutations alone do not mark a default parent as set in Pydantic.
+        self.model_fields_set.update(
+            {"device", "simulator", "droidcast", "custom_screenshot"}
+        )
+
+    def set_device_endpoint(self, serial: str):
+        """A legacy discovery adapter refreshes the endpoint of the current profile."""
+        self.device.last_serial = serial
+        self.adb = serial
+
+    def updated(self, updates: dict) -> "Conf":
+        """Validate a partial or legacy full form against the current Conf."""
+        data = _merge_model_fields(self, updates)
+        if os.environ.get("MOWER_ANDROID") == "1":
+            return type(self)(**data)
+        explicit_profile = updates.get("device", {})
+        if not isinstance(explicit_profile, dict):
+            return type(self)(**data)  # Produce the ordinary model validation error.
+        profile = self.device.model_dump()
+        legacy_fields = updated_legacy_profile_fields(updates)
+        if legacy_fields:
+            legacy_data = {key: value for key, value in data.items() if key != "device"}
+            legacy_profile = type(self)(**legacy_data).device.model_dump()
+            for key in legacy_fields:
+                profile[key] = legacy_profile[key]
+        profile.update(explicit_profile)
+        profile = DeviceProfile.model_validate(profile).model_dump()
+        if reason := capture_compatibility_error(
+            profile["preset_id"], profile["screenshot_backend"]
+        ):
+            raise ValueError(reason)
+        identity_fields = (
+            "preset_id",
+            "installation_path",
+            "manager_path",
+            "config_path",
+            "instance_id",
+        )
+        if "config_path" not in explicit_profile and any(
+            profile[key] != getattr(self.device, key)
+            for key in ("preset_id", "installation_path", "manager_path")
+        ):
+            profile["config_path"] = ""
+        if any(profile[key] != getattr(self.device, key) for key in identity_fields):
+            # A full legacy form may explicitly submit a new endpoint together
+            # with its binding. Never carry the previous endpoint into a new one.
+            if profile["last_serial"] == self.device.last_serial:
+                profile["last_serial"] = ""
+            if "instance_name" not in explicit_profile:
+                profile["instance_name"] = ""
+            for key in ("instance_uuid", "topology_fingerprint"):
+                if key not in explicit_profile:
+                    profile[key] = ""
+        if profile["preset_id"] != self.device.preset_id:
+            if "manager_path" not in explicit_profile:
+                profile["manager_path"] = ""
+            if profile["preset_id"] in {"manual.other", "manual.physical"}:
+                if "preset_id" in explicit_profile:
+                    data["simulator"]["name"] = ""
+        target_changed = any(
+            profile[key] != getattr(self.device, key)
+            for key in (*identity_fields, "last_serial")
+        )
+        if target_changed:
+            profile["game_package_confirmed"] = False
+        # A historical default package is not evidence of a user's choice.
+        # Explicit saves remember the choice for this binding and serial only.
+        if "game_package" in explicit_profile or (
+            "package_type" in updates
+            and profile["game_package"] != self.device.game_package
+        ):
+            profile["game_package_confirmed"] = explicit_profile.get(
+                "game_package_confirmed", True
+            )
+        if any(
+            profile[key] != getattr(self.device, key)
+            for key in ("instance_uuid", "topology_fingerprint")
+        ):
+            # A renewed topology or VM identity needs its own endpoint preflight.
+            profile["last_serial"] = ""
+            profile["game_package_confirmed"] = False
+        data["device"] = profile
+        return type(self)(**data)
+
     # 迁移放在校验层而不是 load_conf：/conf POST 等所有构造路径都能统一兼容旧字段，
     # 否则旧前端整包提交旧键名会被当未知键忽略、新键落成默认值。
     @model_validator(mode="before")
@@ -763,7 +914,21 @@ class Conf(
         if isinstance(data, dict) and os.environ.get("MOWER_ANDROID") == "1":
             from mower_android.managed import normalize
 
+            profile = data.get("device")
+            if "package_type" not in data and isinstance(profile, dict):
+                game_package = profile.get("game_package")
+                if game_package in {
+                    "com.hypergryph.arknights",
+                    "com.hypergryph.arknights.bilibili",
+                }:
+                    data = {
+                        **data,
+                        "package_type": (
+                            1 if game_package == "com.hypergryph.arknights" else 2
+                        ),
+                    }
             data = normalize(data)
+            data.pop("device", None)
         if not isinstance(data, dict):
             return data
         # visit_friend(bool) 已退役：迁移为 visit_friend_enable(bool)。原 true 语义是 mower
