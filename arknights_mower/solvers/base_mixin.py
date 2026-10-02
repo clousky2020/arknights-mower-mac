@@ -803,6 +803,12 @@ class BaseMixin:
                     for name, scope in ret
                 ]
                 if any(state is None for _, _, state in states):
+                    logger.debug(
+                        f"选人校验第{attempt + 1}次：边框判定不确定，跳过；"
+                        f"选中={[n for n, _, s in states if s]} "
+                        f"未选={[n for n, _, s in states if s is False]} "
+                        f"不确定={[n for n, _, s in states if s is None]}"
+                    )
                     previous = None
                     stable = False
                     stable_matches = 0
@@ -828,6 +834,17 @@ class BaseMixin:
         if stable:
             logger.warning(f"干员名单已稳定但不符合预期：预期{agent}，实际{actual}")
             return None
+        # 排查用：把放弃时的画面单独存盘，避免只能推测当时看到了什么。
+        try:
+            img = getattr(self.recog, "img", None)
+            if isinstance(img, np.ndarray):
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+                cv2.imwrite(
+                    f"debug/selection_notready_{stamp}.png",
+                    cv2.cvtColor(img, cv2.COLOR_RGB2BGR),
+                )
+        except Exception as e:  # 存盘失败不能影响原有重试
+            logger.debug(f"选人放弃画面存盘失败：{e}")
         raise AgentSelectionNotReady(
             f"干员名单或位置仍在变化、左侧裁切或识别不全，返回房间重试："
             f"预期{agent}，最后读取{actual}"
