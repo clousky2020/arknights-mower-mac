@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from threading import Event
 from typing import Literal, Protocol
 
+from arknights_mower.utils import config
 from arknights_mower.utils.config.device_profile import DeviceProfile
 from arknights_mower.utils.csleep import MowerExit, csleep
 from arknights_mower.utils.device.adb_client.server import SharedADBError
@@ -109,6 +110,12 @@ class SessionADB(Protocol):
         self, adb_path: str, serial: str, timeout: float
     ) -> tuple[int, int] | None: ...
 
+    # Optional: bring the bound game to the foreground so it can render the
+    # canvas this session requires. An adapter without it only reconnects.
+    def launch_app(
+        self, adb_path: str, serial: str, package: str, activity: str, timeout: float
+    ) -> bool: ...
+
 
 class Simulator(Protocol):
     def inspect(
@@ -181,6 +188,9 @@ class DeviceSession:
         self._observation_key = None
         self._deadline: float | None = None
         self._launched_at: float | None = None
+        # One game launch per readiness transaction repairs a missing canvas;
+        # repeating it cannot help a target that stays blank.
+        self._launch_attempted = False
         self._startup_wait = 30.0
         self._shutdown = Event()
 
@@ -208,6 +218,9 @@ class DeviceSession:
             deadline = self.clock.monotonic() + self.policy.timeout
         self._deadline = deadline
         self.actions = 0
+        # Each transaction may repair a missing canvas once; a later recovery
+        # opens a new transaction and is allowed its own launch.
+        self._launch_attempted = False
         return deadline
 
     def resolve_adb(self, deadline: float) -> str:
@@ -637,6 +650,20 @@ class DeviceSession:
                 "设备已连接但未获取到有效画面（暂不重启模拟器）："
                 f"{_one_line(observation.message) or observation.code}"
             )
+            # A missing canvas is the one condition a launch repairs: the game
+            # renders the landscape frame this gate requires. Starting the game
+            # is a repair, not a recovery attempt, so it leaves the recovery
+            # budget alone; it is bounded to one launch per transaction because
+            # a target that stays blank is not a game that needs starting twice.
+            if not self._launch_attempted:
+                self._launch_attempted = True
+                if self._launch_app(observation.serial, self._remaining(deadline)):
+                    await_until = self.clock.monotonic() + self.policy.local_wait
+                    observation = self._wait_local(
+                        deadline, until=await_until, frame_probe=frame_probe
+                    )
+                    if observation.state == "ready":
+                        return observation
         if self.profile.preset_id in CONFIRMED_START_PRESETS:
             if observation.instance_state == "stopped":
                 self.last = ReadinessResult(
@@ -798,6 +825,19 @@ class DeviceSession:
         self._launched_at = self.clock.monotonic()
         return self.simulator.start(self.profile, timeout)
 
+    def _launch_app(self, serial, timeout):
+        """Bring the bound game to the foreground so it renders a canvas."""
+        launch = getattr(self.adb, "launch_app", None)
+        if launch is None or self.profile is None:
+            return False
+        package = self.profile.game_package or config.conf.APPNAME
+        if not package:
+            return False
+        logger.info("未获取到游戏画面，正在启动游戏...")
+        return launch(
+            self.adb_path, serial, package, config.APP_ACTIVITY_NAME, timeout
+        )
+
     def _wait_local(self, deadline, *, until=None, frame_probe=None):
         if until is None:
             until = self.clock.monotonic() + self.policy.local_wait
@@ -819,7 +859,7 @@ class DeviceSession:
         ):
             raise SessionFailure(observation, observation.message or observation.code)
 
-    def _action(self, operation, deadline, *, required=True, starting=False):
+    def _action(self, operation, deadline, *, required=True, starting=False, label=None):
         self._remaining(deadline)
         if self.actions >= self.policy.attempts:
             raise SessionFailure(self.last, "设备恢复次数预算已耗尽")
@@ -828,7 +868,7 @@ class DeviceSession:
         # names each state change once, never per retry.
         logger.debug(
             f"设备恢复动作 {self.actions}/{self.policy.attempts}："
-            f"{'启动实例' if starting else '重连设备'}"
+            f"{label or ('启动实例' if starting else '重连设备')}"
         )
         try:
             with device_io_budget(lambda: self._remaining(deadline)):

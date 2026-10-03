@@ -50,7 +50,10 @@ class ADB:
         self.size = "Physical size: 1920x1080"
         self.frame = (1920, 1080)
         self.actions = []
+        self.launched = []
+        self.launch_args = []
         self.on_recover = lambda: None
+        self.on_launch_app = lambda: None
 
     def resolve_adb(self, profile, timeout):
         return "verified-adb"
@@ -73,6 +76,12 @@ class ADB:
     def recover(self, adb_path, serial, timeout):
         self.actions.append(serial)
         self.on_recover()
+        return True
+
+    def launch_app(self, adb_path, serial, package, activity, timeout):
+        self.launched.append(serial)
+        self.launch_args.append((package, activity))
+        self.on_launch_app()
         return True
 
 
@@ -358,6 +367,58 @@ class DeviceSessionTests(unittest.TestCase):
         self.assertEqual(result.serial, "USB-A")
         # Waiting for the canvas must not restart the instance.
         self.assertEqual(self.simulator.actions, [])
+
+    def test_missing_frame_launches_the_game_before_startup_gives_up(self):
+        self.simulator.state, self.simulator.serial = "running", "USB-A"
+        self.adb.rows, self.adb.boot = [("USB-A", "device")], "1"
+        # The emulator sits on its portrait launcher: the transport and the
+        # instance are both healthy, but no game is running to render a canvas.
+        self.adb.frame = (1080, 1920)
+        # Launching the game is what turns the target landscape.
+        self.adb.on_launch_app = lambda: setattr(self.adb, "frame", (1920, 1080))
+        result = self.control.start()
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(self.adb.launched, ["USB-A"])
+        # The missing canvas is repaired by starting the game, never by
+        # restarting an instance that is already running.
+        self.assertEqual(self.simulator.actions, [])
+
+    def test_a_launch_is_not_repeated_when_the_frame_is_absent_again(self):
+        self.simulator.state, self.simulator.serial = "running", "USB-A"
+        self.adb.rows, self.adb.boot = [("USB-A", "device")], "1"
+        # The game never renders: a second launch cannot repair that, so the
+        # session must report failure instead of launching in a loop.
+        self.adb.frame = (1080, 1920)
+        result = self.control.start()
+        self.assertFalse(result.ok)
+        self.assertEqual(self.adb.launched, ["USB-A"])
+        self.assertEqual(self.simulator.actions, [])
+
+    def test_a_later_recovery_launches_the_game_again(self):
+        self.simulator.state, self.simulator.serial = "running", "USB-A"
+        self.adb.rows, self.adb.boot = [("USB-A", "device")], "1"
+        self.adb.frame = (1080, 1920)
+        self.assertFalse(self.control.start().ok)
+        self.assertEqual(self.adb.launched, ["USB-A"])
+        # A new transaction opens its own launch budget: the game stopped
+        # again after the first repair, so this recovery may start it again.
+        self.adb.on_launch_app = lambda: setattr(self.adb, "frame", (1920, 1080))
+        self.assertTrue(self.control.recover().ok)
+        self.assertEqual(self.adb.launched, ["USB-A", "USB-A"])
+
+    def test_a_launch_resolves_the_game_package_without_a_bound_selection(self):
+        self.simulator.state, self.simulator.serial = "running", "USB-A"
+        self.adb.rows, self.adb.boot = [("USB-A", "device")], "1"
+        self.adb.frame = (1080, 1920)
+        # A manual selection pins no package: the launch command still needs one.
+        self.conf.device.game_package = ""
+        self.conf.device.preset_id = "manual.other"
+        self.adb.on_launch_app = lambda: setattr(self.adb, "frame", (1920, 1080))
+        result = self.control.start()
+        self.assertTrue(result.ok, result.error)
+        package, activity = self.adb.launch_args[0]
+        self.assertTrue(package.strip())
+        self.assertTrue(activity.strip())
 
     def test_local_failure_allows_one_restart_and_verifies_new_endpoint(self):
         self.simulator.state, self.simulator.serial = "running", "USB-A"

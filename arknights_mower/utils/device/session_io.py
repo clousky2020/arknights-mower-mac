@@ -251,6 +251,28 @@ class ProductionSessionADB:
             frame = validate_frame(capture_adb_frame(adb_path, serial))
             return frame.shape[1], frame.shape[0]
 
+    def launch_app(
+        self, adb_path: str, serial: str, package: str, activity: str, timeout: float
+    ) -> bool:
+        """Start the bound game so the target can render the required canvas."""
+        if not serial.strip():
+            raise ValueError("设备 serial 不能为空")
+        if not package.strip():
+            raise ValueError("游戏包名不能为空")
+        self._adb_window(timeout).run(
+            [
+                adb_path,
+                "-s",
+                serial,
+                "shell",
+                "am",
+                "start",
+                "-n",
+                f"{package}/{activity}",
+            ]
+        )
+        return True
+
     def _capture_frame(self, adb_path: str, serial: str, timeout: float):
         if self._profile is None:
             raise RuntimeError("设备实例尚未绑定")
