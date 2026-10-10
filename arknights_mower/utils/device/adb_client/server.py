@@ -10,6 +10,8 @@ import socket
 import subprocess
 import time
 
+from arknights_mower.utils.device.manager_io import run_command
+
 ADB_SERVER_ADDRESS = ("127.0.0.1", 5037)
 
 
@@ -18,7 +20,20 @@ class SharedADBError(RuntimeError):
 
 
 class SharedADBHandshakeTimeout(SharedADBError):
-    """A connected listener timed out while answering the host handshake."""
+    """A local listener was addressed but answered no host handshake.
+
+    The host never completed the TCP connect or never replied once connected.
+    Neither observation alone proves absence. Recovery confirms absence
+    independently for a known connect phase or retains the restart window.
+    """
+
+    def __init__(self, *args, phase=None):
+        super().__init__(*args)
+        self.phase = phase
+
+
+class SharedADBStopTimeout(SharedADBError):
+    """The explicit protocol stop receives no answer within its budget."""
 
 
 def _remaining(deadline, monotonic):
@@ -55,10 +70,15 @@ def _receive(connection, length, deadline, monotonic):
 def probe_adb_server(
     timeout, *, monotonic=time.monotonic, socket_factory=None, address=None
 ):
-    """Return its protocol version; only a refused connect means no server."""
+    """Return its protocol version; only a refused connect means no server.
+
+    A refused connect is the one answer that proves no listener owns the port.
+    Any other connect failure or an unanswered handshake leaves the listener
+    unproven rather than absent.
+    """
     deadline = monotonic() + max(0, timeout)
     factory = socket_factory or socket.socket
-    connected = False
+    phase = "connect"
     try:
         with factory(socket.AF_INET, socket.SOCK_STREAM) as connection:
             connection.settimeout(_remaining(deadline, monotonic))
@@ -66,7 +86,7 @@ def probe_adb_server(
                 connection.connect(address or ADB_SERVER_ADDRESS)
             except ConnectionRefusedError:
                 return None
-            connected = True
+            phase = "response"
             connection.settimeout(_remaining(deadline, monotonic))
             connection.sendall(b"000chost:version")
 
@@ -80,11 +100,9 @@ def probe_adb_server(
                 raise SharedADBError("共享 ADB server 返回的协议版本无效")
             return int(version, 16)
     except socket.timeout as exc:
-        if connected:
-            raise SharedADBHandshakeTimeout(
-                "共享 ADB server 已连接，但主机握手超时"
-            ) from exc
-        raise SharedADBError("共享 ADB server 连接超时，保留现有监听") from exc
+        raise SharedADBHandshakeTimeout(
+            "共享 ADB server 未完成主机握手：连接或应答超时", phase=phase
+        ) from exc
     except OSError as exc:
         raise SharedADBError(f"无法安全读取共享 ADB server 状态：{exc}") from exc
 
@@ -104,12 +122,14 @@ def kill_adb_server(timeout, *, monotonic=time.monotonic, socket_factory=None):
                 raise SharedADBError("共享 ADB server 拒绝显式停止请求（FAIL）")
             if response != b"OKAY":
                 raise SharedADBError("共享 ADB server 返回无效的停止响应")
+    except socket.timeout as exc:
+        raise SharedADBStopTimeout(f"无法显式停止共享 ADB server：{exc}") from exc
     except OSError as exc:
         raise SharedADBError(f"无法显式停止共享 ADB server：{exc}") from exc
 
 
 def adb_client_version(adb_path, *, timeout, run=None):
-    runner = run or subprocess.run
+    runner = run or run_command
     result = runner(
         [adb_path, "version"],
         stdout=subprocess.PIPE,
@@ -143,7 +163,7 @@ def guard_adb(adb_path, *, timeout, run=None, probe=None, monotonic=time.monoton
     """Check the existing server and return the same deadline's remaining time."""
     _check_server_environment(os.environ)
     deadline = monotonic() + max(0, timeout)
-    runner = run or subprocess.run
+    runner = run or run_command
     try:
         if probe is None:
             version = probe_adb_server(
@@ -182,7 +202,7 @@ def run_adb(argv, *, timeout, run=None, probe=None, monotonic=time.monotonic, **
     command = argv[index] if index < len(argv) else ""
     if command in {"kill-server", "start-server", "server", "fork-server", "nodaemon"}:
         raise SharedADBError("共享 ADB 服务生命周期只能由恢复协调器管理")
-    runner = run or subprocess.run
+    runner = run or run_command
     if command != "version":
         guard_adb(
             argv[0],

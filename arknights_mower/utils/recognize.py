@@ -104,7 +104,7 @@ class Recognizer:
         self.clear()
 
     def reset_after_external_control(self) -> None:
-        """外部任务交还控制权时，丢弃旧画面及非连续观测的场景停留计时。"""
+        """重新开始连续观测时，丢弃旧标准画面帧及场景停留计时。"""
         self.update()
         self.last_scene = None
         self.last_scene_time = datetime.now()
@@ -239,6 +239,7 @@ class Recognizer:
             or self.find("arrange_check_in_on")
             or self.find("room_detail")
             or self.find("arrange_check_in_small")
+            or self.find("recycle/dashboard")
         ):
             self.scene = Scene.INFRA_DETAILS
         elif self.find("infra_overview"):
@@ -887,6 +888,7 @@ class Recognizer:
             return None
 
         template_matching = {
+            "recycle/dashboard": ((465, 148), (682, 264)),
             # "arrange_check_in": ((30, 300), (175, 700)),
             "terminal_main": ((0, 0), (1920, 1080)),
             "arrange_check_in_on": ((30, 300), (175, 700)),

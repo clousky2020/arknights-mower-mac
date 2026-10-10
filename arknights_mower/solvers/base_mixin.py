@@ -9,7 +9,6 @@ import cv2
 import numpy as np
 
 from arknights_mower.data import workshop_formula
-from arknights_mower.solvers.record import save_inventory_counts
 from arknights_mower.utils import config, rapidocr, segment
 from arknights_mower.utils.character_recognize import (
     estimate_agent_mood,
@@ -57,6 +56,10 @@ class AgentSelectionNotReady(RuntimeError):
     """当前页面不足以继续选人；交由排班原有重试恢复，不结束任务线程。"""
 
 
+class AgentSelectionPageChanged(AgentSelectionNotReady):
+    """选人已退出到入住信息页，禁止继续筛选复位或选人输入。"""
+
+
 def agent_card_selected(img, scope, *, train=False):
     """读取选人卡片四周的青蓝色选中边框。
 
@@ -82,9 +85,7 @@ def agent_card_selected(img, scope, *, train=False):
     # 卡片右侧阴影使蓝框亮度降到约 140，仍须满足色相和饱和度条件。
     blue = cv2.inRange(frame, (96, 140, 160 if train else 140), (105, 255, 255)) > 0
     # 略过角落；完整边框用上下沿及任一侧确认。
-    # 未选中卡片的右上角徽章是青蓝色圆角矩形，只污染条带右半；
-    # 上沿只测左侧约 56%（徽章起点约在窗口宽 60% 处），排除徽章像素。
-    upper = blue[:8, 8 : int((blue.shape[1] - 8) * 0.56)].mean()
+    upper = blue[:8, 8:-8].mean()
     lower = blue[-8:, 8:-8].mean()
     left_side = blue[8:-8, :8].mean()
     right_side = blue[8:-8, -8:].mean()
@@ -95,6 +96,15 @@ def agent_card_selected(img, scope, *, train=False):
     lower_inner = blue[-8:-5, 8:-8].mean()
     if lower_inner > 0.45 and min(left_side, right_side) > 0.45:
         return True
+    # 上沿的青色状态图标与下排蓝框可同时覆盖少量横边。
+    # 两条竖边及下沿前段均缺失时，普通卡片明确未选中。
+    if (
+        not train
+        and max(upper, lower) < 0.45
+        and lower_inner < 0.20
+        and max(left_side, right_side) < 0.20
+    ):
+        return False
     # 相邻卡片只隔几像素，前一张的边框可能擦到本卡一条边；
     # 另一条边仍明显缺失时判为未选中，避免整页校验一直等待。
     if min(upper, lower) < 0.20 and max(upper, lower) < 0.45:
@@ -528,6 +538,24 @@ class BaseMixin:
             train,
         )
 
+    def require_agent_selection_page(self):
+        """名单异常时，用同帧入住信息页签区分页面退出与卡片识别失败。"""
+        if self.find("arrange_check_in_on") or self.find("recycle/dashboard"):
+            raise AgentSelectionPageChanged(
+                "选人页面已退出到当前房间入住信息，停止选人并返回房间实读重试"
+            )
+
+    def check_agent_page(self, page, *, train=False):
+        """异常名单检查退出并返回 True；正常名单不检查页面。"""
+        if (
+            not page
+            or any(not name or scope is None for name, scope in page)
+            or (not train and page[0][1][0][0] > 650)
+        ):
+            self.require_agent_selection_page()
+            return True
+        return False
+
     def wait_for_agent_page(
         self, *, full_scan=True, train=False, before=None, observation=None
     ):
@@ -569,14 +597,16 @@ class BaseMixin:
                 continue
             try:
                 ret = read(self.recog.img)
-            except MowerExit:
+            except (MowerExit, AgentSelectionPageChanged):
                 raise
             except Exception as e:
+                self.require_agent_selection_page()
                 logger.debug(f"翻页名单读取失败，原地复核：{e}")
                 previous = None
                 stable = False
                 stable_matches = 0
                 continue
+            self.check_agent_page(ret, train=train)
             if (
                 before is not None
                 and ret
@@ -617,7 +647,11 @@ class BaseMixin:
             if len(page) < 2:
                 raise AgentSelectionNotReady("可识别干员不足，返回房间重试")
             start, end = page[-2][1][0], page[0][1][0]
-            self.swipe_noinertia(start, (end[0] - start[0], 0))
+            self.swipe_noinertia(
+                start,
+                (end[0] - start[0], 0),
+                interval=0.1 if self.performance_profile.mode == "high" else 0.2,
+            )
             return (1, None) if return_page else 1
         columns = sorted({scope[0][0] for _, scope in page})
         if len(columns) < 2:
@@ -691,6 +725,7 @@ class BaseMixin:
                 else False
             )
             if selected is None:
+                self.require_agent_selection_page()
                 raise AgentSelectionNotReady("干员选中边框不清晰，返回房间重试")
             if not selected:
                 self.tap(scope, interval=0.2)
@@ -726,9 +761,11 @@ class BaseMixin:
                 if train
                 else operator_list(self.recog.img, full_scan=full_scan)
             )
-        except MowerExit:
+            page_checked = self.check_agent_page(ret, train=train)
+        except (MowerExit, AgentSelectionPageChanged):
             raise
         except Exception:
+            self.require_agent_selection_page()
             if error_count >= 2:
                 raise
             return self._scan_agent_fast(
@@ -754,6 +791,8 @@ class BaseMixin:
                     else False
                 )
                 if is_selected is None:
+                    if not page_checked:
+                        self.require_agent_selection_page()
                     raise AgentSelectionNotReady("干员选中边框不清晰，返回房间重试")
                 if not is_selected:
                     self.tap(scope, interval=0)
@@ -770,7 +809,33 @@ class BaseMixin:
     ):
         """复用识别帧记录候选预估，不刷新截图或修改干员实读数据。"""
         eligible = set(candidates)
-        if estimates is None or train:
+        if train:
+            return eligible
+        if getattr(getattr(self, "task", None), "emergency_staffing", False):
+            from arknights_mower.utils.emergency_staffing import worker_block_reason
+
+            temporary_workers = {
+                name
+                for room, row in self.task.plan.items()
+                if room in self.op_data.plan and not room.startswith("dorm")
+                for index, name in enumerate(row)
+                if (op := self.op_data.operators.get(name)) is None
+                or (op.current_room, op.current_index) != (room, index)
+            }
+            for name, scope in page:
+                if name not in eligible or name not in temporary_workers:
+                    continue
+                mood = estimate_agent_mood(self.recog.img, scope)
+                if mood is None:
+                    self.op_data.dorm_mood_estimates.pop(name, None)
+                else:
+                    self.op_data.dorm_mood_estimates[name] = (mood, datetime.now())
+                reason = worker_block_reason(self.op_data, name, mood, set())
+                if reason:
+                    raise AgentSelectionNotReady(
+                        f"自动救急候选 {name} {reason}，取消本次选人"
+                    )
+        if estimates is None:
             return eligible
         now = datetime.now()
         for name, scope in page:
@@ -825,14 +890,16 @@ class BaseMixin:
                 continue
             try:
                 ret = read(self.recog.img)
-            except MowerExit:
+            except (MowerExit, AgentSelectionPageChanged):
                 raise
             except Exception as e:
+                self.require_agent_selection_page()
                 logger.debug(f"选人名单读取失败，等待下一帧：{e}")
                 previous = None
                 stable = False
                 stable_matches = 0
                 continue
+            page_checked = self.check_agent_page(ret, train=train)
             if not train and ret and ret[0][1] is not None and ret[0][1][0][0] > 650:
                 logger.debug(
                     "选人列表左侧仍被裁切，原地等待，不读取后续卡片作为已选名单"
@@ -852,7 +919,12 @@ class BaseMixin:
                     )
                     for name, scope in ret
                 ]
-                if any(state is None for _, _, state in states):
+                uncertain = [
+                    (name, scope) for name, scope, state in states if state is None
+                ]
+                if uncertain:
+                    if not page_checked:
+                        self.require_agent_selection_page()
                     logger.debug(
                         f"选人校验第{attempt + 1}次：边框判定不确定，跳过；"
                         f"选中={[n for n, _, s in states if s]} "
@@ -1068,7 +1140,8 @@ class BaseMixin:
             score.append(max_val)
         return score.index(max(score)) + 1
 
-    def detect_room(self) -> str:
+    def detect_room_type(self) -> str | None:
+        """从房间标题栏图标识别设施类型，无法识别时返回未知。"""
         color_map = {
             "制造站": 25,
             "贸易站": 99,
@@ -1080,7 +1153,6 @@ class BaseMixin:
         # 只读取标题栏左侧的设施图标。整条标题栏会透出房间背景，
         # 加工站的暖色装饰曾被当成制造站的黄色。
         hsv = cv2.cvtColor(img[2:74, 2:74], cv2.COLOR_RGB2HSV)
-        colored_room = None
         color_scores = {
             room: cv2.countNonZero(
                 cv2.inRange(hsv, (color - 1, 80, 90), (color + 2, 255, 255))
@@ -1089,7 +1161,12 @@ class BaseMixin:
         }
         best_room = max(color_scores, key=color_scores.get)
         if color_scores[best_room] > 150:
-            colored_room = best_room
+            return best_room
+        return None
+
+    def detect_room(self) -> str:
+        colored_room = self.detect_room_type()
+        img = cropimg(self.recog.img, ((568, 18), (957, 95)))
         if colored_room in ["制造站", "贸易站", "发电站"]:
             digit_1 = cropimg(img, ((211, 24), (232, 54)))
             digit_2 = cropimg(img, ((253, 24), (274, 54)))
@@ -1098,14 +1175,12 @@ class BaseMixin:
             logger.debug(f"{colored_room}B{digit_1}0{digit_2}")
             return f"room_{digit_1}_{digit_2}"
         elif colored_room == "训练室":
-            logger.debug(
-                "训练室B205" if config.conf.swap_contact_train else "训练室B305"
-            )
+            logger.debug("训练室")
             return "train"
         elif colored_room == "加工站":
             logger.debug("加工站B105")
             return "factory"
-        white_room = ["central", "dormitory", "meeting", "contact"]
+        white_room = ["central", "dormitory", "meeting", "contact", "recycle"]
         score = []
         for room in white_room:
             tpl = loadres(f"room/{room}")
@@ -1127,10 +1202,10 @@ class BaseMixin:
             return f"dormitory_{digit}"
         elif room == "meeting":
             logger.debug("会客室1F02")
+        elif room == "recycle":
+            logger.debug("回收站")
         else:
-            logger.debug(
-                "办公室B305" if config.conf.swap_contact_train else "办公室B205"
-            )
+            logger.debug("办公室")
         return room
 
     def adjust_room(self, _room):
@@ -1199,7 +1274,7 @@ class BaseMixin:
                     _room = segment.base(
                         self.recog.img,
                         pos,
-                        swap_contact_train=config.conf.swap_contact_train,
+                        right_side_room_order=config.conf.right_side_room_order,
                     )[room]
                     logger.debug(
                         f"进入房间 {room}，第{enter_times + 1}轮第{retry_times + 1}次尝试"
@@ -1430,11 +1505,6 @@ class BaseMixin:
                             )
                             if not np.all((color >= 40) & (color <= 80)):
                                 valid = float("-inf ")
-                                if _idx < len(workshop_formula[name]["items"]):
-                                    logger.debug(f"更新{name}数量为0")
-                                    save_inventory_counts(
-                                        {workshop_formula[name]["items"][_idx]: 0}
-                                    )
                                 break
                     box_global = [[x + offset_x, y + offset_y] for (x, y) in box]
                     # 等于 0 则出界了

@@ -36,6 +36,7 @@ def crafting(monkeypatch):
     instance.enter_room = MagicMock()
     instance.agent_arrange = MagicMock()
     instance.generate_product = MagicMock()
+    instance.get_agent_from_room = MagicMock(return_value=[{"agent": "特克诺"}])
     instance.op_data = SimpleNamespace(
         operators={
             "谬因": SimpleNamespace(
@@ -44,7 +45,6 @@ def crafting(monkeypatch):
             "特克诺": SimpleNamespace(current_room="factory", current_index=0, mood=24),
         },
         plan={"dormitory_1": ["Current"] * 5},
-        is_rescue_recovering=lambda name: False,
     )
     setting = RIICPart.WorkShopSetting(
         operator="谬因",
@@ -64,7 +64,7 @@ def crafting(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "reason", ["scope", "stock", "cap", "disabled", "protected", "mood", "reserved"]
+    "reason", ["scope", "stock", "cap", "disabled", "mood", "reserved"]
 )
 def test_invalid_crafting_never_moves_dorm_operators(crafting, reason, caplog):
     instance, setting, stock, _ = crafting
@@ -76,8 +76,6 @@ def test_invalid_crafting_never_moves_dorm_operators(crafting, reason, caplog):
         stock["提纯源岩"] = 6
     elif reason == "disabled":
         setting.enabled = False
-    elif reason == "protected":
-        instance.op_data.is_rescue_recovering = lambda name: True
     elif reason == "mood":
         instance.op_data.operators["谬因"].current_mood = lambda: 0
     else:

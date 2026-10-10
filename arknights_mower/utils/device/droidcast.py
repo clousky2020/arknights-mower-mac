@@ -21,6 +21,7 @@ from arknights_mower.utils.device.adb_client.server import (
     run_adb,
 )
 from arknights_mower.utils.device.io_budget import budget_sleep, io_timeout
+from arknights_mower.utils.device.manager_io import run_command
 from arknights_mower.utils.device.recovery import DeviceRecoveryError
 from arknights_mower.utils.network import get_new_port
 
@@ -55,6 +56,7 @@ class DroidCastSession:
         self.name = "mower-droidcast-" + uuid.uuid4().hex
         self.port = None
         self.process = None
+        self._remote_cleanup_pending = False
         self.http = None
         self.starting = False
         # Zero makes the next frame read the mapping.
@@ -79,7 +81,7 @@ class DroidCastSession:
         try:
             return run_adb(
                 [self.adb_path, *selector, *args],
-                run=runner or subprocess.run,
+                run=runner or run_command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True,
@@ -206,7 +208,7 @@ class DroidCastSession:
         try:
             self._create_forward(port)
             guard_adb(
-                self.adb_path, timeout=io_timeout(COMMAND_TIMEOUT), run=subprocess.run
+                self.adb_path, timeout=io_timeout(COMMAND_TIMEOUT), run=run_command
             )
             self.process = subprocess.Popen(
                 [
@@ -225,6 +227,7 @@ class DroidCastSession:
                 stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
+            self._remote_cleanup_pending = True
             self.http = requests.Session()
             self.http.trust_env = False
             self.starting = True
@@ -248,7 +251,7 @@ class DroidCastSession:
         expected = [self.adb_path, "-s", self.serial, *args]
 
         def record_success(argv, **options):
-            result = subprocess.run(argv, **options)
+            result = run_command(argv, **options)
             if argv == expected and result.returncode == 0:
                 # run_adb checks its deadline again after the command returns.
                 # Preserve confirmed ownership even if that check then fails.
@@ -384,10 +387,9 @@ class DroidCastSession:
         with self._state_lock:
             if self.owner != os.getpid():
                 return
-            if self._cleanup_error is not None:
-                raise self._cleanup_error
             try:
                 self._close()
+                self._cleanup_error = None
             except Exception as exc:
                 self._cleanup_error = exc
                 self._cleanup_error.cleanup_failed = True
@@ -403,8 +405,8 @@ class DroidCastSession:
         if self.owner != os.getpid():
             return
         errors = []
-        process, self.process = self.process, None
-        if process is not None:
+        process = self.process
+        if self._remote_cleanup_pending:
             try:
                 pids = self._adb(
                     ["shell", "pidof", self.name],
@@ -430,8 +432,10 @@ class DroidCastSession:
                             cleanup=True,
                             missing_ok=True,
                         )
+                self._remote_cleanup_pending = False
             except Exception as exc:
                 errors.append(exc)
+        if process is not None:
             try:
                 try:
                     process.wait(timeout=2)
@@ -444,6 +448,7 @@ class DroidCastSession:
                         if process.poll() is None:
                             process.kill()
                         process.wait(timeout=2)
+                self.process = None
             except Exception as exc:
                 errors.append(exc)
         if self.port is not None:
@@ -458,16 +463,15 @@ class DroidCastSession:
                     except DroidCastError:
                         if self._mapping_matches(cleanup=True):
                             raise
+                self.port = None
             except Exception as exc:
                 errors.append(exc)
-            finally:
-                self.port = None
         if self.http is not None:
             try:
                 self.http.close()
+                self.http = None
             except Exception as exc:
                 errors.append(exc)
-            self.http = None
         if errors:
             raise DroidCastError(
                 "cleanup_failed", "；".join(str(error) for error in errors)

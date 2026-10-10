@@ -21,6 +21,12 @@ export const routes = [
         name: 'plan'
       },
       {
+        path: 'rescue-plan-editor',
+        component: () => import('@/pages/RescuePlan.vue'),
+        meta: { title: '救急排班' },
+        name: 'rescue_plan'
+      },
+      {
         path: 'mowersettings',
         component: () => import('@/pages/Settings.vue'),
         meta: { title: 'mower设置' },
@@ -41,7 +47,7 @@ export const routes = [
       {
         path: 'mastery-recommendation',
         component: () => import('@/pages/MasteryRecommendation.vue'),
-        meta: { title: '自动专精' },
+        meta: { title: '养成规划' },
         name: 'mastery_recommendation'
       },
       {

@@ -41,6 +41,7 @@ def solver(op_data, monkeypatch):
     op_data.operators["红"].time_stamp = None
     op_data.config.resting_priority_replacement = ["红"]
     instance.enter_room = MagicMock()
+    instance.turn_on_room_detail = MagicMock()
     instance.find = MagicMock(return_value=True)
     instance.tap = MagicMock()
     instance.agent_arrange_room = MagicMock(
@@ -70,6 +71,9 @@ def test_startup_scans_cards_without_selection_or_occupancy_changes(solver):
     }
     assert [vars(bed) for bed in data.all_dorms()] == beds
     assert solver.tasks == [task]
+    solver.turn_on_room_detail.assert_called_once_with(
+        solver.enter_room.call_args.args[0]
+    )
     solver.swipe_left.assert_called_once_with(1, "ALL")
     solver.tap.assert_called_once_with((1920 * 0.38, 1080 * 0.95), interval=0.5)
     solver.switch_arrange_order.assert_called_once_with(
@@ -365,7 +369,7 @@ def test_real_primary_planning_observes_cards_before_candidate_selection(
     solver.resting = MagicMock(side_effect=lambda: events.append("primary") or {})
     monkeypatch.setattr(base_schedule, "try_reorder", lambda *args: {})
     assert solver._plan_primary_recovery(scan_moods=scan_moods)
-    assert events == (["scan", "primary"] if enabled and scan_moods else ["primary"])
+    assert events == (["scan", "primary"] if scan_moods else ["primary"])
 
 
 @pytest.mark.parametrize(

@@ -1,20 +1,20 @@
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from arknights_mower import __rootdir__, __system__
 from arknights_mower.utils.config.device_profile import (
     LEGACY_NAMES,
     DeviceProfile,
     capture_compatibility_error,
+    default_adb_path,
     profile_from_legacy,
     updated_legacy_profile_fields,
 )
-from arknights_mower.utils.path import get_path
+from arknights_mower.utils.config.plan import PlanModel
 from arknights_mower.utils.performance import (
     PERFORMANCE_PRESETS,
     default_performance_mode,
@@ -31,16 +31,6 @@ DEFAULT_LAUNCH_COMMAND = (
 
 def default_maa_directory():
     return "@app/MAA"
-
-
-def default_adb_path():
-    name = "adb.exe" if sys.platform == "win32" else "adb"
-    bundled = get_path(f"@internal/platform-tools/{name}")
-    if bundled.is_file() or sys.platform == "darwin":
-        return f"@internal/platform-tools/{name}"
-    if sys.platform.startswith("linux"):
-        return os.environ.get("MOWER_ADB_BIN") or shutil.which("adb") or ""
-    return ""
 
 
 class ConfModel(BaseModel):
@@ -382,11 +372,13 @@ class RegularTaskPart(ConfModel):
     maa_eat_stone: bool = False
     "无限吃源石"
     maa_report_to_yituliu: bool = False
-    "向一图流上报作战结果"
+    "向一图流上报掉落数据"
     maa_yituliu_id: str = ""
     "一图流上报 id（仅在开启上报时有效）"
+    maa_report_to_penguin: bool = False
+    "向企鹅物流上报掉落数据"
     maa_penguin_id: str = ""
-    "企鹅物流上报 id（可选，留空为匿名上报）"
+    "企鹅物流上报 id（仅在开启上报时有效）"
     maa_weekly_plan: list[MaaDailyPlan] = [
         {"medicine": 0, "sanity_threshold": 0, "stage": [""], "weekday": "周一"},
         {"medicine": 0, "sanity_threshold": 0, "stage": [""], "weekday": "周二"},
@@ -427,13 +419,38 @@ class WorkShopItem(ConfModel):
 
 
 class WorkshopDeerFodderItem(WorkShopItem):
-    children_lower_limit: int = Field(default=0, ge=0, le=999999)
+    children_lower_limit: int = Field(default=20, ge=0, le=999999)
     self_upper_limit: int = Field(default=9999, ge=0, le=999999)
 
 
 class RIICPart(ConfModel):
-    swap_contact_train: bool = False
-    "右侧训练室在办公室上方；默认办公室在上、训练室在下"
+    right_side_room_order: list[Literal["contact", "train", "recycle"]] = Field(
+        default_factory=lambda: ["contact", "train", "recycle"],
+        min_length=3,
+        max_length=3,
+    )
+    "右侧第二至四层的设施顺序，仅保存在本机配置"
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_right_side_room_order(cls, data):
+        if isinstance(data, dict) and "swap_contact_train" in data:
+            data = data.copy()
+            swapped = data.pop("swap_contact_train")
+            data.setdefault(
+                "right_side_room_order",
+                ["train", "contact", "recycle"]
+                if swapped
+                else ["contact", "train", "recycle"],
+            )
+        return data
+
+    @field_validator("right_side_room_order")
+    @classmethod
+    def validate_right_side_room_order(cls, value):
+        if len(set(value)) != 3:
+            raise ValueError("办公室、训练室和回收站必须各出现一次")
+        return value
 
     class RunOrderGrandetModeConf(ConfModel):
         enable: bool = True
@@ -444,6 +461,8 @@ class RIICPart(ConfModel):
         "跑单前返回基建首页"
 
     class ProductSwitchingConf(ConfModel):
+        enable: bool = False
+        "自动切换产物与订单，并读取相关设施状态"
         max_drones_per_switch: int = Field(default=0, ge=0, le=200)
         "单次切换产物最多使用的无人机数量；0 表示不限制"
         grandet_mode: bool = True
@@ -540,14 +559,34 @@ class RIICPart(ConfModel):
 
     free_room: bool = False
     "宿舍不养闲人模式"
+    dorm_isolation: list[list[str]] = Field(default_factory=list)
+    "宿舍隔离分组；在原有分床优先级下尽量分散同组干员"
+
+    @field_validator("dorm_isolation")
+    @classmethod
+    def validate_dorm_isolation(cls, groups):
+        for group in groups:
+            if any(not name.strip() or name in {"Free", "Current"} for name in group):
+                raise ValueError("宿舍隔离分组只能填写干员姓名")
+            if len(group) != len(set(group)):
+                raise ValueError("宿舍隔离分组内不能重复填写干员")
+        return groups
+
     group_rest_in_full_on_mood_gap: bool = True
     "组内高优先干员预计恢复时间差过大时，等待整组回满"
+    group_mood_gap_threshold_minutes: int = Field(default=60, ge=1, le=1440)
+    "组内预计恢复时间差触发延后回班的阈值（分钟）"
     group_mood_gap_max_extra_wait_hours: float = Field(default=0, ge=0, le=24)
     "组内恢复时间差过大时最多额外等待的小时数；0 表示不限时"
     fia_fool: bool = True
     "菲亚防呆"
     fia_threshold: float = 0.9
     "菲亚阈值"
+    automatic_rescue_enable: bool = False
+    "初始化确认原生轮休无法周转时，使用用户救急主表"
+    automatic_rescue_plan: PlanModel = Field(default_factory=PlanModel)
+    "独立的救急主表及副表"
+
     rescue_threshold: float = 0.75
     "急救阈值"
     favorite: str = ""
@@ -558,6 +597,8 @@ class RIICPart(ConfModel):
     "独立保存、可编辑的手动加工表单；None 表示尚未初始化"
     workshop_auto_active: bool = False
     "自动专精是否正在接管运行配置"
+    growth_crafting_order: list[str] = Field(default_factory=list)
+    "养成项目的合成顺序；空列表按专精计划优先，训练中的计划固定在前"
     workshop_manual_revision: int = 0
     "手动表单版本，与自动运行配置版本独立"
 
@@ -580,7 +621,7 @@ class RIICPart(ConfModel):
     workshop_deer_fodder: list[WorkshopDeerFodderItem] = [
         {
             "item_names": ["碳素", "碳素组", "家具零件_碳素组"],
-            "children_lower_limit": 0,
+            "children_lower_limit": 20,
             "self_upper_limit": 9999,
         }
     ]
@@ -680,7 +721,7 @@ class SimulatorPart(ConfModel):
     close_simulator_when_idle: bool = False
     "任务结束后关闭模拟器"
     fix_mumu12_adb_disconnect: bool = False
-    "关闭MuMu模拟器12时结束adb进程"
+    "关闭MuMu模拟器12时断开该实例的adb连接"
     touch_method: str = "scrcpy"
     "触控模式"
     touch_fallback: bool = False

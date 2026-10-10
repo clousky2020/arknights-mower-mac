@@ -28,9 +28,12 @@ from typing import Optional
 
 from arknights_mower.data import agent_list
 from arknights_mower.utils import config
-from arknights_mower.utils.image import cropimg, rgb2gray, thres2
+from arknights_mower.utils.image import cropimg
 from arknights_mower.utils.log import logger
-from arknights_mower.utils.mastery_panel_template import recognize_skill
+from arknights_mower.utils.mastery_panel_template import (
+    recognize_operator,
+    recognize_skill,
+)
 from arknights_mower.utils.scene import Scene
 from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
 from arknights_mower.utils.skill_label import (
@@ -39,7 +42,6 @@ from arknights_mower.utils.skill_label import (
     _resolve_operator_char_id,
     format_skill_label,
     is_placeholder_skill_name,
-    normalize_skill_text,
     panel_skill_matches,
     resolve_panel_skill,
     resolve_panel_skill_fuzzy,
@@ -395,10 +397,7 @@ def _read_slot_mastery_tier(solver, skill_index):
 
 
 def _read_panel_text(solver, img=None) -> RoomPanel:
-    """读主面板 `[干员名]技能名` 文本；OCR 不可读 → 空面板（operator_name=""）。
-
-    只读文本、不读图标/倒计时，供确认开始等轻量归属校验用（避免依赖像素读取）。
-    """
+    """主面板姓名由完整模板确认，技能保留 OCR 与模板校验。"""
     from arknights_mower.utils.mastery_recommendation import get_skill_data
 
     if img is None:
@@ -408,66 +407,17 @@ def _read_panel_text(solver, img=None) -> RoomPanel:
         except Exception as e:
             logger.debug(f"面板截图失败: {e}")
             return RoomPanel()
+    data = get_skill_data()
+    region = cropimg(img, PANEL_REGION)
+    operator_name = recognize_operator(region, data)
+    if not operator_name:
+        return RoomPanel()
     try:
         text = solver.read_screen(img, type="text", cord=PANEL_REGION)
     except Exception as e:
-        logger.debug(f"面板 OCR 失败: {e}")
-        return RoomPanel()
-    operator_name, skill_name = _parse_panel_text(text)
-    if operator_name and operator_name not in agent_list:
-        # Sparse white glyphs can disappear in the recognizer even with a high
-        # confidence score (e.g. 八 in 八幡海铃). Retry the same pixels with the
-        # background removed; never infer the occupant from the requested plan.
-        try:
-            region = cropimg(img, PANEL_REGION)
-            gray = rgb2gray(region) if region.ndim == 3 else region
-            retry_text = solver.read_screen(thres2(gray, 180), type="text")
-            retry_name, retry_skill = _parse_panel_text(retry_text)
-            if (
-                retry_name in agent_list
-                and skill_name
-                and normalize_skill_text(retry_skill)
-                == normalize_skill_text(skill_name)
-            ):
-                logger.info(
-                    f"训练室面板二次识别纠正姓名：{operator_name} → {retry_name}，"
-                    f"技能：{retry_skill}"
-                )
-                operator_name, skill_name = retry_name, retry_skill
-        except Exception as e:
-            logger.debug(f"训练室面板二次识别失败: {e}")
-    data = get_skill_data() if operator_name else {}
-    if operator_name not in agent_list and len(operator_name) >= 2 and skill_name:
-        # Both OCR passes can omit the same glyph. A roster candidate only
-        # supplies templates; the current pixels must confirm name and skill.
-        candidates = {
-            char["name"]
-            for char in data.get("characters", {}).values()
-            if char.get("name") in agent_list
-            and len(char["name"]) == len(operator_name) + 1
-            and any(
-                char["name"][:i] + char["name"][i + 1 :] == operator_name
-                for i in range(len(char["name"]))
-            )
-            and any(
-                normalize_skill_text(skill.get("name", ""))
-                == normalize_skill_text(skill_name)
-                for skill in char.get("skills", [])
-            )
-        }
-        confirmed = []
-        region = cropimg(img, PANEL_REGION)
-        for name in candidates:
-            match = recognize_skill(region, name, data)
-            if match is not None and normalize_skill_text(
-                match.name
-            ) == normalize_skill_text(skill_name):
-                confirmed.append(name)
-        if len(confirmed) == 1:
-            logger.info(
-                f"训练室面板模板纠正姓名：{operator_name} → {confirmed[0]}，技能：{skill_name}"
-            )
-            operator_name = confirmed[0]
+        logger.debug(f"面板技能 OCR 失败: {e}")
+        return RoomPanel(operator_name=operator_name)
+    _, skill_name = _parse_panel_text(text)
     if operator_name in agent_list:
         # OCR can confidently drop one character (e.g. 沙缚镣锁 → 沙缚锁).
         # Compare the same pixels with this operator's known skill templates.
@@ -480,7 +430,7 @@ def _read_panel_text(solver, img=None) -> RoomPanel:
         )
         if has_named_skills:
             ocr_skill_index = resolve_panel_skill(operator_name, skill_name)
-            result = recognize_skill(cropimg(img, PANEL_REGION), operator_name, data)
+            result = recognize_skill(region, operator_name, data)
             if result is not None:
                 if ocr_skill_index is None:
                     logger.info(
@@ -700,14 +650,13 @@ def _train_slot_has_mastery(solver) -> bool:
         if solver.train_scene() != Scene.TRAIN_SKILL_SELECT:
             return True
 
-        has = False
         for idx in (0, 1, 2):
             tier = _read_slot_mastery_tier(solver, idx)
             if tier is None:
                 return True  # 读不到 → 保守保护
             if tier in (1, 2):
-                has = True
-        return has
+                return True
+        return False
     except Exception:
         return True
     finally:
@@ -734,7 +683,7 @@ def _compute_protected(solver, room, scan_plan=None) -> bool:
     - 待收取：仅非专三（链未走完）保护；专三完成 → §5.3 第1格「无论如何不保护 → 可排班」；
     - 空闲 + 训练位有人 → 深读技能页，有专一/专二 → 保护；全专三/专0 → 可动；
     - 空闲 + 训练位没人 → 可排班。
-    - scan_plan 匹配训练位干员时，开训不动训练位，保护不适用，无需深读技能页。
+    - 计划干员匹配不解除保护；同一训练位干员可以开始其他技能。
     每次排班进训练室重读重判，条件一变自动解除；enable_mastery OFF 时保护全停（§7.3）。
     """
     if not config.conf.enable_mastery:
@@ -745,12 +694,6 @@ def _compute_protected(solver, room, scan_plan=None) -> bool:
         return room.panel.mastery_tier != 3
     if room.state == "empty":
         if not room.train_slot:
-            return False
-        if (
-            scan_plan is not None
-            and scan_plan.get("status") == "idle"
-            and _plan_operator_matches(scan_plan, room.train_slot)
-        ):
             return False
         return _train_slot_has_mastery(solver)
     return False
@@ -993,6 +936,19 @@ def _can_recover_plan(plan, room: RoomState) -> bool:
         return False
     resolved = resolve_panel_skill(op, sk, plan.get("char_id"))
     return resolved is not None and resolved == plan.get("skill_index")
+
+
+def _protected_trainee_matches(plan, room: RoomState) -> bool:
+    """受保护房间只限制训练位干员；同一干员的技能不受此限制。"""
+    if room.read_failed:
+        return False
+    if room.state == "waiting_collect" or room.collected:
+        return _plan_operator_matches(plan, room.panel.operator_name)
+    return (
+        room.state == "empty"
+        and room.slots_reliable
+        and _plan_operator_matches(plan, room.train_slot)
+    )
 
 
 def _plan_label(plan) -> str:
@@ -1863,7 +1819,10 @@ def _reconcile(
     defer_collect（#75 方案 C）：排班 gate（reconcile_short）传 True 时待收取格跳过
     「队列已有专精任务」的计划的收集（见 _reconcile_waiting_collect）；dispatch 恒 False。
     """
-    from arknights_mower.utils.mastery_db import update_plan_status
+    from arknights_mower.utils.mastery_db import (
+        get_material_waiting_plan,
+        update_plan_status,
+    )
 
     # arranging × 任何列 → 重置 idle
     if active is not None and active["status"] == "arranging":
@@ -1879,6 +1838,12 @@ def _reconcile(
         return None, True
 
     if room.state == "empty":
+        waiting = get_material_waiting_plan(plans)
+        if waiting is not None and (
+            scan_plan is None or scan_plan["id"] != waiting["id"]
+        ):
+            logger.info("专精链中途材料不足，保留当前计划，不开始后续计划")
+            return None, True
         # ⚪ 空闲：DB active 与截图冲突 → 截图权威重置 idle；受保护 → mower 不能开始。
         if active is not None:
             logger.info(
@@ -1886,12 +1851,11 @@ def _reconcile(
             )
             update_plan_status(active["id"], "idle")
         if room.protected:
-            # §4.4 保护挡「移动协助位/训练位」。训练位已是计划干员时，开始训练
-            # 不动训练位（只按路线补协助位），保护不适用 → 放行 mower 开始。
+            # 保护始终保留，只允许实读同一训练位干员，不限制技能。
             if (
                 scan_plan is not None
                 and scan_plan["status"] == "idle"
-                and _plan_operator_matches(scan_plan, room.train_slot)
+                and _protected_trainee_matches(scan_plan, room)
             ):
                 return scan_plan, True
             idle = _next_idle_to_start(solver)
@@ -1997,7 +1961,18 @@ def _reconcile_waiting_collect(solver, room, active, plans, defer_collect=False)
     （恢复兜底）。专三同样纳入 skip（2026-08-14 用户撤回例外：gate 不抢收，由任务收完
     训练室再回归排班）。dispatch（reconcile_and_act）defer 恒 False 永不跳过。
     """
-    hit = _match_plan(plans, room)  # 干员+技能都在计划
+    hit = (
+        next(
+            (
+                p
+                for p in plans
+                if p["status"] != "completed" and _can_recover_plan(p, room)
+            ),
+            None,
+        )
+        if room.protected
+        else _match_plan(plans, room)
+    )
     suppress_help = False
     if hit is not None and hit["status"] == "failed":
         # #98：failed 计划不在收取阶段接管——训练中已按截图恢复 training；收取阶段
@@ -2015,7 +1990,12 @@ def _reconcile_waiting_collect(solver, room, active, plans, defer_collect=False)
     if active is not None and not _plan_matches_room(active, room):
         _reset_fake(solver, active, room)
         active = None
-    if hit is None and active is not None and _plan_matches_room(active, room):
+    if (
+        hit is None
+        and active is not None
+        and _plan_matches_room(active, room)
+        and (not protective or _can_recover_plan(active, room))
+    ):
         # 干员名/技能名 OCR 不可读时 _match_plan 判不了命中，但 active 计划视为
         # 匹配（稳为先，铁律），照常更新状态后收取——否则 active 计划会永远停在 training
         hit = active

@@ -60,6 +60,58 @@ async function setup(overrides = {}) {
 }
 
 describe('partial configuration saves', () => {
+  it.each(['windows', 'darwin', 'linux'])(
+    'starts desktop auto at xhigh on %s',
+    async (platform) => {
+      await setup({ runtime_platform: platform, performance_mode: 'auto' })
+      expect(store.performance_mode).toBe('auto')
+      expect(store.performance_effective_mode).toBe('xhigh')
+    }
+  )
+
+  it('keeps the Android auto baseline at medium', async () => {
+    await setup({ runtime_platform: 'android', performance_mode: 'auto' })
+    expect(store.performance_effective_mode).toBe('medium')
+  })
+
+  it('shows the backend automatic verdict after a downgrade', async () => {
+    await setup({
+      runtime_platform: 'darwin',
+      performance_mode: 'auto',
+      performance_effective_mode: 'high'
+    })
+    expect(store.performance_effective_mode).toBe('high')
+  })
+
+  it('preserves an explicitly selected high mode', async () => {
+    await setup({ runtime_platform: 'darwin', performance_mode: 'high' })
+    expect(store.performance_mode).toBe('high')
+    expect(store.performance_effective_mode).toBe('high')
+  })
+
+  it('keeps legacy switching disabled and saves only an explicit master toggle', async () => {
+    await setup({
+      product_switching: { grandet_mode: false, waiting_seconds: 4 },
+      run_order_grandet_mode: { enable: true }
+    })
+    expect(store.product_switching.enable).toBe(false)
+    store.product_switching.enable = true
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
+      product_switching: { enable: true }
+    })
+    expect(store.product_switching.grandet_mode).toBe(false)
+    expect(store.product_switching.waiting_seconds).toBe(4)
+    expect(store.run_order_grandet_mode.enable).toBe(true)
+  })
+
+  it('preserves explicitly enabled product switching on load', async () => {
+    await setup({ product_switching: { enable: true, waiting_seconds: 4 } })
+    expect(store.product_switching.enable).toBe(true)
+    expect(store.product_switching.waiting_seconds).toBe(4)
+  })
+
   it('saves the existing startup protection independently of device identity', async () => {
     await setup({ simulator: { name: 'ReDroid', index: '0', wait_time: 75 } })
     store.simulator.wait_time = 90
@@ -369,4 +421,32 @@ describe('partial configuration saves', () => {
       [field]: value
     })
   })
+})
+
+it('saves room drag swaps locally with a layout-only patch', async () => {
+  await setup({ swap_contact_train: true })
+  expect(store.right_side_room_order).toEqual(['train', 'contact', 'recycle'])
+  axios.patch.mockClear()
+  store.swap_right_side_facilities('train', 'recycle')
+  await nextTick()
+  await store.flush_config_saves()
+  expect(axios.patch).toHaveBeenCalledTimes(1)
+  expect(axios.patch.mock.lastCall[1]).toEqual({
+    right_side_room_order: ['recycle', 'contact', 'train']
+  })
+  expect(store.build_advanced_settings()).not.toHaveProperty('right_side_room_order')
+  const before = store.build_config().right_side_room_order
+  store.swap_right_side_facilities('room_1_1', 'contact')
+  store.swap_right_side_facilities('', 'train')
+  store.swap_right_side_facilities('contact', 'contact')
+  expect(store.right_side_room_order).toEqual(before)
+  await nextTick()
+  await store.flush_config_saves()
+  expect(axios.patch).toHaveBeenCalledTimes(1)
+})
+
+it('loads the explicit three-room order before the legacy switch', async () => {
+  await setup({ swap_contact_train: true, right_side_room_order: ['recycle', 'train', 'contact'] })
+  expect(store.right_side_room_order).toEqual(['recycle', 'train', 'contact'])
+  expect(store.build_config()).not.toHaveProperty('swap_contact_train')
 })

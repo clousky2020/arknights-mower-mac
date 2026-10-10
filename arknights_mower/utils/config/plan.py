@@ -1,8 +1,92 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+import ast
+import copy
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+def contains_retired_rescue_condition(value) -> bool:
+    """识别实际救急调用；嵌套条件和字符串常量分别处理。"""
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
+    if isinstance(value, dict):
+        return any(contains_retired_rescue_condition(part) for part in value.values())
+    if not isinstance(value, str):
+        return False
+    try:
+        tree = ast.parse(value, mode="eval")
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "op_data"
+        and node.func.attr == "rescue_needed"
+        for node in ast.walk(tree)
+    )
+
+
+def retire_rescue_backups(data):
+    """返回退役副表后的独立文档和旧索引到新索引的映射。"""
+    result = copy.deepcopy(data)
+    backups, indices = [], {}
+    for index, backup in enumerate(data.get("backup_plans", [])):
+        if contains_retired_rescue_condition(backup.get("trigger", {})):
+            continue
+        indices[index] = len(backups)
+        backups.append(copy.deepcopy(backup))
+    if "backup_plans" in data:
+        result["backup_plans"] = backups
+    return result, indices
+
+
+def migrate_backup_tasks(tasks, old_names, new_names, indices, *, retired=False):
+    """迁移可识别的条件向量；移除退役副表的派生任务，保留专项任务。"""
+    from arknights_mower.utils.scheduler_task import TaskTypes
+
+    result = []
+    for original in tasks:
+        task = copy.deepcopy(original)
+        flags = getattr(task, "backup_shift_conditions", None)
+        derived = (
+            flags is not None
+            or getattr(task, "backup_shift_active", False)
+            or getattr(task, "pending_backup_product_switch", False)
+        )
+        if retired and derived:
+            # 混合副表安排不能仅删除一个条件位后继续执行旧的实际名单。
+            continue
+        if flags is not None:
+            if old_names:
+                previous = dict(zip(old_names, flags))
+                task.backup_shift_conditions = [
+                    previous.get(name, False) for name in new_names
+                ]
+            elif len(flags) == len(new_names):
+                task.backup_shift_conditions = list(flags)
+            elif indices:
+                mapped = [False] * len(new_names)
+                for old, new in indices.items():
+                    if old < len(flags) and new < len(mapped):
+                        mapped[new] = flags[old]
+                task.backup_shift_conditions = mapped
+            else:
+                continue
+        if retired and task.type in (
+            TaskTypes.SHIFT_OFF,
+            TaskTypes.SHIFT_ON,
+            TaskTypes.EXHAUST_OFF,
+            TaskTypes.FILL_DORM,
+            TaskTypes.RELEASE_DORM,
+            TaskTypes.SELF_CORRECTION,
+            TaskTypes.RE_ORDER,
+        ):
+            continue
+        result.append(task)
+    return result
 
 
 class MoodLimits(BaseModel):
@@ -35,6 +119,8 @@ class PlanConf(BaseModel):
     "不养闲人排除干员，保留床位至上班；心情上限优先"
     resting_standby: str = ""
     "宿舍休息候补干员"
+    free_blacklist: str = ""
+    "宿舍黑名单，救急主表独立保存"
     workaholic: str = ""
     "0心情工作（主力宿舍黑名单）"
     refresh_trading: str = ""
@@ -44,20 +130,39 @@ class PlanConf(BaseModel):
     ope_resting_priority: str = ""
     "休息排序优先级"
     dorm_order: str = ""
-    "当前排班的宿舍房间优先级"
+    "当前排班的宿舍高优位及可选低优位顺序"
 
 
 class BackupPlanConf(PlanConf):
-    free_blacklist: str = ""
-    "（非主力）宿舍黑名单"
+    removed_operators: dict[
+        Literal[
+            "rest_in_full",
+            "exhaust_require",
+            "resting_priority",
+            "resting_priority_replacement",
+            "free_room_exclusions",
+            "resting_standby",
+            "workaholic",
+            "free_blacklist",
+            "refresh_trading",
+            "refresh_drained",
+            "ope_resting_priority",
+        ],
+        str,
+    ] = Field(default_factory=dict)
+    "副表各选项在添加后移除的干员名单"
     dorm_order_override: Optional[bool] = None
-    "是否由该副表显式覆盖此前生效的宿舍房间优先级"
+    "是否由该副表显式覆盖此前生效的宿舍优先级"
 
 
-class Plans(BaseModel):
-    agent: str
+class GroupBinding(BaseModel):
     group: str = ""
-    replacement: list[str] = []
+    replacement: list[str] = Field(default_factory=list)
+
+
+class Plans(GroupBinding):
+    agent: str
+    group_bindings: list[GroupBinding] = Field(default_factory=list)
 
 
 class Facility(BaseModel):
@@ -77,6 +182,8 @@ class Plan1(BaseModel):
     "办公室"
     train: Optional[Facility] = None
     "训练室"
+    recycle: Optional[Facility] = None
+    "回收站，固定两个岗位"
     gaming_1: Optional[Facility] = None
     "活动室1"
     gaming_2: Optional[Facility] = None
@@ -97,6 +204,13 @@ class Plan1(BaseModel):
     room_3_2: Optional[Facility] = None
     room_3_3: Optional[Facility] = None
 
+    @field_validator("recycle")
+    @classmethod
+    def validate_recycle_capacity(cls, value):
+        if value is not None and len(value.plans) > 2:
+            raise ValueError("回收站最多安排2名干员")
+        return value
+
 
 class Task(BaseModel):
     central: Optional[list[str]] = None
@@ -109,6 +223,8 @@ class Task(BaseModel):
     "办公室"
     train: Optional[list[str]] = None
     "训练室"
+    recycle: Optional[list[str]] = Field(default=None, max_length=2)
+    "回收站，固定两个岗位"
     gaming_1: Optional[list[str]] = None
     "活动室1"
     gaming_2: Optional[list[str]] = None
@@ -154,6 +270,13 @@ class PlanModel(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def retire_rescue_conditions(cls, data):
+        if isinstance(data, dict):
+            return retire_rescue_backups(data)[0]
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def retire_dorm_options(cls, data):
         if not isinstance(data, dict) or not isinstance(
             data.get("advanced_settings"), dict
@@ -189,27 +312,18 @@ def parse_plan_document(data) -> PlanModel:
 def migrate_legacy_dorm_order(
     plan: PlanModel, data: dict, legacy_dorm_order: str
 ) -> bool:
-    """迁移全局旧床位顺序，并折叠为每张排班独立的房间顺序。
+    """迁移全局旧床位顺序，并保留每张排班独立的高优位及低优位顺序。
 
     主表缺少独立字段时继承旧全局值；副表只迁移显式的非默认顺序。
     历史版本自动写入副表的 1→2→3→4 视为未覆盖，避免后续副表把
     前一张副表的自定义顺序冲回默认值。
     """
-    rooms = [f"dormitory_{index}" for index in range(1, 5)]
+    from arknights_mower.utils.plan import DEFAULT_DORM_ROOM_ORDER, effective_dorm_order
+
+    rooms = DEFAULT_DORM_ROOM_ORDER
 
     def room_order(value: str) -> str:
-        result = []
-        for item in (value or "").split(","):
-            parts = item.rsplit("_", 1)
-            room = (
-                parts[0]
-                if len(parts) == 2 and parts[0] in rooms and parts[1].isdigit()
-                else item
-            )
-            if room in rooms and room not in result:
-                result.append(room)
-        result.extend(room for room in rooms if room not in result)
-        return ",".join(result)
+        return ",".join(effective_dorm_order((value or "").split(",")))
 
     changed = False
     main_conf = data.get("conf")

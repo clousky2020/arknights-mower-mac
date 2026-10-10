@@ -266,6 +266,7 @@ def add_plan_checked(
     priority: int = 0,
     path: Optional[str] = None,
     support_mode: str = "auto",
+    planning: bool = False,
 ) -> tuple[int, Optional[str]]:
     """统一计划创建入口（#65/B7）：校验 target_level 范围 + 干员当前等级 + 技能是否已有计划。
 
@@ -301,8 +302,16 @@ def add_plan_checked(
     if char_id in UNTRAINABLE_CHAR_IDS:
         return -1, "该干员为肉鸽赠送干员，无法在训练室专精技能"
     requirement_error = get_mastery_requirement_error(char_id)
-    if requirement_error:
+    if requirement_error and not planning:
         return -1, requirement_error
+    if planning:
+        from arknights_mower.utils.mastery_recommendation import get_skill_data
+
+        levels = (
+            get_skill_data().get("characters", {}).get(char_id, {}).get("skills", [])
+        )
+        if skill_index >= len(levels) or not levels[skill_index].get("levels"):
+            return -1, "该技能不支持专精"
     existing = get_plan_by_skill(char_id, skill_index, path)
     if existing is not None:
         return -1, (
@@ -321,7 +330,7 @@ def add_plan_checked(
     try:
         support_plan = (
             None
-            if support_mode == "route"
+            if support_mode == "route" or requirement_error
             else plan_supports(
                 char_id,
                 current_level or 0,
@@ -476,6 +485,20 @@ def get_reconcile_plans(path: Optional[str] = None) -> list[dict]:
     return plans
 
 
+def get_material_waiting_plan(plans: list[dict]) -> Optional[dict]:
+    """已确认开训后缺料的未完成计划阻止后续计划开始。"""
+    return next(
+        (
+            plan
+            for plan in plans
+            if plan.get("status") in ("idle", "failed")
+            and plan.get("expires_at")
+            and plan.get("failed_reason") == "材料不足"
+        ),
+        None,
+    )
+
+
 def update_plan_status(
     plan_id: int,
     status: str,
@@ -526,15 +549,53 @@ def update_plan_priority(
         return False
 
 
+@contextmanager
+def reordered_plan_priorities(skill_order, locked_keys, path=None):
+    """Commit all skill priorities together with the caller's configuration save."""
+    try:
+        with _conn(path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            plans = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM mastery_plan WHERE status NOT IN ('completed', 'failed') "
+                    "ORDER BY priority, id"
+                )
+            ]
+            keys = {f"skill:{p['char_id']}:{p['skill_index']}" for p in plans}
+            waiting = get_material_waiting_plan(plans)
+            protected = {
+                f"skill:{p['char_id']}:{p['skill_index']}"
+                for p in plans
+                if p["status"] in ("arranging", "training", "waiting_collect")
+                or p is waiting
+            }
+            if keys != set(skill_order) or protected != set(locked_keys):
+                raise ValueError("专精计划已变化，请刷新养成计划后重试")
+            ranks = {key: index for index, key in enumerate(skill_order)}
+            conn.executemany(
+                "UPDATE mastery_plan SET priority=? WHERE id=?",
+                [
+                    (ranks[f"skill:{p['char_id']}:{p['skill_index']}"], p["id"])
+                    for p in plans
+                ],
+            )
+            yield
+            conn.commit()
+    except sqlite3.Error as exc:
+        raise OSError("专精顺序保存失败") from exc
+
+
 def auto_interleave_new_plans(
     new_plan_ids: list[int],
     path: Optional[str] = None,
     professions: Optional[dict[str, str]] = None,
+    order=(),
 ) -> bool:
-    """Append new operators to the current order, then alternate operator groups."""
+    """Append new plans to saved order, or alternate default operator groups."""
     if not new_plan_ids:
         return True
-    if professions is None:
+    if professions is None and not order:
         from arknights_mower.utils.mastery_recommendation import get_skill_data
 
         professions = {
@@ -547,14 +608,30 @@ def auto_interleave_new_plans(
             rows = [
                 dict(row)
                 for row in conn.execute(
-                    "SELECT id, char_id, status, priority FROM mastery_plan "
+                    "SELECT * FROM mastery_plan "
                     "WHERE status NOT IN ('completed', 'failed') ORDER BY priority, id"
                 ).fetchall()
             ]
             new_ids = set(new_plan_ids)
             plans = [row for row in rows if row["id"] not in new_ids]
             plans.extend(row for row in rows if row["id"] in new_ids)
-            ordered = interleave_mastery_plans(plans, professions)
+            if order:
+                ranks = {key: index for index, key in enumerate(order)}
+                waiting = get_material_waiting_plan(plans)
+                ordered = sorted(
+                    plans,
+                    key=lambda p: (
+                        not (
+                            p["status"] in ("arranging", "training", "waiting_collect")
+                            or p is waiting
+                        ),
+                        ranks.get(
+                            f"skill:{p['char_id']}:{p['skill_index']}", len(ranks)
+                        ),
+                    ),
+                )
+            else:
+                ordered = interleave_mastery_plans(plans, professions)
             conn.executemany(
                 "UPDATE mastery_plan SET priority=? WHERE id=?",
                 (
@@ -570,9 +647,22 @@ def auto_interleave_new_plans(
         return False
 
 
-def delete_plan(plan_id: int, path: Optional[str] = None) -> bool:
+def delete_plan(
+    plan_id: int, path: Optional[str] = None, *, protect_active=False
+) -> bool:
     try:
         with _conn(path) as conn:
+            if protect_active:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM mastery_plan WHERE id=?", (plan_id,)
+                ).fetchone()
+                plan = dict(row) if row else None
+                if plan and (
+                    plan["status"] in ("arranging", "training", "waiting_collect")
+                    or get_material_waiting_plan([plan]) is not None
+                ):
+                    raise ValueError("正在训练或等待继续的计划不能删除")
             conn.execute("DELETE FROM mastery_plan WHERE id=?", (plan_id,))
             # #97：删计划顺带清通知去重（②③⑥⑦⑧ 用 str(plan_id) 作 dedup_key）——
             # 避免孤儿 dedup 残留；重加同计划（新 id）本就会重新通知，这里是卫生清理。
@@ -587,6 +677,8 @@ def delete_plan(plan_id: int, path: Optional[str] = None) -> bool:
             )
             conn.commit()
             return True
+    except ValueError:
+        raise
     except Exception as e:
         logger.error(f"delete_plan failed: {e}")
         return False
@@ -631,11 +723,14 @@ def is_operator_busy(name_or_id: str, path: Optional[str] = None) -> bool:
 
 
 def retry_failed_plans(path: Optional[str] = None) -> int:
-    """仓库扫描后调用：将 failed 状态的计划重置为 idle，允许重新尝试。返回重置数量。"""
+    """仓库扫描后调用：将 failed 重置为 idle，保留确认开训后的缺料原因。返回重置数量。"""
     try:
         with _conn(path) as conn:
             cursor = conn.execute(
-                "UPDATE mastery_plan SET status='idle', failed_reason=NULL "
+                "UPDATE mastery_plan SET status='idle', "
+                "failed_reason=CASE WHEN failed_reason='材料不足' "
+                "AND expires_at IS NOT NULL AND expires_at != '' "
+                "THEN failed_reason ELSE NULL END "
                 "WHERE status='failed'"
             )
             conn.commit()
@@ -835,3 +930,53 @@ def cancel_pending_plan(char_id: str, skill_index: int) -> bool:
     except Exception as e:
         logger.error(f"cancel_pending_plan failed: {e}")
         return False
+
+
+def change_plan_target(plan_id, target, path=None):
+    """Only an unstarted plan may replace its target and assistant route together."""
+    if type(plan_id) is not int or type(target) is not int or target not in (1, 2, 3):
+        raise ValueError("目标专精等级无效")
+    plan = get_plan_by_id(plan_id, path)
+    if plan is None or plan["status"] not in ("idle", "failed"):
+        raise ValueError("已开始的专精计划不能修改目标")
+    from arknights_mower.utils.mastery_recommendation import (
+        get_current_mastery_level,
+        get_mastery_requirement_error,
+    )
+    from arknights_mower.utils.mastery_support import (
+        RosterUnavailableError,
+        plan_supports,
+    )
+
+    current = get_current_mastery_level(plan["char_id"], plan["skill_index"]) or 0
+    if target <= current:
+        raise ValueError("目标等级必须高于当前专精等级")
+    support = None
+    if not get_mastery_requirement_error(plan["char_id"]):
+        try:
+            support = plan_supports(
+                plan["char_id"],
+                current,
+                target,
+                inputs=TrainingInputs(
+                    buffer=configured_swap_buffer(get_route_settings(path))
+                ),
+            )
+        except RosterUnavailableError:
+            pass
+    with _conn(path) as conn:
+        cursor = conn.execute(
+            "UPDATE mastery_plan SET target_level=?, support_plan=?, support_runtime=NULL "
+            "WHERE id=? AND status=? AND target_level=? AND support_runtime IS ?",
+            (
+                target,
+                encode_supports(support),
+                plan_id,
+                plan["status"],
+                plan["target_level"],
+                plan.get("support_runtime"),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("专精状态已变化，请刷新后重试")
+        conn.commit()

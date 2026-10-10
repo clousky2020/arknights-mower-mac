@@ -12,7 +12,7 @@ sys.modules.setdefault("arknights_mower.utils.skland", MagicMock())
 
 from arknights_mower.solvers import base_schedule  # noqa: E402
 from arknights_mower.solvers.base_schedule import BaseSchedulerSolver  # noqa: E402
-from arknights_mower.utils import config  # noqa: E402
+from arknights_mower.utils import config, scheduler_task  # noqa: E402
 from arknights_mower.utils.operators import Dormitory, Operator  # noqa: E402
 from arknights_mower.utils.plan import Plan, PlanConfig, Room  # noqa: E402
 from arknights_mower.utils.scheduler_task import (  # noqa: E402
@@ -151,6 +151,55 @@ def test_group_larger_than_bed_count_validates_and_round_trip_converges(solver):
     assert shift_off(solver)[0]["dormitory_1"][0] == "黑角"
 
 
+@pytest.mark.parametrize("replacement", ["黑角", "Free"])
+def test_completed_exhaust_ignores_departed_group_dorm_resident(
+    solver, monkeypatch, replacement
+):
+    if replacement == "Free":
+        configure_explicit_free_bed(solver)
+    shift_off(solver)
+    data = solver.op_data
+    assert data.operators["塑心"].current_room == ""
+    assert all(data.operators[name].is_resting() for name in ("伊内丝", "银灰", "讯使"))
+    stale = SchedulerTask(
+        time=datetime.now() - timedelta(minutes=9),
+        task_type=TaskTypes.EXHAUST_OFF,
+        meta_data="伊内丝",
+    )
+    solver.task = stale
+    future = SchedulerTask(time=datetime.now() + timedelta(hours=3))
+    solver.tasks = [stale, future]
+    solver.planned = solver.todo_task = solver.collect_notification = False
+    solver.find = MagicMock(return_value=True)
+    solver._refresh_deferred_product_reservations = MagicMock()
+    solver.get_resting_plan = MagicMock(wraps=solver.get_resting_plan)
+    solver._plan_exhaust_support = MagicMock(wraps=solver._plan_exhaust_support)
+    notification = MagicMock()
+    monkeypatch.setattr(base_schedule, "send_message", notification)
+    before = deepcopy(data.dorm)
+    positions = {
+        name: (op.current_room, op.current_index) for name, op in data.operators.items()
+    }
+
+    solver.infra_main()
+
+    assert solver.tasks == [future]
+    assert solver.task is None
+    assert not solver.planned
+    assert not solver.todo_task
+    assert not solver.collect_notification
+    assert [(bed.name, bed.time) for bed in data.dorm] == [
+        (bed.name, bed.time) for bed in before
+    ]
+    assert {
+        name: (op.current_room, op.current_index) for name, op in data.operators.items()
+    } == positions
+    solver.get_resting_plan.assert_not_called()
+    solver._plan_exhaust_support.assert_not_called()
+    notification.assert_not_called()
+    solver.enter_room.assert_not_called()
+
+
 def test_group_mood_gap_full_rest_can_be_disabled(solver):
     config.conf.rescue_threshold = 0
     shift_off(solver)
@@ -179,6 +228,157 @@ def test_group_mood_gap_full_rest_can_be_disabled(solver):
     config.conf.group_rest_in_full_on_mood_gap = True
     data.operators[data.dorm[0].name].rest_in_full = True
     assert group_return_time() == full_rest_time
+
+
+@pytest.fixture
+def return_window(solver, monkeypatch):
+    shift_off(solver)
+    data = solver.op_data
+    config.conf.group_rest_in_full_on_mood_gap = False
+    clock = [datetime(2026, 10, 8, 3, 20)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    monkeypatch.setattr(scheduler_task, "datetime", Clock)
+    prediction = [datetime(2026, 10, 8, 4, 17)]
+    monkeypatch.setattr(Operator, "predict_exhaust", lambda self: prediction[0])
+    worker = data.operators["泥岩"]
+    worker.operator_type = "high"
+    worker.room = worker.current_room = "factory"
+    for bed in data.all_dorms():
+        if bed.name:
+            bed.time = clock[0] + timedelta(hours=4)
+    return data, clock, prediction
+
+
+def test_return_window_does_not_restart_on_each_planning_pass(return_window):
+    data, clock, _ = return_window
+    tasks = plan_metadata(data, [])
+    expected = datetime(2026, 10, 8, 4, 9)
+    for at in [(4, 1), (4, 4), (4, 8), (4, 9)]:
+        clock[0] = datetime(2026, 10, 8, *at)
+        tasks = plan_metadata(data, tasks)
+        returns = [task for task in tasks if task.type == TaskTypes.SHIFT_ON]
+        assert len(returns) == 1
+        assert returns[0].time == expected
+
+
+def test_due_return_window_remains_immediate(return_window):
+    data, clock, _ = return_window
+    tasks = plan_metadata(data, [])
+    clock[0] = datetime(2026, 10, 8, 4, 15)
+    returned = next(
+        task for task in plan_metadata(data, tasks) if task.type == TaskTypes.SHIFT_ON
+    )
+    assert clock[0] - timedelta(seconds=1) <= returned.time <= clock[0]
+
+
+def test_return_window_accepts_an_earlier_exhaust_prediction(return_window):
+    data, clock, prediction = return_window
+    tasks = plan_metadata(data, [])
+    clock[0] = datetime(2026, 10, 8, 4, 1)
+    prediction[0] = datetime(2026, 10, 8, 4, 10)
+    returned = next(
+        task for task in plan_metadata(data, tasks) if task.type == TaskTypes.SHIFT_ON
+    )
+    assert returned.time == datetime(2026, 10, 8, 4, 2)
+
+
+@pytest.mark.parametrize("change", ["read", "new_episode", "target", "full_rest"])
+def test_return_window_reconciles_current_recovery_rules(return_window, change):
+    data, clock, _ = return_window
+    tasks = plan_metadata(data, [])
+    clock[0] = datetime(2026, 10, 8, 4, 1)
+    member = data.operators["伊内丝"]
+    if change == "read":
+        member.time_stamp = clock[0]
+        member.mood = 15
+    elif change == "new_episode":
+        room = member.current_room
+        member.current_room = "meeting"
+        member.current_room = room
+    elif change == "target":
+        member.index = 1
+        data.operators["银灰"].index = 0
+    else:
+        member.rest_in_full = True
+    returned = next(
+        task for task in plan_metadata(data, tasks) if task.type == TaskTypes.SHIFT_ON
+    )
+    if change == "read":
+        assert returned.time == datetime(2026, 10, 8, 4, 9)
+    elif change == "full_rest":
+        assert returned.time > clock[0] + timedelta(hours=2)
+    else:
+        assert returned.time == clock[0] + timedelta(minutes=22)
+
+
+def test_return_windows_survive_batch_split_and_merge(return_window):
+    data, clock, _ = return_window
+    for name in ["伊内丝", "银灰", "讯使"]:
+        data.operators[name].group = ""
+    tasks = plan_metadata(data, [])
+    clock[0] = datetime(2026, 10, 8, 4, 1)
+    _, bed = data.get_dorm_by_name("伊内丝")
+    bed.time = datetime(2026, 10, 8, 4, 12)
+    tasks = plan_metadata(data, tasks)
+    assert sorted(t.time for t in tasks if t.type == TaskTypes.SHIFT_ON) == [
+        datetime(2026, 10, 8, 4, 4),
+        datetime(2026, 10, 8, 4, 9),
+    ]
+    clock[0] = datetime(2026, 10, 8, 4, 2)
+    bed.time = datetime(2026, 10, 8, 7, 20)
+    tasks = plan_metadata(data, tasks)
+    assert [t.time for t in tasks if t.type == TaskTypes.SHIFT_ON] == [
+        datetime(2026, 10, 8, 4, 9)
+    ]
+
+
+def test_return_window_respects_pending_arrangement(return_window):
+    data, clock, _ = return_window
+    tasks = plan_metadata(data, [])
+    clock[0] = datetime(2026, 10, 8, 4, 1)
+    pending = SchedulerTask(
+        time=datetime(2026, 10, 8, 4, 20),
+        task_plan={"contact": ["红"]},
+        task_type=TaskTypes.SELF_CORRECTION,
+    )
+    returned = next(
+        t
+        for t in plan_metadata(data, tasks + [pending])
+        if t.type == TaskTypes.SHIFT_ON
+    )
+    assert returned.time == pending.time + timedelta(seconds=1)
+
+
+def test_return_window_keeps_locked_product_task(return_window):
+    data, clock, _ = return_window
+    tasks = plan_metadata(data, [])
+    locked = next(task for task in tasks if task.type == TaskTypes.SHIFT_ON)
+    locked.product_shift_locked = True
+    locked.product_lock_names = {"伊内丝", "银灰", "讯使"}
+    locked.product_lock_slots = set()
+    clock[0] = datetime(2026, 10, 8, 4, 1)
+    regenerated = plan_metadata(data, tasks)
+    assert [task for task in regenerated if task.type == TaskTypes.SHIFT_ON] == [locked]
+    assert locked.time == datetime(2026, 10, 8, 4, 9)
+
+
+def test_return_window_initializes_legacy_task_then_survives_copy(return_window):
+    data, clock, _ = return_window
+    tasks = plan_metadata(data, [])
+    for task in tasks:
+        if task.type == TaskTypes.SHIFT_ON:
+            del task.return_windows
+    clock[0] = datetime(2026, 10, 8, 4, 1)
+    tasks = plan_metadata(data, tasks)
+    clock[0] = datetime(2026, 10, 8, 4, 4)
+    copied = deepcopy(tasks)
+    returns = [t for t in plan_metadata(data, copied) if t.type == TaskTypes.SHIFT_ON]
+    assert [t.time for t in returns] == [datetime(2026, 10, 8, 4, 23)]
 
 
 @pytest.mark.parametrize("priority", ["high", "low", "standby"])
@@ -318,7 +518,6 @@ def test_released_main_can_still_trigger_its_own_return_batch(solver):
 def test_zero_mood_worker_only_follows_group_shift(solver, rescue):
     if rescue:
         config.conf.rescue_threshold = 0.75
-        assert solver.op_data.rescue_needed()
     worker = solver.op_data.operators["讯使"]
     worker.workaholic = True
     worker.mood = 0
@@ -498,9 +697,12 @@ def test_other_group_cannot_borrow_occupied_dorm_cover(solver):
     assert data.is_dorm_replacement("黑角")
 
 
-def test_full_mood_cover_is_preserved_during_actual_selection(solver, monkeypatch):
+@pytest.mark.parametrize("free_room", [False, True])
+def test_full_mood_cover_is_preserved_during_actual_selection(
+    solver, monkeypatch, free_room
+):
     agents = ["黑角", "冰酿", "陈", "红", "初雪"]
-    solver.op_data.config.free_room = True
+    solver.op_data.config.free_room = free_room
     monkeypatch.setattr(solver, "preserve_resting_crafters", lambda agents, room: None)
     monkeypatch.setattr(
         solver.op_data,
@@ -509,7 +711,7 @@ def test_full_mood_cover_is_preserved_during_actual_selection(solver, monkeypatc
     )
     with pytest.raises(RuntimeError, match="before UI"):
         solver.choose_agent(agents, "dormitory_1")
-    assert agents == ["黑角", "冰酿", "Free", "Free", "Free"]
+    assert agents == ["黑角", "冰酿", "陈", "红", "初雪"]
 
 
 @pytest.mark.parametrize("field", ["exhaust_require", "rest_in_full"])
@@ -582,13 +784,16 @@ def test_multiple_residents_swap_without_using_extra_beds(solver):
     assert solver.agent_get_mood() is None
 
 
-def test_same_group_name_cannot_be_used_as_dorm_replacement(solver):
+def test_same_group_worker_can_be_used_as_dorm_replacement(solver):
     resident = solver.global_plan["default_plan"].plan["dormitory_1"][0]
     resident.replacement = ["伊内丝"]
 
-    assert solver.initialize_operators() == (
-        "替换组不可用高效组干员: 房间->dormitory_1, 干员->伊内丝"
-    )
+    assert solver.initialize_operators() is None
+    worker = solver.op_data.operators["伊内丝"]
+    assert worker.is_high() and worker.room == "meeting" and worker.group == "联动"
+    fixed = solver.op_data.get_group_dorm("dormitory_1", 0)
+    assert solver.op_data.is_recovery_dorm(fixed, worker.name)
+    assert not solver.op_data.is_effective_free_slot(fixed)
 
 
 def test_explicit_free_uses_resident_slot_as_resting_bed(solver):
@@ -897,27 +1102,46 @@ def test_closing_bed_keeps_existing_single_recovery_target(solver):
     assert target.dorm_recovery_room == "dormitory_1"
 
 
-def test_auto_free_occupant_can_be_replaced_after_recovery_finishes(solver):
+@pytest.mark.parametrize("other_beds_occupied", [False, True])
+def test_auto_free_recovery_fills_vacancy_before_replacing_full_resident(
+    solver, other_beds_occupied
+):
     configure_explicit_free_bed(solver)
     data = solver.op_data
     data.config.free_room = True
-    bed = data.dorm[0]
+    for name in ("泥岩", "年"):
+        data.operators[name].current_room = ""
+        data.operators[name].current_index = -1
     apply_plan(
         solver,
-        {"dormitory_1": ["年", "Current", "Current", "Current", "Current"]},
+        {
+            "dormitory_1": [
+                "年",
+                "冰酿",
+                "陈",
+                "能天使",
+                "红" if other_beds_occupied else "Free",
+            ]
+        },
     )
-    bed.name = "年"
+    data.operators["陈"].mood = data.operators["红"].mood = 24
+    bed = data.dorm[0]
     bed.time = datetime.now() - timedelta(minutes=1)
     data.operators["年"].mood = 24
-    data.operators["泥岩"].current_room = ""
-    data.operators["泥岩"].current_index = -1
     data.operators["泥岩"].mood = 5
     data.operators["泥岩"].time_stamp = datetime.now()
     tasks = []
 
     try_add_release_dorm({}, None, data, tasks)
 
-    assert tasks[0].plan["dormitory_1"][0] == "泥岩"
+    # 有空床先补空床；满员时才接管已恢复的临时床位。
+    assert len(tasks) == 1
+    row = tasks[0].plan["dormitory_1"]
+    assert row[0 if other_beds_occupied else 4] == "泥岩"
+    if not other_beds_occupied:
+        assert row[0] == "Current"
+    assert data.operators["年"].current_index == 0
+    assert data.operators["泥岩"].current_room == ""
 
 
 def test_mood_driven_resting_schedules_resident_cover(solver, monkeypatch):
@@ -1250,11 +1474,12 @@ def test_ungrouped_resident_keeps_exhaust_flag(ungrouped_solver):
     assert not ungrouped_solver.op_data.has_dorm_groups()
 
 
-def test_ungrouped_fixed_slot_keeps_legacy_full_mood_release(
-    ungrouped_solver, monkeypatch
+@pytest.mark.parametrize("free_room", [False, True])
+def test_ungrouped_explicit_full_roster_is_preserved(
+    ungrouped_solver, monkeypatch, free_room
 ):
     agents = ["黑角", "冰酿", "陈", "红", "初雪"]
-    ungrouped_solver.op_data.config.free_room = True
+    ungrouped_solver.op_data.config.free_room = free_room
     monkeypatch.setattr(
         ungrouped_solver, "preserve_resting_crafters", lambda agents, room: None
     )
@@ -1265,7 +1490,7 @@ def test_ungrouped_fixed_slot_keeps_legacy_full_mood_release(
     )
     with pytest.raises(RuntimeError, match="before UI"):
         ungrouped_solver.choose_agent(agents, "dormitory_1")
-    assert agents == ["Free", "冰酿", "Free", "Free", "Free"]
+    assert agents == ["黑角", "冰酿", "陈", "红", "初雪"]
 
 
 @pytest.mark.parametrize("operation", ["shift", "priority"])
@@ -1298,3 +1523,60 @@ def test_multiple_idle_beds_finishing_together_generate_release(solver):
     assert task.time == completed_at
     assert task.release_dorm_targets() == {bed.name: bed.position for bed in data.dorm}
     assert task.plan == {"dormitory_1": ["Current", "Current", "Free", "Free", "Free"]}
+
+
+@pytest.mark.parametrize("power_plants", [2, 3])
+@pytest.mark.parametrize("offsets", [(0, 30, 82), (82, 0, 30), (30, 82, 0)])
+def test_group_recovery_spread_uses_extremes_and_configured_minutes(
+    solver, power_plants, offsets
+):
+    shift_off(solver)
+    data = solver.op_data
+    data.power_plant_count = power_plants
+    now = datetime.now()
+    beds = [bed for bed in data.dorm if data.operators[bed.name].is_high()]
+    assert len(beds) == 3
+    for bed, minutes in zip(beds, offsets):
+        bed.time = now + timedelta(hours=2, minutes=minutes)
+
+    def return_time():
+        return next(
+            task.time
+            for task in plan_metadata(data, [])
+            if task.type == TaskTypes.SHIFT_ON
+            and "伊内丝" in [name for names in task.plan.values() for name in names]
+        )
+
+    assert config.conf.group_mood_gap_threshold_minutes == 60
+    delayed = return_time()
+    assert delayed == max(bed.time for bed in beds) - timedelta(
+        minutes=8 + 0.4 * len(beds)
+    )
+    config.conf.group_mood_gap_threshold_minutes = 82
+    normal = return_time()
+    assert normal < delayed
+    config.conf.group_mood_gap_threshold_minutes = 90
+    assert return_time() == normal
+    config.conf.group_mood_gap_threshold_minutes = 60
+    config.conf.group_mood_gap_max_extra_wait_hours = 0.5
+    assert return_time() == normal + timedelta(minutes=30)
+
+
+def test_priority_reorder_keeps_named_group_cover_in_fixed_bed(solver):
+    resident = solver.global_plan["default_plan"].plan["dormitory_1"][0]
+    resident.replacement = ["伊内丝"]
+    assert solver.initialize_operators() is None
+    data = solver.op_data
+    data.config.dorm_order = ["dormitory_1_low", "dormitory_1"]
+    apply_plan(
+        solver, {"dormitory_1": ["伊内丝", "冰酿", "银灰", "Current", "Current"]}
+    )
+    fixed = data.get_group_dorm("dormitory_1", 0)
+    before = (fixed.name, fixed.time)
+    plan = scheduler_task.rebalance_plan_swap_dorms(
+        data, deepcopy(data.all_dorms()), reorder=True
+    )
+    assert plan["dormitory_1"][0] == "Current"
+    assert plan["dormitory_1"][3] == "银灰"
+    assert (fixed.name, fixed.time) == before
+    assert all(bed.name != "伊内丝" for bed in data.dorm)

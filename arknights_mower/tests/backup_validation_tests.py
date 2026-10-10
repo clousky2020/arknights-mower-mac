@@ -8,14 +8,21 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
+from arknights_mower.solvers.base_schedule import (
+    BaseSchedulerSolver,
+    _merge_plan_overlay,
+)
 from arknights_mower.utils import backup_validation, config, operators, schedule_roster
 from arknights_mower.utils.config.plan import parse_plan_document
 from arknights_mower.utils.config.plan_advanced import apply_advanced_settings
 from arknights_mower.utils.logic_expression import LogicExpression
 from arknights_mower.utils.operators import Operators, build_global_plan
-from arknights_mower.utils.plan import Plan, PlanConfig, Room
-from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
+from arknights_mower.utils.plan import RIGHT_SIDE_ROOM_CAPACITY, Plan, PlanConfig, Room
+from arknights_mower.utils.scheduler_task import (
+    SchedulerTask,
+    TaskTypes,
+    dorm_rebalance_signature,
+)
 
 FIXTURE = Path(__file__).with_name("fixtures") / "backup_validation_plan_20261002.json"
 
@@ -65,6 +72,246 @@ def two_backups():
             ),
         ],
     }
+
+
+def facility_backup():
+    conf = PlanConfig("", "", "")
+    slots = [
+        Room("乌尔比安", "", ["苍苔"], "制造站", "gold"),
+        Room("幽灵鲨", "", ["夜烟"], "制造站", "gold"),
+    ]
+    return {
+        "default_plan": Plan({"room_1_3": slots}, conf, products={"room_1_3": "gold"}),
+        "backup_plans": [
+            Plan(
+                {"room_1_3": copy.deepcopy(slots)},
+                conf,
+                name="深海强制上班",
+                task={"room_1_3": ["乌尔比安", "幽灵鲨"]},
+                products={"room_1_3": "gold"},
+            )
+        ],
+    }
+
+
+def test_recycle_task_without_primary_facility_passes_startup_and_activation():
+    plan = two_backups()
+    plan["backup_plans"] = [
+        Plan(
+            {},
+            plan["default_plan"].config,
+            name="回收站临时换人",
+            task={"recycle": ["芬", "香草"]},
+        )
+    ]
+    data = initialize(plan)
+    result = data.validate_backup_plans()
+    assert result["success"], result
+    assert data.swap_plan([True], refresh=True) is None
+    assert data.plan_condition == [True]
+    assert "recycle" not in data.plan
+    assert data.backup_plans[0].task == {"recycle": ["芬", "香草"]}
+
+
+@pytest.mark.parametrize("room,capacity", RIGHT_SIDE_ROOM_CAPACITY.items())
+@pytest.mark.parametrize("count", [None, 0, 1])
+@pytest.mark.parametrize("mode", ["roster", "task", "both"])
+def test_right_side_backups_reach_final_arrangement(room, capacity, count, mode):
+    plan = two_backups()
+    conf = plan["default_plan"].config
+    if count is not None:
+        plan["default_plan"].plan[room] = [Room("月见夜", "", ["史都华德"])][:count]
+    names = ["香草", "翎羽"][:capacity]
+    slots = [
+        Room(name, "", [replacement])
+        for name, replacement in zip(names, ["克洛丝", "斑点"])
+    ]
+    plan["backup_plans"] = [
+        Plan(
+            {room: slots} if mode != "task" else {},
+            conf,
+            name="右侧驻员",
+            task={room: names} if mode != "roster" else {},
+        )
+    ]
+    data = initialize(plan)
+    result = data.validate_backup_plans()
+    assert result["success"], result
+    previous = copy.deepcopy(data.plan)
+    original = repr(plan["default_plan"].plan)
+    previous_layout = dorm_rebalance_signature(data)
+    assert data.swap_plan([True], refresh=True) is None
+    solver = object.__new__(BaseSchedulerSolver)
+    solver.op_data, solver.tasks, solver.task = data, [], None
+    transition = solver._backup_transition_plan(
+        previous, [False], [True], [], previous_layout
+    )
+    assert transition[room] == names
+    assert repr(plan["default_plan"].plan) == original
+    if mode != "task":
+        assert [slot.agent for slot in data.plan[room]] == names
+    else:
+        assert repr(data.plan) == repr(previous)
+
+    active_plan = copy.deepcopy(data.plan)
+    assert data.swap_plan([False], refresh=True) is None
+    transition = solver._backup_transition_plan(
+        active_plan, [True], [False], [], previous_layout
+    )
+    if count == 1:
+        assert transition[room] == ["月见夜"]
+    else:
+        assert room not in transition
+
+
+@pytest.mark.parametrize("room,capacity", RIGHT_SIDE_ROOM_CAPACITY.items())
+def test_empty_right_side_backup_preserves_staff_and_has_no_transition(room, capacity):
+    plan = two_backups()
+    conf = plan["default_plan"].config
+    plan["default_plan"].plan[room] = [Room("香草", "", ["克洛丝"])]
+    plan["backup_plans"] = [Plan({room: []}, conf, task={room: []})]
+    data = initialize(plan)
+    previous = copy.deepcopy(data.plan)
+    layout = dorm_rebalance_signature(data)
+    assert data.swap_plan([True], refresh=True) is None
+    assert [slot.agent for slot in data.plan[room]] == ["香草"]
+    solver = object.__new__(BaseSchedulerSolver)
+    solver.op_data, solver.tasks, solver.task = data, [], None
+    assert solver._backup_transition_plan(previous, [False], [True], [], layout) == {}
+
+
+def test_right_side_task_overlay_extends_existing_partial_target():
+    from types import SimpleNamespace
+
+    plan = {"recycle": ["芬"]}
+    _merge_plan_overlay(
+        plan, {"recycle": ["Current", "香草"]}, SimpleNamespace(plan={})
+    )
+    assert plan == {"recycle": ["芬", "香草"]}
+
+
+@pytest.mark.parametrize("room", ["meeting", "train", "recycle"])
+def test_right_side_roster_current_keeps_first_slot_and_adds_second(room):
+    plan = two_backups()
+    conf = plan["default_plan"].config
+    plan["default_plan"].plan[room] = [Room("香草", "", ["克洛丝"])]
+    plan["backup_plans"] = [
+        Plan(
+            {room: [Room("Current", "", []), Room("翎羽", "", ["斑点"])]},
+            conf,
+        )
+    ]
+    data = initialize(plan)
+    assert data.validate_backup_plans()["success"]
+    assert data.swap_plan([True], refresh=True) is None
+    assert [slot.agent for slot in data.plan[room]] == ["香草", "翎羽"]
+
+
+@pytest.mark.parametrize("target", ["Current", "Free", "", "安哲拉"])
+def test_backup_task_overflow_fails_before_combination_analysis(monkeypatch, target):
+    plan = facility_backup()
+    plan["backup_plans"][0].task["room_1_3"].append(target)
+    data = initialize(plan)
+    before = copy.deepcopy(data.plan)
+    analyze = MagicMock(side_effect=AssertionError("invalid task reached analysis"))
+    monkeypatch.setattr(backup_validation, "possible_backup_conditions", analyze)
+    result = data.validate_backup_plans(max_seconds=0)
+    assert result["status"] == "failed"
+    assert "深海强制上班" in result["message"]
+    assert "room_1_3" in result["message"]
+    assert "2 个岗位" in result["message"]
+    assert data.plan_condition == [False]
+    assert [slot.agent for slot in data.plan["room_1_3"]] == [
+        slot.agent for slot in before["room_1_3"]
+    ]
+    assert plan["backup_plans"][0].task["room_1_3"][-1] == target
+    analyze.assert_not_called()
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_backup_facility_slot_count_cannot_change_level(count):
+    plan = facility_backup()
+    slots = plan["backup_plans"][0].plan["room_1_3"]
+    if count == 1:
+        slots.pop()
+    else:
+        slots.append(Room("Current", "", [], "制造站", "gold"))
+    result = initialize(plan).validate_backup_plans()
+    assert not result["success"]
+    assert f"岗位数 2 → {count}" in result["message"]
+    assert "切设施功能尚未实现" in result["message"]
+
+
+@pytest.mark.parametrize("agent", ["Current", "乌尔比安"])
+def test_backup_facility_type_cannot_change_even_with_same_slots(agent):
+    plan = facility_backup()
+    slot = plan["backup_plans"][0].plan["room_1_3"][0]
+    slot.agent = agent
+    slot.facility = "贸易站"
+    result = initialize(plan).validate_backup_plans()
+    assert not result["success"]
+    assert "制造站 → 贸易站" in result["message"]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("product", ["gold", "exp3"])
+def test_backup_product_change_requires_enabled_switching(enabled, product):
+    config.conf.product_switching.enable = enabled
+    plan = facility_backup()
+    plan["backup_plans"][0].products["room_1_3"] = product
+    result = initialize(plan).validate_backup_plans()
+    assert result["success"] is (enabled or product == "gold")
+    if not result["success"]:
+        assert "gold → exp3" in result["message"]
+        assert "未开启自动切换产物与订单" in result["message"]
+
+
+def test_backup_all_current_facility_still_has_to_preserve_level():
+    plan = facility_backup()
+    plan["backup_plans"][0].plan["room_1_3"] = [
+        Room("Current", "", [], "制造站", "gold")
+    ] * 3
+    result = initialize(plan).validate_backup_plans()
+    assert not result["success"]
+    assert "改变设施等级" in result["message"]
+
+
+@pytest.mark.parametrize("change", ["level", "type", "task", "product"])
+def test_runtime_backup_activation_rejects_conflicts_without_mutation(change):
+    plan = facility_backup()
+    data = initialize(plan)
+    before = data.plan, data.config, data.operators, data.dorm, data.products
+    operator = data.operators["乌尔比安"]
+    operator.current_room = "room_1_3"
+    operator.mood = 7
+    backup = plan["backup_plans"][0]
+    if change == "level":
+        backup.plan["room_1_3"].pop()
+    elif change == "type":
+        backup.plan["room_1_3"][0].facility = "贸易站"
+    elif change == "task":
+        backup.task["room_1_3"].append("Current")
+    else:
+        backup.products["room_1_3"] = "exp3"
+        config.conf.product_switching.enable = False
+    error = data.swap_plan([True], refresh=True)
+    assert "深海强制上班" in error
+    assert data.plan_condition == [False]
+    assert all(
+        current is original
+        for current, original in zip(
+            (data.plan, data.config, data.operators, data.dorm, data.products), before
+        )
+    )
+    assert operator.current_room == "room_1_3"
+    assert operator.mood == 7
+
+
+def test_nonproduction_partial_overlay_remains_supported():
+    plan = two_backups()
+    plan["backup_plans"] = plan["backup_plans"][:1]
+    result = initialize(plan).validate_backup_plans()
+    assert result["success"]
 
 
 def test_image_plan_rejects_the_same_error_as_shift_projection(image_plan):
@@ -388,8 +635,9 @@ def test_analysis_budget_returns_an_incomplete_warning_without_mutating_state(
 
 
 @pytest.mark.parametrize("failure", ["baseline", "ownership"])
+@pytest.mark.parametrize("max_seconds", [None, 0])
 def test_configuration_errors_still_block_when_combination_budget_is_exhausted(
-    monkeypatch, failure
+    monkeypatch, failure, max_seconds
 ):
     plan = two_backups()
     monkeypatch.setattr(operators, "MAX_BACKUP_VALIDATION_COMBINATIONS", 0)
@@ -399,7 +647,7 @@ def test_configuration_errors_still_block_when_combination_budget_is_exhausted(
         monkeypatch.setattr(
             schedule_roster, "validate_owned_operators", lambda _: "缺少已持有干员"
         )
-    result = Operators(plan).validate_backup_plans()
+    result = Operators(plan).validate_backup_plans(max_seconds=max_seconds)
     assert result["success"] is False
     assert result["status"] == "failed"
     assert "验证未完成" not in result["message"]
@@ -436,3 +684,111 @@ def test_runtime_still_rejects_active_conflict_after_incomplete_validation(monke
     assert task.plan == {}
     assert data.plan_condition == [False, False]
     assert data.operators["能天使"].current_room == "central"
+
+
+@pytest.mark.parametrize("max_seconds, analysis_seconds", [(5, 0), (5, 4), (None, 0)])
+def test_elapsed_budget_stops_combinations_and_manual_validation_is_untimed(
+    monkeypatch, max_seconds, analysis_seconds
+):
+    plan = two_backups()
+    plan["backup_plans"] = [copy.deepcopy(plan["backup_plans"][0]) for _ in range(4)]
+    data = initialize(plan)
+    op = data.operators["能天使"]
+    op.mood = 7
+    before = copy.deepcopy(data.__dict__, {id(data.eval_model): data.eval_model})
+    clock = [100.0]
+    checked = []
+    monkeypatch.setattr(operators, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(backup_validation, "monotonic", lambda: clock[0])
+    analysis = backup_validation.possible_backup_conditions
+
+    def slow_analysis(*args, **kwargs):
+        combinations = analysis(*args, **kwargs)
+        clock[0] += analysis_seconds
+        return combinations
+
+    monkeypatch.setattr(backup_validation, "possible_backup_conditions", slow_analysis)
+    original = Operators.swap_plan
+
+    def slow_check(self, condition, refresh=False):
+        error = original(self, condition, refresh)
+        if refresh:
+            checked.append(condition)
+            clock[0] += 2
+        return error
+
+    monkeypatch.setattr(Operators, "swap_plan", slow_check)
+    result = data.validate_backup_plans(max_seconds=max_seconds)
+    if max_seconds is None:
+        assert result == {
+            "success": True,
+            "status": "passed",
+            "message": "验证成功，共验证 16 次",
+        }
+        assert len(checked) == 16
+    else:
+        assert result["status"] == "incomplete"
+        assert result["success"] is False
+        assert "耗时预算" in result["message"]
+        expected_checks = 1 if analysis_seconds else 3
+        assert f"已验证 {expected_checks} 次" in result["message"]
+        assert "允许启动" in result["message"]
+        assert len(checked) == expected_checks
+    assert clock[0] >= 105
+    assert data.plan_condition == before["plan_condition"]
+    assert repr(data.plan) == repr(before["plan"])
+    assert data.operators["能天使"] is op
+    assert vars(op) == vars(before["operators"]["能天使"])
+
+
+def test_condition_analysis_uses_the_same_deadline_as_combinations(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(operators, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(backup_validation, "monotonic", lambda: clock[0])
+    parse = backup_validation.ast.parse
+
+    def slow_parse(*args, **kwargs):
+        tree = parse(*args, **kwargs)
+        clock[0] += 5
+        return tree
+
+    monkeypatch.setattr(backup_validation.ast, "parse", slow_parse)
+    plan = two_backups()
+    plan["backup_plans"][0].trigger = LogicExpression("True", "==", "True")
+    data = initialize(plan)
+    result = data.validate_backup_plans(max_seconds=5)
+    assert result["status"] == "incomplete"
+    assert "已验证 0 次" in result["message"]
+
+
+def test_error_from_current_combination_blocks_even_if_the_deadline_has_elapsed(
+    monkeypatch,
+):
+    clock = [100.0]
+    monkeypatch.setattr(operators, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(backup_validation, "monotonic", lambda: clock[0])
+    original = Operators.swap_plan
+
+    def slow_conflict(self, condition, refresh=False):
+        error = original(self, condition, refresh)
+        if refresh and all(condition):
+            clock[0] += 5
+        return error
+
+    monkeypatch.setattr(Operators, "swap_plan", slow_conflict)
+    result = initialize(two_backups()).validate_backup_plans(max_seconds=5)
+    assert clock[0] == 105
+    assert result["status"] == "failed"
+    assert "替换组不可用高效组干员" in result["message"]
+
+
+def test_valid_plan_passes_within_the_startup_budget(monkeypatch):
+    monkeypatch.setattr(operators, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(backup_validation, "monotonic", lambda: 104.9)
+    plan = two_backups()
+    plan["backup_plans"][1].plan["central"][1].replacement = ["初雪"]
+    assert initialize(plan).validate_backup_plans(max_seconds=5) == {
+        "success": True,
+        "status": "passed",
+        "message": "验证成功，共验证 4 次",
+    }

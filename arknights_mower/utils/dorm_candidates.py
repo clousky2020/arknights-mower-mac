@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from arknights_mower.utils.resting_priority import (
     RestingTier,
     busy_resting_names,
+    crafting_rest_order,
     has_resting_mood,
     resting_key,
     resting_mood,
@@ -20,6 +21,8 @@ class DormCandidates:
     full: list[str]
     # 缺少实读且尚需筛选；绿色笑脸观测仍只属于普通补位名单。
     unknown: list[str]
+    # 有效低心情卡片仍需实读，但足以触发普通满员住客替换。
+    estimated_recovering: list[str]
     # 满员兜底按心情；缺少实读时用卡片预估，不以恢复缺口排序。
     filling: list[str]
 
@@ -39,10 +42,18 @@ def dorm_candidate_mood(op_data, name, now=None):
 def dorm_task_reservations(op_data, tasks, excluded=()):
     """规划与执行采用相同预约；待命候补的回班任务不阻止其临时恢复。"""
     names = set(excluded) - {"", "Current", "Free"}
+    names.update(getattr(op_data, "emergency_reserved_agents", ()))
     slots = set()
     for task in tasks:
         if task is None:
             continue
+        names.update(getattr(task, "emergency_staffing_members", ()))
+        names.update(
+            name
+            for row in getattr(task, "emergency_original_roster", {}).values()
+            for name in row
+            if name not in ("", "Current", "Free")
+        )
         returning = getattr(getattr(task, "type", None), "name", "") == "SHIFT_ON"
         for room, row in task.plan.items():
             for index, name in enumerate(row):
@@ -98,6 +109,7 @@ def dorm_candidates(
         elif not op.is_high() and not op_data.has_rest_mood_limit(name):
             full.append(name)
     recovering.sort(key=lambda name: resting_key(op_data, name, now))
+    recovering = crafting_rest_order(op_data, recovering)
 
     unknown.extend(unregistered_idle_candidates(op_data, excluded))
 
@@ -114,4 +126,12 @@ def dorm_candidates(
         for name in unknown
         if (mood := dorm_candidate_mood(op_data, name, now)) is None or mood < 24
     ]
-    return DormCandidates(recovering, full, unknown, filling)
+    unknown = crafting_rest_order(op_data, unknown)
+    filling = crafting_rest_order(op_data, filling)
+    estimated_recovering = [
+        name
+        for name in unknown
+        if (mood := dorm_candidate_mood(op_data, name, now)) is not None
+        and mood < getattr(op_data.operators.get(name), "upper_limit", 24)
+    ]
+    return DormCandidates(recovering, full, unknown, estimated_recovering, filling)

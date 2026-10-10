@@ -165,7 +165,7 @@ def test_unknown_mood_remains_full_and_priority_still_precedes_gap(op_data):
     assert resting_key(op_data, "银灰") < resting_key(op_data, "红")
 
 
-def test_dorm_reorder_keeps_existing_beds_and_only_places_new_resters(op_data):
+def test_dorm_reorder_preserves_idle_state_and_ranks_residents_on_admission(op_data):
     set_tier(op_data, "陈", RestingTier.REPLACEMENT, 3)
     op_data.plan[ROOM][3] = Room("Free", "", [])
     op_data.dorm = [Dormitory((ROOM, 3), "红"), Dormitory((ROOM, 4), "陈")]
@@ -178,7 +178,11 @@ def test_dorm_reorder_keeps_existing_beds_and_only_places_new_resters(op_data):
     op_data.plan[ROOM][2] = Room("Free", "", [])
     op_data.dorm.insert(0, Dormitory((ROOM, 2), "空爆"))
     plan = try_reorder(op_data, {})
-    assert plan == {ROOM: ["Current", "Current", "空爆", "Current", "Current"]}
+    assert plan == {ROOM: ["Current", "Current", "陈", "Current", "空爆"]}
+    projected = op_data.project_arrangements([plan])
+    assert {bed.name for bed in projected.dorm} == {"红", "陈", "空爆"}
+    assert op_data.operators["陈"].current_index == 4
+    assert try_reorder(projected, {}) == {}
 
 
 def test_dorm_reorder_keeps_active_recovery_target_in_its_room(op_data):
@@ -223,26 +227,49 @@ def test_workshop_selection_does_not_override_schedule_identity(op_data):
     assert resting_tier(op_data, "红") == RestingTier.PRIORITY
 
 
-@pytest.mark.parametrize("state", ["rescue_mode", "rescue_plan_active"])
 @pytest.mark.parametrize(
-    "mood,known,temporary,expected",
-    [
-        (8, True, False, RestingTier.PRIORITY_REPLACEMENT),
-        (20, True, False, RestingTier.PRIORITY_REPLACEMENT),
-        (24, False, False, RestingTier.PRIORITY_REPLACEMENT),
-        (8, True, True, RestingTier.PRIORITY_REPLACEMENT),
-    ],
+    "replacement_tier",
+    [RestingTier.PRIORITY_REPLACEMENT, RestingTier.PRIORITY],
 )
-def test_rescue_retains_configured_priority_for_every_admission_source(
-    op_data, state, mood, known, temporary, expected
+@pytest.mark.parametrize("primary_ready", [False, True])
+def test_rescue_fills_spare_bed_only_after_primary_recovery(
+    op_data, replacement_tier, primary_ready
 ):
-    op = set_tier(op_data, "红", RestingTier.PRIORITY_REPLACEMENT, mood)
-    op.upper_limit = 20
-    op.time_stamp = datetime.now() if known else None
-    op.temporary_dorm_fill = temporary
-    op_data.main_rescue_priority = {op.name}
-    setattr(op_data, state, True)
-    assert resting_tier(op_data, op.name) == expected
+    from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
+    from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
+
+    primary = set_tier(op_data, "银灰", RestingTier.MAIN, 16 if primary_ready else 8)
+    primary.current_room = ""
+    replacement = set_tier(op_data, "红", RestingTier.PRIORITY_REPLACEMENT, 1)
+    if replacement_tier == RestingTier.PRIORITY:
+        op_data.config.ope_resting_priority.append(replacement.name)
+    replacement.current_room = ""
+    solver = object.__new__(BaseSchedulerSolver)
+    solver.op_data = op_data
+    solver.emergency_state = {
+        "phase": "recovering",
+        "targets": {primary.name: 16},
+        "ready_members": [primary.name] if primary_ready else [],
+    }
+    solver.tasks = [
+        SchedulerTask(
+            task_type=TaskTypes.FILL_DORM,
+            task_plan={ROOM: ["Free"] * 4 + ["Current"]},
+        )
+    ]
+
+    fixed_slots = [slot.agent for slot in op_data.plan[ROOM]][:4]
+    assert {bed.position for bed in op_data.all_dorms()} == {(ROOM, 4)}
+    solver._emergency_plan_beds(solver.emergency_state)
+
+    assert solver._emergency_active()
+    assert [slot.agent for slot in op_data.plan[ROOM]][:4] == fixed_slots
+    assert {bed.position for bed in op_data.all_dorms()} == {(ROOM, 4)}
+    assert resting_tier(op_data, replacement.name) == replacement_tier
+    assert len(solver.tasks) == 2
+    assert solver.tasks[-1].emergency_dorm
+    expected = replacement.name if primary_ready else primary.name
+    assert solver.tasks[-1].plan == {ROOM: ["Current"] * 4 + [expected]}
 
 
 def test_explicit_priority_replacement_is_protected_from_equal_or_lower_tiers(op_data):

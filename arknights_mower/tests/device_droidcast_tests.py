@@ -33,6 +33,7 @@ from arknights_mower.utils.device.adb_client.server import run_adb as guarded_ru
 from arknights_mower.utils.device.application import DeviceControl
 from arknights_mower.utils.device.device import Device
 from arknights_mower.utils.device.session import DeviceSession
+from arknights_mower.utils.device.touch_backend import TouchFailure
 
 MODULE = "arknights_mower.utils.device.droidcast"
 SCREENSHOT_MODULE = "arknights_mower.utils.device.screenshot"
@@ -423,6 +424,72 @@ class DroidCastTests(unittest.TestCase):
         self.assertEqual(self.android.processes[0].terminated, 1)
         self.assertEqual(self.http.closed, 1)
 
+    def test_offline_cleanup_recovery_releases_old_owners_before_new_start(self):
+        self.assertTrue(self.control.capture().ok)
+        before = self.conf.model_dump()
+        helper = self.control._device._droidcast
+        old_name, old_port = helper.name, helper.port
+        self.android.transport_error = b"adb: device offline\n"
+        self.assertFalse(self.control.close().ok)
+        self.assertFalse(self.control.close().ok)
+        self.assertFalse(self.control.recover().ok)
+        self.assertEqual(len(self.android.processes), 1)
+        self.assertTrue(helper._remote_cleanup_pending)
+        self.assertEqual(helper.port, old_port)
+        self.assertEqual(self.http.closed, 1)
+
+        self.android.transport_error = None
+        self.android.remote[456] = "foreign-process"
+        self.android.forwards["tcp:23456"] = ("OTHER", "tcp:12345")
+        self.control._adapter = Adapter()
+        recovered = self.control.recover()
+        self.assertTrue(recovered.ok, recovered.error)
+        self.assertEqual(recovered.serial, "USB-A")
+        self.assertNotIn(old_name, self.android.remote.values())
+        self.assertNotIn(f"tcp:{old_port}", self.android.forwards)
+        self.assertEqual(self.android.remote, {456: "foreign-process"})
+        self.assertEqual(self.android.forwards, {"tcp:23456": ("OTHER", "tcp:12345")})
+        self.assertFalse(helper._remote_cleanup_pending)
+        self.assertIsNone(helper._cleanup_error)
+        self.assertIsNone(self.control._helper_cleanup_error)
+        self.assertIsNone(self.control._cleanup_device)
+        self.assertEqual(self.android.processes[0].terminated, 1)
+        self.assertEqual(self.http.closed, 1)
+        self.assertEqual(self.conf.model_dump(), before)
+
+    def test_cleanup_recovery_preserves_uncertain_input_pause(self):
+        self.assertTrue(self.control.capture().ok)
+        self.android.transport_error = b"adb: device offline\n"
+        self.assertFalse(self.control.close().ok)
+        pause = TouchFailure(
+            self.conf.device,
+            "linux",
+            ConnectionError("unverified input"),
+            delivery_unknown=True,
+        )
+        self.control.pause_dispatch(pause)
+        self.android.transport_error = None
+        self.control._adapter = Adapter()
+        recovered = self.control.recover()
+        self.assertTrue(recovered.ok, recovered.error)
+        self.assertEqual(recovered.status, "paused")
+        self.assertIs(self.control._dispatch_pause, pause)
+
+    def test_cleanup_retry_rechecks_replaced_forward_and_remote_identity(self):
+        self.assertTrue(self.control.capture().ok)
+        helper = self.control._device._droidcast
+        port = f"tcp:{helper.port}"
+        self.android.transport_error = b"adb: device offline\n"
+        self.assertFalse(self.control.close().ok)
+        self.android.transport_error = None
+        self.android.remote[101] = "foreign-process"
+        self.android.forwards[port] = ("OTHER", "tcp:12345")
+        self.assertTrue(self.control.close().ok)
+        self.assertEqual(self.android.remote, {101: "foreign-process"})
+        self.assertEqual(self.android.forwards[port], ("OTHER", "tcp:12345"))
+        self.assertTrue(self.control.close().ok)
+        self.assertEqual(self.http.closed, 1)
+
     def test_forward_disappearance_during_remove_is_confirmed_before_success(self):
         self.assertTrue(self.control.capture().ok)
         run = self.android.run
@@ -495,7 +562,7 @@ class DroidCastTests(unittest.TestCase):
 
         with (
             patch(f"{MODULE}.run_adb", guarded_run_adb),
-            patch(f"{MODULE}.subprocess.run", run_cli),
+            patch(f"{MODULE}.run_command", run_cli),
             patch(
                 "arknights_mower.utils.device.adb_client.server.probe_adb_server",
                 return_value=41,
@@ -809,7 +876,7 @@ class DroidCastTests(unittest.TestCase):
 
         with (
             patch(f"{MODULE}.run_adb", postcheck),
-            patch(f"{MODULE}.subprocess.run", self.android.run),
+            patch(f"{MODULE}.run_command", self.android.run),
         ):
             result = self.control.capture()
         self.assert_adb_degraded(

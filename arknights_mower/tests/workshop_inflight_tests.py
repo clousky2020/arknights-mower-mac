@@ -14,7 +14,7 @@ from arknights_mower.utils import workshop_config as state
 
 
 @pytest.mark.parametrize("entry", ["workshop", "direct", "furniture-page"])
-@pytest.mark.parametrize("cancel_at", [None, "scan", "selection", "submit"])
+@pytest.mark.parametrize("cancel_at", [None, "inventory", "selection", "submit"])
 @pytest.mark.parametrize("cancel_by", ["disable", "delete"])
 def test_restore_during_real_crafting_never_submits_manual_recipe(
     next_skill, monkeypatch, cancel_at, cancel_by, entry
@@ -64,6 +64,7 @@ def test_restore_during_real_crafting_never_submits_manual_recipe(
         "plan_metadata",
     ]:
         setattr(solver, method, MagicMock())
+    solver.get_agent_from_room = MagicMock(return_value=[{"agent": "赫拉格"}])
     solver.factory_scene = MagicMock(
         side_effect=([base.Scene.FACTORY_FORMULA] if entry == "furniture-page" else [])
         + [
@@ -114,10 +115,15 @@ def test_restore_during_real_crafting_never_submits_manual_recipe(
     monkeypatch.setattr(
         base,
         "cultivateDepotSolver",
-        lambda: SimpleNamespace(start=lambda: cancel("scan")),
+        MagicMock(side_effect=AssertionError("Unexpected Skland refresh")),
     )
     stock = {"技巧概要·卷3": 0, "技巧概要·卷2": 100, "碳素组": 0, "碳": 100}
-    monkeypatch.setattr(base, "get_inventory_counts", lambda: dict(stock))
+
+    def cached_inventory():
+        cancel("inventory")
+        return dict(stock)
+
+    monkeypatch.setattr(base, "get_inventory_counts", cached_inventory)
     monkeypatch.setattr(
         base,
         "apply_workshop_inventory",
@@ -136,36 +142,44 @@ def test_restore_during_real_crafting_never_submits_manual_recipe(
         solver.back.assert_called()
         assert (1920 * 0.1, 1080 * 0.45) in submitted
     assert submitted.count(produce_btn) == (1 if cancel_at is None else 0)
-    if cancel_at == "scan":
+    if cancel_at == "inventory":
         assert selected == []
 
 
 def test_infra_main_dispatches_verified_release_task(monkeypatch):
     from arknights_mower.solvers import base_schedule as base
+    from arknights_mower.utils.operators import Operator, Operators
+    from arknights_mower.utils.plan import Plan, PlanConfig, Room
     from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
 
+    monkeypatch.setattr(config, "conf", config.Conf())
+    room = "dormitory_1"
+    data = Operators(
+        {
+            "default_plan": Plan(
+                {
+                    room: [
+                        Room(name, "", [])
+                        for name in ["杜林", "闪灵", "爱丽丝", "桃金娘", "Free"]
+                    ]
+                },
+                PlanConfig("", "", "", free_room=True),
+            ),
+            "backup_plans": [],
+        }
+    )
+    assert data.init_and_validate() is None
+    data.add(Operator("赫拉格", ""))
+    data.update_detail("赫拉格", 24, room, 4, True)
     solver = object.__new__(base.BaseSchedulerSolver)
     solver.task = SchedulerTask(
         task_type=TaskTypes.RELEASE_DORM,
         meta_data="赫拉格",
-        task_plan={"dormitory_1": ["Free"]},
+        task_plan={room: ["Current"] * 4 + ["Free"]},
     )
     solver.tasks = [solver.task]
     solver._refresh_deferred_product_reservations = MagicMock()
-    solver.op_data = SimpleNamespace(
-        skip_idle_dorm_release=lambda name: False,
-        operators={
-            "赫拉格": SimpleNamespace(
-                current_room="dormitory_1",
-                current_index=0,
-                mood=24,
-                time_stamp=datetime.now(),
-                current_mood=lambda now=None: 24,
-                upper_limit=24,
-                is_high=lambda: False,
-            )
-        },
-    )
+    solver.op_data = data
     solver.agent_arrange = MagicMock(return_value=True)
     solver.craft_material = MagicMock()
     solver.backup_plan_solver = MagicMock(return_value=False)
@@ -181,10 +195,16 @@ def test_infra_main_dispatches_verified_release_task(monkeypatch):
     solver.back = MagicMock()
     solver.transition = MagicMock()
 
-    monkeypatch.setattr(base, "save_exception", MagicMock())
+    errors = MagicMock()
+    monkeypatch.setattr(base, "save_exception", errors)
     solver.infra_main()
 
-    solver.agent_arrange.assert_called_once()
+    errors.assert_not_called()
+    solver.agent_arrange.assert_called_once_with(
+        {room: ["Current"] * 4 + ["Free"]}, True
+    )
+    assert solver.task is None
+    assert not solver.tasks
     solver.craft_material.assert_not_called()
     solver.backup_plan_solver.assert_called_once()
 

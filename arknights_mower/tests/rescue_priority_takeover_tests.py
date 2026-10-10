@@ -74,7 +74,6 @@ def test_legacy_idle_resident_has_no_formal_rescue_protection(solver, temporary)
     bed.name = name
     op._current_room, op.current_index = bed.position
     data.rescue_mode = True
-    assert not data.is_rescue_recovering(name, NOW)
     assert data._slot_takable(bed, requester=PRIMARY[0])
 
 
@@ -86,7 +85,7 @@ def test_rescue_does_not_disable_configured_standby(solver):
     data.operators.pop(PRIMARY[1])
     data.add(Operator(PRIMARY[1], "room_1_2", index=0, operator_type="high"))
     candidate = data.operators[PRIMARY[1]]
-    assert candidate.rest_in_full
+    assert not candidate.rest_in_full
     assert candidate.resting_priority == "standby"
     candidate.standby_low_priority = True
     assert data._can_standby(candidate)
@@ -112,8 +111,18 @@ def test_idle_replacement_entry_can_take_lower_rescue_priority(solver):
         op = data.operators[other.name]
         op._current_room, op.current_index = other.position
         op.mood, op.time_stamp = 5, NOW
+    residents = {item.name for item in data.dorm if item.name}
     tasks = []
     try_add_release_dorm({}, None, data, tasks)
     assert len(tasks) == 1
     assert tasks[0].type == TaskTypes.NOT_SPECIFIC
-    assert tasks[0].plan[bed.position[0]][bed.position[1]] == candidate.name
+    projected = data.project_arrangements([tasks[0].plan])
+    assert {item.name for item in projected.dorm if item.name} == (
+        residents - {resident.name}
+    ) | {candidate.name}
+    assert projected.get_dorm_by_name(candidate.name)[0] is not None
+    # 接管低优先级床位不等于取得单回，已有普通主班仍先于高优先级替班。
+    target = projected.get_current_operator(*bed.position)
+    assert resting_tier(projected, target.name) < resting_tier(
+        projected, candidate.name
+    )
