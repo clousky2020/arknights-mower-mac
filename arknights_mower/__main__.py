@@ -353,6 +353,28 @@ def _initialize_scheduler(tasks, device):
     return base_scheduler
 
 
+def _notify_freeze(failure):
+    """Announce one frozen dispatch boundary through the configured email channel.
+
+    Freezing preserves the task without replaying uncertain input, so the operator
+    is the only exit. That makes the entry the single moment worth reporting: the
+    wait loop below cannot reach this call again. A notification fault must not add
+    a second failure mode to a path whose purpose is containment.
+    """
+    reason = str(failure) or failure.code
+    body = (
+        "输入结果待核实，已暂停设备调度并保留当前任务，"
+        "不会重复提交副作用。程序将保持冻结，直到手动停止。\n\n"
+        f"原因：{reason}"
+    )
+    try:
+        from arknights_mower.utils.email import send_message
+
+        send_message(body, subject="设备调度已冻结", level="ERROR")
+    except Exception:
+        logger.exception("冻结通知发送失败")
+
+
 def _resume_device_dispatch(scheduler=None, failure=None):
     def resume():
         if device_control.shutdown_requested or config.stop_mower.is_set():
@@ -368,6 +390,7 @@ def _resume_device_dispatch(scheduler=None, failure=None):
     device = wait_for_recovery(resume, retry_errors=RECOVERABLE_DEVICE_ERRORS)
     if isinstance(failure, TouchFailure) and failure.delivery_unknown:
         logger.warning("输入结果待核实：保留当前任务，暂停设备调度，不重复提交副作用")
+        _notify_freeze(failure)
         while not config.stop_mower.is_set():
             device_control.pause_dispatch(failure)
             csleep(30)

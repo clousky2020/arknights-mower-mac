@@ -174,6 +174,100 @@ def test_unknown_side_effect_keeps_task_and_worker_until_cancel(
     assert scheduler.recog.update.call_count == 2
 
 
+def _unknown_delivery_failure():
+    return TouchFailure(
+        Conf().device, "windows", OSError("unknown"), delivery_unknown=True
+    )
+
+
+def _pausing_control(device):
+    return SimpleNamespace(
+        shutdown_requested=False,
+        recover=Mock(return_value=SimpleNamespace(unwrap=lambda: device)),
+        pause_dispatch=Mock(),
+    )
+
+
+def _stop_after_third_sleep(cancellation):
+    sleeps = []
+
+    def stop_after_paused(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            cancellation.set()
+            raise MowerExit
+
+    return stop_after_paused
+
+
+def test_freeze_entry_notifies_once_through_the_email_channel(
+    task_main, monkeypatch, cancellation
+):
+    failure = _unknown_delivery_failure()
+    device = object()
+    control = _pausing_control(device)
+    scheduler = SimpleNamespace(
+        device=device, tasks=[object()], recog=SimpleNamespace(update=Mock())
+    )
+    monkeypatch.setattr(task_main, "device_control", control)
+    notify = Mock()
+    monkeypatch.setattr("arknights_mower.utils.email.send_message", notify)
+    monkeypatch.setattr(
+        task_main, "csleep", _stop_after_third_sleep(cancellation)
+    )
+
+    with pytest.raises(MowerExit):
+        task_main._resume_device_dispatch(scheduler, failure)
+
+    # 进入冻结时通知一次；循环空转不再重复通知。
+    assert notify.call_count == 1
+    assert notify.call_args.kwargs["level"] == "ERROR"
+
+
+def test_notification_failure_never_breaks_the_freeze_loop(
+    task_main, monkeypatch, cancellation
+):
+    failure = _unknown_delivery_failure()
+    device = object()
+    control = _pausing_control(device)
+    pending = [object()]
+    scheduler = SimpleNamespace(
+        device=device, tasks=pending, recog=SimpleNamespace(update=Mock())
+    )
+    monkeypatch.setattr(task_main, "device_control", control)
+    notify = Mock(side_effect=OSError("smtp unreachable"))
+    monkeypatch.setattr("arknights_mower.utils.email.send_message", notify)
+    monkeypatch.setattr(
+        task_main, "csleep", _stop_after_third_sleep(cancellation)
+    )
+
+    with pytest.raises(MowerExit):
+        task_main._resume_device_dispatch(scheduler, failure)
+
+    # 通知通道故障不得改变冻结语义：仍保留任务，仍只由取消退出。
+    assert notify.call_count == 1
+    assert scheduler.tasks is pending
+    assert control.pause_dispatch.call_count == 2
+
+
+def test_ordinary_recovery_never_notifies(task_main, monkeypatch):
+    device = object()
+    result = SimpleNamespace(unwrap=lambda: device)
+    control = SimpleNamespace(
+        shutdown_requested=False,
+        recover=Mock(side_effect=[DeviceRecoveryError("budget"), result]),
+    )
+    scheduler = SimpleNamespace(
+        device=object(), tasks=[], recog=SimpleNamespace(update=Mock())
+    )
+    monkeypatch.setattr(task_main, "device_control", control)
+    notify = Mock()
+    monkeypatch.setattr("arknights_mower.utils.email.send_message", notify)
+
+    assert task_main._resume_device_dispatch(scheduler) is device
+    notify.assert_not_called()
+
+
 def test_dispatch_returns_to_same_scheduler_after_budget_exhaustion(
     task_main, monkeypatch
 ):
