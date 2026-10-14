@@ -19,13 +19,15 @@ _real_save_param = module.cultivate.save_param
 def syncer(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "get_path", lambda _: tmp_path / "cultivate.json")
     # `import server` 会在模块级读 config.conf.webview.token（server.py:85），
-    # 而这里整体替换了 config.conf，缺 webview 会让该导入直接 AttributeError。
+    # 并在导入时调用 config.conf.assistant_enabled_for_launch；
+    # 这里整体替换了 config.conf，缺这两项会让该导入直接 AttributeError。
     monkeypatch.setattr(
         module.config,
         "conf",
         SimpleNamespace(
             skland_info=[SimpleNamespace(cultivate_select=True)],
             webview=SimpleNamespace(token="", port=58000, scale=1, tray=False),
+            assistant_enabled_for_launch=lambda managed: False,
         ),
     )
     monkeypatch.setattr(module, "log", lambda _: "login")
@@ -93,10 +95,14 @@ def test_other_account_credential_is_never_reused(syncer, monkeypatch):
     monkeypatch.setattr(module, "get_cred_by_token", lambda _: pytest.fail("不应重新登录"))
     monkeypatch.setattr(module, "get_sign_header", fake_sign_header)
 
+    # 响应已带 building，按当前契约不再发起第二次设施查询。
     with patch.object(module, "request_with_retry") as get:
         get.return_value.json.return_value = {
             "code": 0,
-            "data": {"characters": [{"id": "char_2027_wang", "evolvePhase": 2}]},
+            "data": {
+                "characters": [{"id": "char_2027_wang", "evolvePhase": 2}],
+                "building": {"manufactures": [{"level": 3}]},
+            },
         }
         assert syncer.start() is True
 
@@ -135,10 +141,14 @@ def test_missing_or_expired_cache_relogins_instead_of_using_blank_token(
     )
     monkeypatch.setattr(module, "header", {"cred": "cred-stale"})
 
+    # 响应已带 building，按当前契约不再发起第二次设施查询。
     with patch.object(module, "request_with_retry") as get:
         get.return_value.json.return_value = {
             "code": 0,
-            "data": {"characters": [{"id": "char_2027_wang", "evolvePhase": 2}]},
+            "data": {
+                "characters": [{"id": "char_2027_wang", "evolvePhase": 2}],
+                "building": {"manufactures": [{"level": 3}]},
+            },
         }
         assert syncer.start() is True
 
@@ -156,10 +166,14 @@ def test_only_first_matching_binding_is_fetched(syncer, monkeypatch):
             {"gameId": 1, "isOfficial": True, "uid": "second"},
         ],
     )
+    # 响应已带 building，设施查询与干员查询合并为一次请求，绑定循环只取第一个。
     with patch.object(module, "request_with_retry") as get:
         get.return_value.json.return_value = {
             "code": 0,
-            "data": {"characters": [{"id": "char_2027_wang", "evolvePhase": 2}]},
+            "data": {
+                "characters": [{"id": "char_2027_wang", "evolvePhase": 2}],
+                "building": {"manufactures": [{"level": 3}]},
+            },
         }
         assert syncer.start() is True
     assert get.call_count == 1
