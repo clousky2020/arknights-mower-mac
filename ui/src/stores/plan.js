@@ -31,6 +31,7 @@ const createPlanStore = (id, endpoint, rescue = false) =>
     const refresh_drained = ref([])
 
     const plan = ref({})
+    const facility_levels = ref({})
 
     const backup_plans = ref([])
 
@@ -209,6 +210,7 @@ const createPlanStore = (id, endpoint, rescue = false) =>
           }
         }
       }
+      facility_levels.value = deepcopy(response.data.facility_levels ?? {})
       plan.value = fill_empty(response.data.plan1)
 
       backup_plans.value = response.data.backup_plans ?? []
@@ -230,6 +232,7 @@ const createPlanStore = (id, endpoint, rescue = false) =>
 
     async function import_main_plan() {
       const { data } = await axios.get(`${import.meta.env.VITE_HTTP_URL}/plan`)
+      facility_levels.value = deepcopy(data.facility_levels ?? {})
       plan.value = fill_empty(deepcopy(data.plan1))
       sub_plan.value = 'main'
     }
@@ -272,6 +275,7 @@ const createPlanStore = (id, endpoint, rescue = false) =>
     function build_plan() {
       const result = {
         default: 'plan1',
+        facility_levels: deepcopy(facility_levels.value),
         plan1: strip_plan(plan.value),
         conf: {
           ling_xi: ling_xi.value,
@@ -341,7 +345,7 @@ const createPlanStore = (id, endpoint, rescue = false) =>
       return [...new Set(result)]
     })
 
-    const group_colors = computed(() => {
+    const all_groups = computed(() => {
       const names = new Set()
       for (const table of [plan.value, ...backup_plans.value.map((backup) => backup.plan)]) {
         for (const room of Object.values(table)) {
@@ -352,11 +356,18 @@ const createPlanStore = (id, endpoint, rescue = false) =>
           }
         }
       }
-      return Object.fromEntries([
-        ['', 'transparent'],
-        ...[...names].map((name, index) => [name, `hsl(${(360 / names.size) * index}, 80%, 45%)`])
-      ])
+      return [...names]
     })
+
+    const group_colors = computed(() =>
+      Object.fromEntries([
+        ['', 'transparent'],
+        ...all_groups.value.map((name, index) => [
+          name,
+          `hsl(${(360 / all_groups.value.length) * index}, 80%, 45%)`
+        ])
+      ])
+    )
 
     const sub_plan = ref('main')
     const current_plan = computed(() => {
@@ -398,11 +409,13 @@ const createPlanStore = (id, endpoint, rescue = false) =>
       refresh_drained,
       dorm_order,
       plan,
+      facility_levels,
       operators,
       facility_operator_limit,
       left_side_facility,
       build_plan,
       groups,
+      all_groups,
       group_colors,
       backup_plans,
       sub_plan,

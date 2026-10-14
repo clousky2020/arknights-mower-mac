@@ -103,6 +103,232 @@ def test_downshift_relocation_does_not_cancel_its_trigger(solver):
     assert solver.op_data.operators["乌尔比安"].current_room == "room_1_1"
 
 
+@pytest.fixture
+def restored_group_solver(solver):
+    s = solver
+    s.global_plan["default_plan"].plan["recycle"] = [Room("旅骨", "乙", ["星源"])]
+    s.global_plan["backup_plans"] = [
+        Plan(
+            {"recycle": [Room("星源", "", ["旅骨"])]},
+            PlanConfig("", "", ""),
+            trigger=LogicExpression(
+                "op_data.operators['歌蕾蒂娅'].is_working()", "==", "True"
+            ),
+        )
+    ]
+    assert s.initialize_operators() is None
+    assert s.op_data.swap_plan([True], refresh=True) is None
+    for op in s.op_data.operators.values():
+        op._current_room, op.current_index = op.room, op.index
+        op.mood, op.time_stamp = 22, datetime.now()
+    s.op_data.operators["旅骨"].mood = 12.39
+    return s
+
+
+@pytest.mark.parametrize("in_dorm", [False, True])
+def test_departure_restores_member_without_recalling_group(
+    restored_group_solver, in_dorm
+):
+    s = restored_group_solver
+    if in_dorm:
+        s.op_data = s.op_data.project_arrangements(
+            [{"dormitory_1": ["Current", "Current", "Current", "Current", "旅骨"]}]
+        )
+    task = off(s, "乙")
+    assert task.backup_shift_conditions == [False]
+    assert s.op_data.plan["recycle"][0].agent == "旅骨"
+    assert all(
+        "旅骨" not in row
+        for room, row in task.plan.items()
+        if not room.startswith("dorm")
+    )
+    assert s.op_data.group_is_resting("乙")
+    for name in ("歌蕾蒂娅", "乌尔比安", "旅骨"):
+        assert s.op_data.operators[name].is_resting()
+        assert s.op_data.get_dorm_by_name(name)[1] is not None
+    assert s.op_data.operators["星源"].current_room == "recycle"
+    assert s.op_data.operators["重岳"].current_room == "central"
+    assert s.op_data.operators["槐琥"].current_room == "room_1_2"
+
+
+def prepare_group_before_backup_exit(s):
+    intent, admissions = {}, {}
+    for name in s.op_data.groups["乙"]:
+        s.op_data.operators[name].mood = 0
+    assert s.get_resting_plan(
+        s.op_data.groups["乙"], [], intent, 0, dorm_admissions=admissions
+    )
+    for (room, index), name in admissions.items():
+        intent.setdefault(room, ["Current"] * len(s.op_data.plan[room]))[index] = name
+    s.op_data = s.op_data.project_arrangements([intent])
+    for bed in s.op_data.all_dorms():
+        if bed.name:
+            bed.time = datetime.now() + timedelta(hours=4)
+
+
+def test_cached_exit_admits_restored_member_without_changing_actual_beds(
+    restored_group_solver,
+):
+    s = restored_group_solver
+    prepare_group_before_backup_exit(s)
+    before = recovery(s)
+    generated = []
+    assert s.backup_plan_solver(generated_tasks=generated)
+    assert s.op_data.plan_condition == [False]
+    assert recovery(s) == before
+    assert s.op_data.operators["旅骨"].current_room == ""
+    staffing = [task for task in generated if task.plan]
+    assert len(staffing) == 1
+    projected = s.op_data.project_arrangements([staffing[0].plan])
+    assert projected.group_is_resting("乙")
+    assert projected.operators["旅骨"].is_resting()
+    assert projected.operators["星源"].current_room == "recycle"
+    for name, (position, _) in before.items():
+        assert projected.get_dorm_by_name(name)[1].position == position
+
+
+def test_full_restored_member_can_wait_without_a_bed(restored_group_solver):
+    s = restored_group_solver
+    s.op_data.operators["旅骨"].mood = 24
+    task = off(s, "乙")
+    assert task.backup_shift_conditions == [False]
+    assert s.op_data.group_is_resting("乙")
+    assert s.op_data.operators["歌蕾蒂娅"].is_resting()
+    assert s.op_data.operators["旅骨"].current_room == ""
+    assert s.op_data.get_dorm_by_name("旅骨")[1] is None
+    assert s.op_data.operators["星源"].current_room == "recycle"
+
+
+@pytest.mark.parametrize("reservation", ["beds", "member"])
+def test_restored_member_waits_for_reservation_release(
+    restored_group_solver, reservation
+):
+    s = restored_group_solver
+    prepare_group_before_backup_exit(s)
+    if reservation == "beds":
+        plan = {}
+        for bed in s.op_data.all_dorms():
+            if not bed.name:
+                room, index = bed.position
+                plan.setdefault(room, ["Current"] * len(s.op_data.plan[room]))[
+                    index
+                ] = "Free"
+    else:
+        plan = {"factory": ["旅骨"]}
+    pending = SchedulerTask(task_type=TaskTypes.RE_ORDER, task_plan=plan)
+    s.tasks = [pending]
+    timestamp = pending.time
+    before = recovery(s)
+    for _ in range(3):
+        generated = []
+        assert not s.backup_plan_solver(generated_tasks=generated)
+        assert generated == []
+        assert s.op_data.plan_condition == [True]
+        assert s.op_data.group_is_resting("乙")
+        assert recovery(s) == before
+        assert s.tasks == [pending]
+        assert pending.time == timestamp
+    s.tasks.remove(pending)
+    generated = []
+    assert s.backup_plan_solver(generated_tasks=generated)
+    staffing = [task for task in generated if task.plan]
+    assert len(staffing) == 1
+    projected = s.op_data.project_arrangements([staffing[0].plan])
+    assert projected.operators["旅骨"].is_resting()
+    assert projected.operators["歌蕾蒂娅"].is_resting()
+
+
+def test_explicit_entry_task_can_return_restored_primary(restored_group_solver):
+    s = restored_group_solver
+    prepare_group_before_backup_exit(s)
+    s.op_data.backup_plans.append(
+        Plan(
+            {},
+            PlanConfig("", "", ""),
+            trigger=LogicExpression("True", "==", "True"),
+            task={"recycle": ["旅骨"]},
+        )
+    )
+    s.op_data.plan_condition.append(False)
+    generated = []
+    assert s.backup_plan_solver(generated_tasks=generated)
+    assert s.op_data.plan_condition == [False, True]
+    staffing = [task for task in generated if task.plan]
+    assert len(staffing) == 1
+    assert staffing[0].plan["recycle"] == ["旅骨"]
+    assert all(
+        "旅骨" not in row
+        for room, row in staffing[0].plan.items()
+        if room.startswith("dorm")
+    )
+
+
+def test_restored_training_member_does_not_block_other_recovery(
+    restored_group_solver, monkeypatch
+):
+    s = restored_group_solver
+    main = s.global_plan["default_plan"].plan
+    main.pop("recycle")
+    main["train"] = [Room("望", "", ["梅尔"]), Room("旅骨", "乙", ["星源"])]
+    s.global_plan["backup_plans"][0].plan = {
+        "train": [Room("Current", "", []), Room("星源", "", ["旅骨"])]
+    }
+    assert s.initialize_operators() is None
+    assert s.op_data.swap_plan([True], refresh=True) is None
+    for op in s.op_data.operators.values():
+        op._current_room, op.current_index = op.room, op.index
+        op.mood, op.time_stamp = 22, datetime.now()
+    monkeypatch.setattr(s, "_train_scheduling_protected", lambda: True)
+    prepare_group_before_backup_exit(s)
+    before = recovery(s)
+    task = SchedulerTask(task_type=TaskTypes.SELF_CORRECTION)
+    s._prepare_shift_backup(task)
+    assert task.backup_shift_conditions == [False]
+    assert "train" not in task.plan
+    assert all("旅骨" not in row for row in task.plan.values())
+    assert recovery(s) == before
+    assert s.op_data.operators["星源"].current_room == "train"
+
+
+def test_new_recovery_does_not_replace_explicit_dorm_resident(restored_group_solver):
+    s = restored_group_solver
+    prepare_group_before_backup_exit(s)
+    vacant = [bed.position for bed in s.op_data.all_dorms() if not bed.name]
+    room, index = vacant[0]
+    explicit = {room: ["Current"] * len(s.op_data.plan[room])}
+    explicit[room][index] = "夕"
+    s.op_data.backup_plans.append(
+        Plan(
+            {},
+            PlanConfig("", "", ""),
+            trigger=LogicExpression("True", "==", "True"),
+            task=explicit,
+        )
+    )
+    s.op_data.plan_condition.append(False)
+    reserved = {}
+    for bed_room, bed_index in vacant[1:]:
+        reserved.setdefault(bed_room, ["Current"] * len(s.op_data.plan[bed_room]))[
+            bed_index
+        ] = "Free"
+    pending = SchedulerTask(task_type=TaskTypes.RE_ORDER, task_plan=reserved)
+    s.tasks = [pending]
+    before = recovery(s)
+    assert not s.backup_plan_solver(generated_tasks=[])
+    assert s.op_data.plan_condition == [True, False]
+    assert s.tasks == [pending]
+    assert recovery(s) == before
+    s.tasks.remove(pending)
+    generated = []
+    assert s.backup_plan_solver(generated_tasks=generated)
+    staffing = [task for task in generated if task.plan]
+    assert len(staffing) == 1
+    assert staffing[0].plan[room][index] == "夕"
+    projected = s.op_data.project_arrangements([staffing[0].plan])
+    assert projected.operators["旅骨"].is_resting()
+    assert projected.get_dorm_by_name("旅骨")[1].position != (room, index)
+
+
 @pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("full", [False, True])
 def test_exit_does_not_recall_another_resting_group(solver, explicit, full):
@@ -128,9 +354,10 @@ def test_exit_does_not_recall_another_resting_group(solver, explicit, full):
     assert s.op_data.plan_condition == [False]
     for name in ("歌蕾蒂娅", "乌尔比安"):
         assert s.op_data.operators[name].is_resting()
-        # 完整轮休可将住客转到另一组腾出的单回位；切表自身不重排床位。
+        # 同级保留原床；同宿舍其他成员离开后，留下者也重新读取恢复时间。
         if not full:
-            assert recovery(s)[name] == before[name]
+            assert recovery(s)[name][0] == before[name][0]
+            assert recovery(s)[name][1] >= before[name][1]
     assert s.op_data.operators["槐琥"].current_room == "room_1_2"
 
 
@@ -168,6 +395,32 @@ def test_both_resting_covers_move_without_spare(solver):
     task = finish(s, SchedulerTask(task_type=TaskTypes.SELF_CORRECTION), full=False)
     assert task.plan == {"room_1_1": ["槐琥"], "room_1_2": ["结城理"]}
     assert recovery(s) == before
+
+
+@pytest.mark.parametrize("path", ["cached", "projection"])
+def test_relocation_with_manager_change_invalidates_room_timing(solver, path):
+    prepare_resting_relocation(solver, both=True)
+    before = recovery(solver)
+    dorm = deepcopy(solver.op_data.plan["dormitory_1"])
+    dorm[0] = Room("白面鸮", "", [])
+    solver.op_data.backup_plans[0].plan["dormitory_1"] = dorm
+    if path == "cached":
+        generated = []
+        assert solver.backup_plan_solver(generated_tasks=generated)
+        task = next(task for task in generated if task.plan)
+        assert solver.op_data.plan_condition == [True]
+    else:
+        task = SchedulerTask(task_type=TaskTypes.SELF_CORRECTION)
+        solver._prepare_shift_backup(task)
+        assert task.backup_shift_conditions == [True]
+        assert solver.op_data.plan_condition == [False]
+    assert task.plan["dormitory_1"][0] == "白面鸮"
+    projected = solver.op_data.project_arrangements([task.plan])
+    for name, (position, deadline) in before.items():
+        bed = projected.get_dorm_by_name(name)[1]
+        assert bed.position == position
+        assert bed.time == (None if position[0] == "dormitory_1" else deadline)
+    assert recovery(solver) == before
 
 
 @pytest.mark.parametrize("blocking", ["mastery", "reservation"])

@@ -4,7 +4,7 @@ Local contract for Python backend implementation under `arknights_mower/`.
 
 ## 1. Domain Invariants & Architecture Constraints
 
-- Apply `[INV-01]` through `[INV-06]` from [Coding Standards](../CODING_STANDARDS.md#1-core-invariants) and the affected [subsystem contract](../docs/subsystems/).
+- Apply the [core contracts](../CODING_STANDARDS.md#1-core-contracts) and the affected [subsystem contract](../docs/subsystems/).
 - Select only necessary stages through [Agent Workflow](../.agents/AGENTS.md#1-task-selection); document placement follows the [routing rules](../.agents/skills/mower-doc/references/doc-hierarchy.md#routing-rules).
 
 ## 2. Resource & Concurrency Lifecycle
@@ -17,7 +17,7 @@ Local contract for Python backend implementation under `arknights_mower/`.
 ## 3. Testing Discipline
 
 - **Targeted Unit Testing**: Run only focused unit test suites during development (e.g., `pytest arknights_mower/tests/device_session_tests.py`).
-- **Hermetic Isolation**: Tests must mock external device processes, network sockets, and filesystem state. Full integration runs against live emulators are prohibited in agent development loops.
+- **Hermetic Isolation**: Follow the shared [verification discipline](../CODING_STANDARDS.md#5-verification-discipline). Full integration runs against live emulators are prohibited in agent development loops.
 
 ## 4. Prose & Language Standards
 

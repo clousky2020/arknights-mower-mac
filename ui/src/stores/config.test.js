@@ -14,6 +14,29 @@ afterEach(() => {
 })
 
 describe('workshop config autosave', () => {
+  it('saves the medicine expiry threshold without retired weekend settings', async () => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    const loaded = ref(false)
+    const app = createApp({})
+    app.use(pinia)
+    app.provide('loaded', loaded)
+    store = app.runWithContext(() => useConfigStore())
+    for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
+    expect(store.medicine_expire_days).toBe(0)
+    expect(store).not.toHaveProperty('expiring_medicine_on_weekend')
+    expect(store.build_config()).not.toHaveProperty('expiring_medicine_on_weekend')
+    expect(store.build_config()).not.toHaveProperty('exipring_medicine_on_weekend')
+    axios.patch.mockResolvedValue({ data: {} })
+    loaded.value = true
+    await nextTick()
+    await store.flush_config_saves()
+    store.medicine_expire_days = 3
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(1))
+    expect(axios.patch.mock.calls[0][1]).toEqual({ medicine_expire_days: 3 })
+    loaded.value = false
+  })
+
   it('saves the automatic rescue checkbox independently', async () => {
     pinia = createPinia()
     setActivePinia(pinia)
@@ -279,7 +302,7 @@ describe('low frame rate adaptation', () => {
     }
   })
   it.each([
-    ['android', undefined, true],
+    ['android', undefined, false],
     ['android', false, false],
     ['android', true, true],
     ['darwin', undefined, false],
@@ -320,7 +343,7 @@ describe('low frame rate adaptation', () => {
     await nextTick()
     await store.flush_config_saves()
     expect(axios.patch).not.toHaveBeenCalled()
-    store.performance_mode = platform === 'android' ? 'low' : 'medium'
+    store.performance_mode = 'medium'
     await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(1))
     const savedValue = performanceProfile(store.performance_mode, platform).lowFrameRateMode
     expect(store.build_config().low_frame_rate_mode).toBe(savedValue)

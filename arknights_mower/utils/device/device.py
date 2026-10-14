@@ -188,6 +188,7 @@ class Device:
             up_wait: int,
             *,
             display_frames=None,
+            before_release=None,
         ) -> None:
             if self.mumu12IPC:
                 total = len(durations)
@@ -203,6 +204,11 @@ class Device:
                         fall=idx == 0,
                         lift=idx == total - 1,
                         interval=up_wait / 1000 if idx == total - 1 else 0,
+                        **(
+                            {"before_release": before_release}
+                            if before_release is not None and idx == total - 1
+                            else {}
+                        ),
                     )
             elif self.maatouch:
                 self.maatouch.swipe(
@@ -210,6 +216,11 @@ class Device:
                     display_frames,
                     duration=durations,
                     up_wait=up_wait,
+                    **(
+                        {"before_release": before_release}
+                        if before_release is not None
+                        else {}
+                    ),
                 )
             elif self.scrcpy:
                 sender = getattr(self.scrcpy, "control", None)
@@ -227,6 +238,11 @@ class Device:
                             up_wait / 1000 if index == total - 1 else 0,
                             fall=index == 0,
                             lift=index == total - 1,
+                            **(
+                                {"before_release": before_release}
+                                if before_release is not None and index == total - 1
+                                else {}
+                            ),
                         )
             else:
                 raise NotImplementedError
@@ -634,7 +650,7 @@ class Device:
         # ADB and custom captures own only the bounded per-call connection or
         # process. A new acquisition naturally creates their next resource.
 
-    def screencap(self):
+    def screencap(self, *, recover=True):
         """Return current RGB/gray frames; persistence owns JPEG encoding."""
         from arknights_mower.utils.performance import effective_performance_profile
 
@@ -647,10 +663,27 @@ class Device:
         min_time = config.screenshot_time + timedelta(milliseconds=screenshot_interval)
         delta = (min_time - start_time).total_seconds()
         if delta > 0:
-            time.sleep(delta)
+            if recover:
+                time.sleep(delta)
+            else:
+                budget_sleep(delta)
             start_time = min_time
 
-        if control := getattr(self, "session_control", None):
+        if not recover:
+            # 手指仍按下时只读当前后端一次，禁止恢复或重建输入资源。
+            budget_sleep(0)
+            try:
+                control = getattr(self, "session_control", None)
+                img = self._validated(
+                    control.capture_once()
+                    if control is not None
+                    else self.capture_frame()
+                )
+            except (MowerExit, DeviceRecoveryError):
+                raise
+            except Exception as exc:
+                raise ScreenshotFailure(self.profile, __system__, exc) from exc
+        elif control := getattr(self, "session_control", None):
             img = control.capture().unwrap()
         elif (
             hasattr(self, "control")
@@ -766,21 +799,45 @@ class Device:
         )
 
     def swipe_ext(
-        self, points: list[tuple[int, int]], durations: list[int], up_wait: int = 200
-    ) -> None:
+        self,
+        points: list[tuple[int, int]],
+        durations: list[int],
+        up_wait: int = 200,
+        *,
+        capture=False,
+    ):
         """swipe_ext"""
         logger.debug(
             f"swipe_ext: points={points}, durations={durations}, up_wait={up_wait}"
         )
+        frame = None
+        capture_error = None
+
+        def observe():
+            nonlocal frame, capture_error
+            started = time.monotonic()
+            try:
+                hold = int(float(up_wait)) / 1000
+                budget_sleep(min(0.1, hold))
+                frame = self.screencap(recover=False)
+                budget_sleep(max(0, hold - (time.monotonic() - started)))
+            except BaseException as exc:
+                # 抬手成功后单独传播截图错误，不将它当作输入投递未知。
+                capture_error = exc
+
         self._input_once(
             lambda prepared: self._swipe_ext(
                 prepared.points,
                 prepared.durations,
                 prepared.up_wait,
-                prepared.display_frames,
+                display_frames=prepared.display_frames,
+                **({"before_release": observe} if capture else {}),
             ),
             prepare=lambda: self._prepare_touch(points, durations, up_wait),
         )
+        if capture_error is not None:
+            raise capture_error
+        return frame
 
     def _tap(self, point, display_frames=None) -> None:
         """单次触控投递：优先 mumu12IPC，AVD 环境按降级策略选择通道。"""
@@ -819,6 +876,7 @@ class Device:
         durations: list[int],
         up_wait: int,
         display_frames=None,
+        before_release=None,
     ) -> None:
         """单次多段手势投递，通道选择策略同 _tap。"""
         if self.is_avd_like and (self.force_input_tap or self.control.scrcpy is None):
@@ -833,7 +891,11 @@ class Device:
             self._control_with_retry("swipe_ext", points, durations, up_wait)
         else:
             self.control.swipe_ext(
-                points, durations, up_wait, display_frames=display_frames
+                points,
+                durations,
+                up_wait,
+                display_frames=display_frames,
+                **({"before_release": before_release} if before_release is not None else {}),
             )
 
     def _prepare_touch(self, points, durations=None, up_wait=0):

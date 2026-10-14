@@ -147,6 +147,17 @@ class IdleLifecycleTests(unittest.TestCase):
                 self.assertFalse(self.control.stop_bound_simulator())
         run.assert_not_called()
 
+    def test_unsupported_presets_preserve_active_helpers(self):
+        device = Mock()
+        self.control._device = device
+        for preset in ("windows.bluestacks5", "macos.bluestacks_air", "manual.other"):
+            with self.subTest(preset=preset):
+                self.conf.device.preset_id = preset
+                self.assertFalse(self.control.stop_bound_simulator())
+                self.assertIs(self.control._device, device)
+        device.close.assert_not_called()
+        self.simulator.stop.assert_not_called()
+
     def test_mumu_stop_uses_selected_manager_not_legacy_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = Path(directory) / "MuMuManager.exe"
@@ -183,3 +194,14 @@ class IdleLifecycleTests(unittest.TestCase):
             )
             self.assertLessEqual(run.call_args.kwargs["timeout"], 10)
             self.assertEqual(self.conf.model_dump(), before)
+
+    def test_stop_bound_simulator_timeout_returns_false_without_raising(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = Path(directory) / "MuMuManager.exe"
+            manager.touch()
+            self.conf.device.manager_path = str(manager)
+            run = Mock(side_effect=subprocess.TimeoutExpired("MuMuManager", 3.0))
+            self.control._session = SimpleNamespace(
+                simulator=ProductionSimulator(run=run)
+            )
+            self.assertFalse(self.control.stop_bound_simulator())

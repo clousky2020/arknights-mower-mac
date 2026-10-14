@@ -4,6 +4,7 @@ defineOptions({ name: 'MowerPlanPage' })
 import { useConfigStore } from '@/stores/config'
 import { usePlanStore, useRescuePlanStore } from '@/stores/plan'
 import { useMowerStore } from '@/stores/mower'
+import PlanFacilityLevels from '@/components/PlanFacilityLevels.vue'
 import PlanAdvancedSettings from '@/components/PlanAdvancedSettings.vue'
 import PlanOperatorSelect from '@/components/PlanOperatorSelect.vue'
 import DropDown from '@/components/DropDown.vue'
@@ -53,12 +54,25 @@ const free_blacklist = rescue
   : normal_free_blacklist
 const { load_plan, fill_empty } = plan_store
 
-import { computed, inject, onMounted, onUnmounted, provide, ref, watch, watchEffect } from 'vue'
+import {
+  computed,
+  defineAsyncComponent,
+  inject,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  provide,
+  ref,
+  shallowRef,
+  watch,
+  watchEffect
+} from 'vue'
 const axios = inject('axios')
 
 const facility = ref('')
 provide('facility', facility)
-const edit_locked = import_saves.paused
+const preparing_income = ref(false)
+const edit_locked = computed(() => import_saves.paused.value || preparing_income.value)
 provide('planEditLocked', edit_locked)
 
 import { useDialog, useMessage, NAlert } from 'naive-ui'
@@ -426,8 +440,14 @@ watch(show_replace_dialog, (open) => {
   }
 })
 
+const validating_plan = ref(false)
+
 async function validate_plan() {
+  if (validating_plan.value) return
+  validating_plan.value = true
   try {
+    await nextTick()
+    await plan_store.save_plan()
     const { data } = await axios.post(
       `${import.meta.env.VITE_HTTP_URL}/${rescue ? 'rescue-plan/validate' : 'validate-plan'}`,
       {},
@@ -444,6 +464,8 @@ async function validate_plan() {
     }
   } catch (error) {
     message.error('验证失败: ' + error.message)
+  } finally {
+    validating_plan.value = false
   }
 }
 
@@ -552,6 +574,90 @@ function import_error() {
 const import_url = `${import.meta.env.VITE_HTTP_URL}/import${rescue ? '?rescue=1' : ''}`
 
 const token = inject('token')
+
+const PlanIncomeDialog = defineAsyncComponent(() => import('@/components/PlanIncomeDialog.vue'))
+const income_open = ref(false)
+const income_snapshot = shallowRef(null)
+const income_error = ref('')
+let income_preparation = 0
+let income_original_facility = null
+
+function closeIncome() {
+  if (income_original_facility !== null) facility.value = income_original_facility
+  income_original_facility = null
+  income_preparation++
+  income_open.value = false
+  income_snapshot.value = null
+  preparing_income.value = false
+}
+onUnmounted(closeIncome)
+
+async function prepareIncome() {
+  if (!requireEditing() || rescue || income_open.value) return
+  const generation = ++income_preparation
+  income_open.value = true
+  preparing_income.value = true
+  income_error.value = ''
+  income_snapshot.value = null
+  income_original_facility = facility.value
+  try {
+    const plan = JSON.parse(JSON.stringify(plan_store.build_plan()))
+    plan.advanced_settings = JSON.parse(JSON.stringify(config_store.build_advanced_settings()))
+    const droneRoom = config_store.drone_room
+    const { incomeWorkspace } = await import('@/riic/income')
+    incomeWorkspace(plan)
+    if (generation !== income_preparation) return
+    const imageTheme = theme.value
+    const label = sub_plan.value === 'main' ? '主表' : backup_plans.value[sub_plan.value].name
+    facility.value = ''
+    await nextTick()
+    if (Bowser.getParser(window.navigator.userAgent).getEngine().name === 'WebKit') {
+      await toBlob(plan_editor.value.outer)
+    }
+    const root = plan_editor.value.outer
+    const rootRect = root.getBoundingClientRect()
+    const rootStyle = getComputedStyle(root)
+    const roomBounds = Object.fromEntries(
+      [...root.querySelectorAll('[data-income-room]')].map((element) => {
+        const rect = element.getBoundingClientRect()
+        return [
+          element.dataset.incomeRoom,
+          {
+            x: (rect.left - rootRect.left - parseFloat(rootStyle.paddingLeft)) * 3,
+            y: (rect.top - rootRect.top - parseFloat(rootStyle.paddingTop) + 8) * 3,
+            width: rect.width * 3,
+            height: rect.height * 3
+          }
+        ]
+      })
+    )
+    const capture = await toBlob(plan_editor.value.outer, {
+      pixelRatio: 3,
+      backgroundColor: imageTheme === 'light' ? '#ffffff' : '#000000',
+      style: { margin: 0, padding: '8px 0' }
+    })
+    if (generation !== income_preparation) return
+    if (!capture) throw new Error('原排班图片生成失败')
+    const form = new FormData()
+    form.append('img', capture)
+    form.append('plan', JSON.stringify(plan))
+    form.append('theme', imageTheme)
+    const { data } = await axios.post(`${import.meta.env.VITE_HTTP_URL}/dialog/save/img`, form, {
+      responseType: 'blob',
+      timeout: 60000
+    })
+    if (generation === income_preparation)
+      income_snapshot.value = { plan, image: data, theme: imageTheme, label, roomBounds, droneRoom }
+  } catch (error) {
+    if (generation === income_preparation) income_error.value = error.message || '排班快照准备失败'
+  } finally {
+    if (generation === income_preparation) {
+      preparing_income.value = false
+      if (income_original_facility !== null) facility.value = income_original_facility
+      income_original_facility = null
+    }
+  }
+}
 
 const export_options = [
   {
@@ -676,7 +782,13 @@ function movePlanForward() {
             </template>
             新建副表
           </n-button>
-          <n-button v-if="sub_plan == 'main'" title="验证排班" @click="validate_plan">
+          <n-button
+            v-if="sub_plan == 'main'"
+            title="验证排班"
+            :loading="validating_plan"
+            :disabled="validating_plan"
+            @click="validate_plan"
+          >
             <template #icon>
               <n-icon><help /></n-icon>
             </template>
@@ -766,11 +878,28 @@ function movePlanForward() {
         </drop-down>
       </div>
     </div>
+    <PlanIncomeDialog
+      v-if="income_open"
+      :snapshot="income_snapshot"
+      :preparing="preparing_income"
+      :prepare-error="income_error"
+      @close="closeIncome"
+    />
     <plan-editor ref="plan_editor" class="w-980 mx-auto mw-980 px-12" />
     <div v-if="!rescue" class="plan-advanced-actions w-980 mx-auto px-12 mw-980">
       <n-button @click="show_advanced_settings_dialog = true">高级设置</n-button>
       <n-button @click="show_mood_limits_dialog = true"> 设置心情上下限 </n-button>
+      <n-button
+        type="success"
+        :disabled="edit_locked"
+        :loading="preparing_income"
+        @click="prepareIncome"
+      >
+        计算收益
+      </n-button>
+      <PlanFacilityLevels class="inline-power" />
     </div>
+    <PlanFacilityLevels v-if="rescue" class="w-980 mx-auto px-12 mw-980" />
     <n-form
       class="w-980 mx-auto mb-12 px-12 mw-980"
       :label-placement="mobile ? 'top' : 'left'"
@@ -967,10 +1096,10 @@ function movePlanForward() {
             此页编辑独立的救急主表和副表，修改会自动保存。开启自动救急后，仅在初始化发现多组主班低于救急线、普通轮休无法安排休息时启用。
           </div>
           <div>
-            启动时先按当前条件确定正常表和救急表各自生效的副表，再核对工作站设施类型、等级（岗位数量）及产物；任一不一致都不会进入救急。与正常主班重名的救急驻员会在启动时提示，但仍按救急表工作。
+            救急表的普通工作设施必须与双方副表生效后的正常表完整对应，岗位数量、类型及产物必须一致；会客室、办公室和回收站不能省略或整行留空。加工站和训练室沿用专项配置与训练保护。排班校验先检查救急主副表自身的驻员、岗位数量和替换名单；有副表条件时，设施类型、等级及产物在初始化实测后按双方生效排班核对，差异会阻止进入救急。与正常主班重名的救急驻员会在启动时提示，但仍按救急表工作。
           </div>
           <div>
-            加工站和训练室按救急表部署驻员，加工及专精仍按原任务执行，训练室换人保留现有保护规则。
+            进入救急后立即按救急表部署全部已配置工作岗位，不因心情未知或任务预约暂缓。训练室正在训练、受保护或房态不可靠时整房跳过，也不从其他房间间接调走其驻员，其他房间继续；训练室空闲且未受保护时照常部署。后续加工及专精仍按原任务执行。
           </div>
           <div>
             跑单人选、宿管及菲亚梅塔的位置和充能对象须在救急表中独立填写。Free
@@ -1123,9 +1252,14 @@ function movePlanForward() {
 <style scoped lang="scss">
 .plan-advanced-actions.mx-auto {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.inline-power {
+  margin: 0;
 }
 
 .w-980 {

@@ -11,11 +11,13 @@ from threading import Event, Lock
 import pytz
 from tzlocal import get_localzone
 
+from arknights_mower.solvers.mood_history_query import FIAMMETTA_CURVE_FILTER
 from arknights_mower.utils import config
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
 
 battle_inventory_active = Event()
+workshop_inventory_changed = Event()
 
 
 # 全部 DB 表定义（建表/迁移检查进程内只跑一次，避免每调用重跑 CREATE TABLE + PRAGMA + commit）
@@ -39,6 +41,16 @@ _DB_TABLE_STMTS = (
     "price INTEGER"
     ")",
     "CREATE TABLE IF NOT EXISTS inventory (item_name TEXT PRIMARY KEY, count INTEGER)",
+    "CREATE TABLE IF NOT EXISTS mastery_inventory_consumption ("
+    "char_id TEXT NOT NULL, skill_index INTEGER NOT NULL, level INTEGER NOT NULL,"
+    "PRIMARY KEY (char_id, skill_index, level))",
+    "CREATE TABLE IF NOT EXISTS recycling_collection ("
+    "event_id TEXT PRIMARY KEY, collected_at REAL NOT NULL,"
+    "operators TEXT, materials TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS recycling_collection_time "
+    "ON recycling_collection(collected_at)",
+    "CREATE TABLE IF NOT EXISTS recycling_valuation ("
+    "id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS workshop_inventory_updates ("
     "item_name TEXT PRIMARY KEY, observed_at REAL NOT NULL)",
     "CREATE TABLE IF NOT EXISTS workshop_inventory_pending ("
@@ -185,6 +197,8 @@ def save_action_to_sqlite_decorator(func):
         mood_event=None,
         recorded_at=None,
         preserve_depletion_rate=False,
+        *,
+        group_transitions=None,
     ):
         agent = self.operators[name]  # 干员
 
@@ -192,6 +206,11 @@ def save_action_to_sqlite_decorator(func):
         agent_is_high = agent.is_high()  # 是否高优先级
 
         # 调用原函数
+        recovery_context = (
+            {"group_transitions": group_transitions}
+            if group_transitions is not None
+            else {}
+        )
         result = func(
             self,
             name,
@@ -200,6 +219,7 @@ def save_action_to_sqlite_decorator(func):
             current_index,
             update_time,
             preserve_depletion_rate=preserve_depletion_rate,
+            **recovery_context,
         )
         if not update_time:
             return
@@ -238,6 +258,7 @@ def current_state():
         "party_time": data.party_time,
         "operators": data.operators,
         "facility_states": getattr(data, "facility_states", {}),
+        "room_observations": getattr(data, "room_observations", {}),
         "group_shift_state": dict(getattr(data, "group_shift_state", {})),
         "automatic_rescue_state": getattr(base_scheduler, "emergency_state", None),
         "backup_plan_names": [backup.name for backup in data.backup_plans],
@@ -254,6 +275,9 @@ def current_state():
             getattr(base_scheduler, "_initial_mood_refresh_rooms", ())
         ),
         "daily_visit_friend": base_scheduler.daily_visit_friend,
+        "daily_visit_friend_attempt": getattr(
+            base_scheduler, "daily_visit_friend_attempt", None
+        ),
         "daily_report": base_scheduler.daily_report,
         "daily_skland": base_scheduler.daily_skland,
         "daily_mail": base_scheduler.daily_mail,
@@ -362,9 +386,32 @@ def clear_data(date_time):
         logger.error(f"SQLite error: {e}")
 
 
+def _mood_report_bindings():
+    """Collect shared report memberships from saved main and backup plans."""
+    memberships = {}
+    plans = [config.plan.plan1, *(backup.plan for backup in config.plan.backup_plans)]
+    for plan in plans:
+        for _, facility in plan:
+            if facility is None:
+                continue
+            for operator in facility.plans:
+                groups = list(
+                    dict.fromkeys(
+                        binding.group
+                        for binding in [operator, *operator.group_bindings]
+                        if binding.group
+                    )
+                )
+                if len(groups) > 1:
+                    bound = memberships.setdefault(operator.agent, [])
+                    bound.extend(group for group in groups if group not in bound)
+    return memberships
+
+
 def get_work_rest_ratios():
     # TODO 整理数据计算工休比
     favorite = [] if config.conf.favorite == "" else config.conf.favorite.split(",")
+    favorite = list(dict.fromkeys([*favorite, *_mood_report_bindings()]))
     sel = "".join(
         """
             UNION
@@ -440,7 +487,9 @@ def get_work_rest_ratios():
 
 # 整理心情曲线
 def get_mood_ratios():
+    bindings = _mood_report_bindings()
     favorite = [] if config.conf.favorite == "" else config.conf.favorite.split(",")
+    favorite = list(dict.fromkeys([*favorite, *bindings]))
     sel = "".join(
         """
             UNION
@@ -466,6 +515,10 @@ def get_mood_ratios():
             + """
                         ) AS subquery ON a.name = subquery.name
                         WHERE DATE(a.current_time) >= DATE('now', '-7 day', 'localtime')
+                        AND
+            """
+            + FIAMMETTA_CURVE_FILTER
+            + """
                         ORDER BY a.agent_group DESC, a.current_time;
 
         """,
@@ -478,15 +531,6 @@ def get_mood_ratios():
     grouped_data = {}
     grouped_work_rest_data = {}
     for row in data:
-        group_name = row[4]  # Assuming 'agent_group' is at index 4
-        if not group_name:
-            group_name = row[0]
-        mood_data = grouped_data.get(group_name, {"labels": [], "datasets": []})
-        work_rest_data = grouped_work_rest_data.get(
-            group_name, work_rest_data_ratios[row[0]]
-        )
-        grouped_work_rest_data[group_name] = work_rest_data
-
         timestamp_datetime = datetime.strptime(
             row[6], "%Y-%m-%d %H:%M:%S.%f"
         )  # Assuming 'current_time' is at index 6
@@ -503,24 +547,30 @@ def get_mood_ratios():
         if mood_event:
             point["moodEvent"] = mood_event
 
-        if mood_label in [dataset["label"] for dataset in mood_data["datasets"]]:
-            # if mood_label == mood_data['datasets'][0]['label']:
+        for group_name in bindings.get(mood_label, [row[4] or mood_label]):
+            mood_data = grouped_data.setdefault(
+                group_name, {"labels": [], "datasets": []}
+            )
+            grouped_work_rest_data.setdefault(
+                group_name, work_rest_data_ratios[mood_label]
+            )
             mood_data["labels"].append(current_time)
-            # If mood label already exists, find the corresponding dataset
             for dataset in mood_data["datasets"]:
                 if dataset["label"] == mood_label:
-                    dataset["data"].append(point)
+                    dataset["data"].append(point.copy())
                     break
-        else:
-            # If mood label doesn't exist, create a new dataset
-            mood_data["labels"].append(current_time)
-            mood_data["datasets"].append({"label": mood_label, "data": [point]})
+            else:
+                mood_data["datasets"].append(
+                    {"label": mood_label, "data": [point.copy()]}
+                )
 
-        grouped_data[group_name] = mood_data
-    print(grouped_work_rest_data)
+    logger.debug("分组作息记录：%s", grouped_work_rest_data)
     # 将数据格式整理为数组
     formatted_data = []
     for group_name, mood_data in grouped_data.items():
+        mood_data["labels"].sort()
+        for dataset in mood_data["datasets"]:
+            dataset["data"].sort(key=lambda point: point["x"])
         formatted_data.append(
             {
                 "groupName": group_name,
@@ -633,6 +683,278 @@ def get_trading_history(start_date: str, end_date: str):
     return result_list
 
 
+def save_recycling_collection(event_id, collected_at, operators, materials):
+    """Store one observed collection; retries retain the same event identity."""
+    if (
+        not isinstance(event_id, str)
+        or not event_id
+        or not isinstance(collected_at, (int, float))
+        or not 0 < collected_at < 253402300800
+        or (
+            materials is not None and (not isinstance(materials, dict) or not materials)
+        )
+        or any(
+            not isinstance(name, str)
+            or not name
+            or type(count) is not int
+            or count <= 0
+            for name, count in (materials or {}).items()
+        )
+        or (
+            operators is not None
+            and (
+                not isinstance(operators, list)
+                or any(not isinstance(name, str) or not name for name in operators)
+            )
+        )
+    ):
+        raise ValueError("回收站收取记录必须包含有效时间、材料和数量")
+    with _conn() as connection:
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO recycling_collection VALUES (?, ?, ?, ?)",
+            (
+                event_id,
+                collected_at,
+                json.dumps(operators, ensure_ascii=False),
+                json.dumps(materials or {}, ensure_ascii=False),
+            ),
+        )
+        connection.commit()
+        return cursor.rowcount == 1
+
+
+def update_recycling_operators(event_id, operators):
+    """Complete an unknown roster after reward dismissal without replacing evidence."""
+    if not isinstance(operators, list) or any(
+        not isinstance(name, str) or not name for name in operators
+    ):
+        raise ValueError("回收站进驻干员必须来自实际房间读数")
+    with _conn() as connection:
+        connection.execute(
+            "UPDATE recycling_collection SET operators = ? "
+            "WHERE event_id = ? AND operators = 'null'",
+            (json.dumps(operators, ensure_ascii=False), event_id),
+        )
+        connection.commit()
+
+
+def _recycling_date_bounds(start_date, end_date):
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    if end < start:
+        raise ValueError("日期范围无效")
+    return start.timestamp(), (end + timedelta(days=1)).timestamp()
+
+
+def _recycling_valuation(connection):
+    from arknights_mower.utils.recycling_valuation import (
+        BASE_ALGORITHMS,
+        default_valuation,
+    )
+
+    row = connection.execute(
+        "SELECT payload FROM recycling_valuation WHERE id = 1"
+    ).fetchone()
+    current = default_valuation()
+    if not row:
+        return current
+    saved = json.loads(row[0])
+    if saved.get("source") == "计算器内置价值快照" or (
+        saved.get("source") == "明日方舟一图流 · SS 活动（代币折币）"
+        and saved.get("imported_at") is None
+    ):
+        for key in ("prices", "item_ids", "lmd_sanity", "source", "metadata"):
+            saved.pop(key, None)
+    current["prices"].update(saved.pop("prices", {}))
+    current["item_ids"].update(saved.pop("item_ids", {}))
+    current.update(saved)
+    if "metadata" not in saved and current["source"] != default_valuation()["source"]:
+        current["metadata"] = {
+            **current["metadata"],
+            "source": current["source"],
+            "imported_at": current["imported_at"],
+            "pricing_mode": "imported",
+        }
+    if "base_algorithm" not in saved:
+        current["base_algorithm"] = next(
+            (
+                key
+                for key, values in BASE_ALGORITHMS.items()
+                if all(
+                    current["ratios"][name] == value for name, value in values.items()
+                )
+            ),
+            -1,
+        )
+        current["base_algorithm_saved"] = False
+    return current
+
+
+def get_recycling_valuation():
+    with _conn() as connection:
+        return _recycling_valuation(connection)
+
+
+def update_recycling_valuation(
+    *, ratios=None, imported=None, reset=False, base_algorithm=None
+):
+    """Atomically update assumptions while retaining independent saved inputs."""
+    from arknights_mower.utils.recycling_valuation import (
+        BASE_ALGORITHMS,
+        default_valuation,
+        validate_base_algorithm,
+        validate_ratios,
+    )
+
+    if ratios is not None:
+        ratios = validate_ratios(ratios)
+        if base_algorithm is None:
+            base_algorithm = next(
+                (
+                    key
+                    for key, values in BASE_ALGORITHMS.items()
+                    if all(ratios[name] == value for name, value in values.items())
+                ),
+                -1,
+            )
+        base_algorithm = validate_base_algorithm(base_algorithm, ratios)
+    elif base_algorithm is not None:
+        raise ValueError("请同时提供收益系数")
+    with _conn() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        current = default_valuation() if reset else _recycling_valuation(connection)
+        if reset:
+            current["base_algorithm_saved"] = True
+        if ratios is not None:
+            current["ratios"] = ratios
+            current["base_algorithm"] = base_algorithm
+            current["base_algorithm_saved"] = True
+        if imported is not None:
+            known_ids = current.get("item_ids", {})
+            for name, item_id in imported["item_ids"].items():
+                if name in known_ids and known_ids[name] != item_id:
+                    raise ValueError(f"物品名称与已保存 ID 不符：{name}")
+                if any(
+                    saved_id == item_id and saved_name != name
+                    for saved_name, saved_id in known_ids.items()
+                ):
+                    raise ValueError(f"物品 ID 与已保存名称不符：{item_id}")
+            current["last_import"] = {
+                "updated": len(imported["prices"]),
+                "added": len(imported["prices"].keys() - current["prices"].keys()),
+                "retained": len(current["prices"].keys() - imported["prices"].keys()),
+                "unpriced": imported.get("unpriced", []),
+            }
+            current["prices"].update(imported["prices"])
+            current.setdefault("item_ids", {}).update(imported["item_ids"])
+            if "lmd_sanity" in imported:
+                current["lmd_sanity"] = imported["lmd_sanity"]
+            current["source"] = "一图流导入（未提供的价值保留原值）"
+            current["imported_at"] = datetime.now().timestamp()
+            current["metadata"] = {
+                **current["metadata"],
+                "source": current["source"],
+                "imported_at": current["imported_at"],
+                "pricing_mode": "imported",
+            }
+        connection.execute(
+            "INSERT OR REPLACE INTO recycling_valuation VALUES (1, ?)",
+            (json.dumps(current, ensure_ascii=False, allow_nan=False),),
+        )
+        connection.commit()
+        return current
+
+
+def _recycling_summary(connection, bounds):
+    from arknights_mower.data import key_mapping
+    from arknights_mower.utils.mastery_recommendation import get_skill_data
+    from arknights_mower.utils.recycling import recycling_expectation
+
+    where = " WHERE collected_at >= ? AND collected_at < ?"
+    total = connection.execute(
+        "SELECT COUNT(*) FROM recycling_collection" + where, bounds
+    ).fetchone()[0]
+    unknown_collections = connection.execute(
+        "SELECT COUNT(*) FROM recycling_collection" + where + " AND materials = '{}'",
+        bounds,
+    ).fetchone()[0]
+    totals = [
+        {"name": name, "count": count}
+        for name, count in connection.execute(
+            "SELECT item.key, SUM(item.value) FROM recycling_collection, "
+            "json_each(materials) AS item"
+            + where
+            + " GROUP BY item.key ORDER BY SUM(item.value) DESC, item.key",
+            bounds,
+        )
+    ]
+    item_data = get_skill_data().get("items", {})
+    quality = collections.Counter()
+    for item in totals:
+        item_id = key_mapping.get(item["name"], [None])[0]
+        item["rarity"] = item_data.get(item_id, {}).get("rarity")
+        quality[item["rarity"]] += item["count"]
+    return {
+        "total": total,
+        "materials": totals,
+        "comparison": recycling_expectation(
+            totals, unknown_collections, _recycling_valuation(connection)
+        ),
+        "qualities": [
+            {"rarity": rarity, "count": count}
+            for rarity, count in sorted(quality.items(), key=lambda row: row[0] or 0)
+        ],
+    }
+
+
+def _recycling_snapshot(row):
+    event_id, collected_at, operators, materials = row
+    return {
+        "id": event_id,
+        "collected_at": collected_at,
+        "operators": json.loads(operators) if operators else None,
+        "materials": json.loads(materials) or None,
+    }
+
+
+def get_recycling_history(start_date, end_date, page=1, page_size=50):
+    """Return local-calendar totals and a bounded page of collection snapshots."""
+    bounds = _recycling_date_bounds(start_date, end_date)
+    if not 1 <= page or not 1 <= page_size <= 200:
+        raise ValueError("分页参数无效")
+    with _conn() as connection:
+        # One read transaction keeps counts, totals and details consistent.
+        connection.execute("BEGIN")
+        result = _recycling_summary(connection, bounds)
+        rows = connection.execute(
+            "SELECT event_id, collected_at, operators, materials "
+            "FROM recycling_collection WHERE collected_at >= ? AND collected_at < ? "
+            "ORDER BY collected_at DESC, event_id DESC LIMIT ? OFFSET ?",
+            (*bounds, page_size, (page - 1) * page_size),
+        )
+        result["records"] = [_recycling_snapshot(row) for row in rows]
+        return result
+
+
+def export_recycling_history(start_date, end_date):
+    """Export all selected records and summaries from the same read snapshot."""
+    from arknights_mower.utils.recycling_export import write_recycling_workbook
+
+    bounds = _recycling_date_bounds(start_date, end_date)
+    with _conn() as connection:
+        connection.execute("BEGIN")
+        summary = _recycling_summary(connection, bounds)
+        rows = connection.execute(
+            "SELECT event_id, collected_at, operators, materials "
+            "FROM recycling_collection WHERE collected_at >= ? AND collected_at < ? "
+            "ORDER BY collected_at DESC, event_id DESC",
+            bounds,
+        )
+        return write_recycling_workbook(
+            start_date, end_date, summary, (_recycling_snapshot(row) for row in rows)
+        )
+
+
 def save_inventory_counts(
     inventorys: dict[str, int],
     *,
@@ -640,10 +962,12 @@ def save_inventory_counts(
     scanned_at=0,
     cloud_counts=None,
     cloud_at=0,
+    force_cloud=False,
 ):
     with _conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         effective = dict(inventorys)
+        current = dict(conn.execute("SELECT item_name, count FROM inventory"))
         protected = dict(
             conn.execute(
                 "SELECT item_name, observed_at FROM workshop_inventory_updates"
@@ -656,7 +980,6 @@ def save_inventory_counts(
             )
         }
         if scanned_counts is not None:
-            current = dict(conn.execute("SELECT item_name, count FROM inventory"))
             for name in protected.keys() | (cloud_counts or {}).keys():
                 observed_at = protected.get(name, 0)
                 # Depot scans cover only some categories. An absent item is not
@@ -685,7 +1008,12 @@ def save_inventory_counts(
                 # count in its net direction; an actual game read can reconcile.
                 # Once an item was both made and consumed, an intermediate cloud
                 # count can cross that range. Only exact convergence is sufficient.
-                if from_cloud and name in pending and name in current:
+                if (
+                    from_cloud
+                    and not force_cloud
+                    and name in pending
+                    and name in current
+                ):
                     (baseline, directions), expected = pending[name], current[name]
                     caught_up = (
                         scanned == expected
@@ -759,6 +1087,10 @@ def save_inventory_counts(
                     if name in effective and effective[name] == count:
                         observed[name] = max(timestamp, observed.get(name, 0))
         clear_workshop_recipe_rejections(observed)
+        if any(current.get(name) != count for name, count in effective.items()) or any(
+            timestamp > protected.get(name, 0) for name, timestamp in observed.items()
+        ):
+            workshop_inventory_changed.set()
         return effective
 
 
@@ -774,26 +1106,75 @@ def get_inventory_counts(item_names: list[str] | None = None):
         return dict(cursor.fetchall())
 
 
+def _apply_inventory_delta(conn, delta):
+    conn.executemany(
+        "INSERT INTO workshop_inventory_pending (item_name, baseline, directions) "
+        "SELECT item_name, count, ? FROM inventory WHERE item_name = ? "
+        "ON CONFLICT(item_name) DO UPDATE SET directions = directions | excluded.directions",
+        [(1 if amount > 0 else 2, name) for name, amount in delta.items() if amount],
+    )
+    conn.executemany(
+        "UPDATE inventory SET count = MAX(0, count + ?) WHERE item_name = ?",
+        [(amount, name) for name, amount in delta.items()],
+    )
+    _mark_workshop_inventory(conn, delta)
+
+
 def apply_workshop_inventory(delta: dict[str, int]):
     """Persist confirmed crafting or drop deltas without restoring invalidated stock."""
     with _conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        conn.executemany(
-            "INSERT INTO workshop_inventory_pending (item_name, baseline, directions) "
-            "SELECT item_name, count, ? FROM inventory WHERE item_name = ? "
-            "ON CONFLICT(item_name) DO UPDATE SET directions = directions | excluded.directions",
-            [
-                (1 if amount > 0 else 2, name)
-                for name, amount in delta.items()
-                if amount
-            ],
-        )
-        conn.executemany(
-            "UPDATE inventory SET count = MAX(0, count + ?) WHERE item_name = ?",
-            [(amount, name) for name, amount in delta.items()],
-        )
-        _mark_workshop_inventory(conn, delta)
+        before = dict(conn.execute("SELECT item_name, count FROM inventory"))
+        _apply_inventory_delta(conn, delta)
         conn.commit()
+        if any(
+            name in before and max(0, before[name] + amount) != before[name]
+            for name, amount in delta.items()
+        ):
+            workshop_inventory_changed.set()
+
+
+def apply_mastery_inventory(char_id, skill_index, level):
+    """Deduct a confirmed mastery stage once, including across restarts and replans."""
+    from arknights_mower.utils.mastery_recommendation import get_skill_data
+
+    if type(level) is not int or not 1 <= level <= 3:
+        raise ValueError("无法确认专精材料扣减档位")
+    data = get_skill_data()
+    stage = data["characters"][char_id]["skills"][skill_index]["levels"][level - 1]
+    costs = collections.Counter()
+    for material in stage["materials"]:
+        count = material["count"]
+        if type(count) is not int or count <= 0:
+            raise ValueError("专精材料消耗数量无效")
+        costs[data["items"][material["id"]]["name"]] += count
+    if not costs:
+        raise ValueError("缺少当前专精档位的材料消耗")
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        receipt = conn.execute(
+            "INSERT OR IGNORE INTO mastery_inventory_consumption "
+            "(char_id, skill_index, level) VALUES (?, ?, ?)",
+            (char_id, skill_index, level),
+        )
+        if receipt.rowcount == 0:
+            return False
+        current = dict(conn.execute("SELECT item_name, count FROM inventory"))
+        # A confirmed payment cannot establish zero from an inconsistent baseline.
+        unknown = [
+            name for name, count in costs.items() if current.get(name, 0) < count
+        ]
+        conn.executemany(
+            "DELETE FROM inventory WHERE item_name = ?", [(name,) for name in unknown]
+        )
+        conn.executemany(
+            "DELETE FROM workshop_inventory_pending WHERE item_name = ?",
+            [(name,) for name in unknown],
+        )
+        _apply_inventory_delta(conn, {name: -count for name, count in costs.items()})
+        conn.commit()
+    workshop_inventory_changed.set()
+    return True
 
 
 def invalidate_workshop_inventory(names):
@@ -805,6 +1186,7 @@ def invalidate_workshop_inventory(names):
         )
         _mark_workshop_inventory(conn, names)
         conn.commit()
+        workshop_inventory_changed.set()
 
 
 def _mark_workshop_inventory(conn, names):

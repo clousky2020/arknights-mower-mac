@@ -192,7 +192,7 @@
                       </div>
                       <div>
                         <n-button @click=";((showModal2 = false), $router.push('/maasettings'))">
-                          MAA设置
+                          日常设置
                         </n-button>
                       </div>
                     </n-card>
@@ -253,6 +253,13 @@
                       </div>
                       <div>
                         <n-button
+                          @click=";((showModal = false), $router.push('/record/recycling'))"
+                        >
+                          回收站材料统计
+                        </n-button>
+                      </div>
+                      <div>
+                        <n-button
                           @click=";((showModal = false), $router.push('/record/log-schedule'))"
                         >
                           日志调度
@@ -275,7 +282,7 @@
                 </n-tab>
                 <n-tab name="Mower AI 助手" @click="handleMenuClick('chatbot')">
                   <div style="display: flex; flex-direction: column; align-items: center">
-                    <n-icon size="20" style="margin-bottom: -1px" :component="BulbOutline" />
+                    <n-icon size="20" style="margin-bottom: -1px" :component="MowerAIIcon" />
                     AI助手
                   </div>
                 </n-tab>
@@ -291,7 +298,7 @@
 <script setup>
 import SkillLevelAdvanced from '@vicons/carbon/SkillLevelAdvanced'
 import WikipediaW from '@vicons/fa/WikipediaW'
-import BulbOutline from '@vicons/ionicons5/BulbOutline'
+import MowerAIIcon from '@/components/MowerAIIcon.vue'
 import Wrench from '@vicons/fa/Wrench'
 import Bag from '@vicons/ionicons5/Bag'
 import BarChart from '@vicons/ionicons5/BarChart'
@@ -300,6 +307,7 @@ import HelpCircle from '@vicons/ionicons5/HelpCircle'
 import Home from '@vicons/ionicons5/Home'
 import PieChart from '@vicons/ionicons5/PieChart'
 import ReaderOutline from '@vicons/ionicons5/ReaderOutline'
+import TimeOutline from '@vicons/ionicons5/TimeOutline'
 import Newspaper from '@vicons/ionicons5/Newspaper'
 import Settings from '@vicons/ionicons5/Settings'
 import StatsChart from '@vicons/ionicons5/StatsChart'
@@ -403,7 +411,7 @@ const menuOptions = [
         key: 'go-to-mowersetting'
       },
       {
-        label: () => h(RouterLink, { to: { path: '/maasettings' } }, { default: () => 'MAA设置' }),
+        label: () => h(RouterLink, { to: { path: '/maasettings' } }, { default: () => '日常设置' }),
         icon: renderIcon(RoseOutline),
         key: 'go-to-maasetting'
       }
@@ -460,8 +468,14 @@ const menuOptions = [
       },
       {
         label: () =>
+          h(RouterLink, { to: { path: '/record/recycling' } }, { default: () => '回收站材料统计' }),
+        icon: renderIcon(PieChart),
+        key: 'go-to-recycling'
+      },
+      {
+        label: () =>
           h(RouterLink, { to: { path: '/record/log-schedule' } }, { default: () => '日志调度' }),
-        icon: renderIcon(ReaderOutline),
+        icon: renderIcon(TimeOutline),
         key: 'go-to-log-schedule'
       }
     ]
@@ -511,7 +525,7 @@ const menuOptions = [
   },
   {
     label: () => 'Mower AI 助手',
-    icon: renderIcon(BulbOutline),
+    icon: renderIcon(MowerAIIcon),
     key: 'chatbot'
   }
 ]
@@ -631,7 +645,8 @@ const { operators } = storeToRefs(plan_store)
 const { load_plan, load_operators } = plan_store
 
 const mower_store = useMowerStore()
-const { ws, running, log_lines, auto_start_handled } = storeToRefs(mower_store)
+const { ws, running, log_lines, auto_start_handled, desktop_startup_handled } =
+  storeToRefs(mower_store)
 const { get_running, listen_ws } = mower_store
 
 const update_notice_store = useUpdateNoticeStore()
@@ -881,7 +896,7 @@ onMounted(async () => {
     console.error('failed to load update notice', error)
     showUpdateNoticeModal.value = false
   }
-  // Render settings while updating, but resume automatic tasks only afterwards.
+  // Desktop startup owns automatic installation and task admission.
   const resourceUpdateRequest = (async () => {
     try {
       if (await loadResourceJob()) {
@@ -890,7 +905,11 @@ onMounted(async () => {
       await loadResourceVersionLocal()
       if (resource_update_enable.value) {
         const resourceInfo = await loadResourceVersion()
-        if (resource_update_auto_update.value && resourceInfo.update_available === true) {
+        if (
+          !desktop_startup_handled.value &&
+          resource_update_auto_update.value &&
+          resourceInfo.update_available === true
+        ) {
           if (await installResource()) {
             await Promise.all([load_shop(), load_item(), load_operators()])
           }

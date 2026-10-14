@@ -1,8 +1,4 @@
-"""#83：auto_schedule_mastery_tasks / compute_workshop_config 直接读 DB 计划。
-
-matery_plan.json 是全仓库无写入者的孤儿文件（@app/tmp 上的 stale key），UI/API/agent
-新增计划不在里面，扫描自动开始会漏。两函数改为读 get_all_plans()（非终态计划）。
-"""
+"""Mastery dispatch reads persisted plans and confirmed finished inventory."""
 
 import json
 import os
@@ -50,11 +46,7 @@ def _plan(**overrides):
 
 
 def _write_inventory_files(tmp_dir, item_id, owned):
-    """写 cultivate.json（库存）+ skill_data.json（材料名→id）到临时目录。
-
-    auto_schedule_mastery_tasks 直接读这两文件（R-06 链路级递减）；
-    返回两路径供测试覆盖 get_path / _find_skill_data 指向。
-    """
+    """Write a cached cloud count and resource names for local-stock admission."""
     cultivate_path = os.path.join(tmp_dir, "cultivate.json")
     skill_path = os.path.join(tmp_dir, "skill_data.json")
     with open(cultivate_path, "w", encoding="utf-8") as f:
@@ -78,6 +70,11 @@ class TestAutoScheduleReadsDb(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        inventory = patch(
+            "arknights_mower.solvers.record.get_inventory_counts", return_value={}
+        )
+        self.inventory = inventory.start()
+        self.addCleanup(inventory.stop)
 
     def test_db_plan_scheduled_when_materials_sufficient(self):
         # #111：带真实材料链跑正分支——库存 owned == count（ID 解析命中）→ scheduled。
@@ -86,6 +83,7 @@ class TestAutoScheduleReadsDb(unittest.TestCase):
         cultivate_path, skill_path = _write_inventory_files(
             self.tmp.name, "item_T3", 50
         )
+        self.inventory.return_value = {"技巧概要·卷3": 50}
         mats = [{"name": "技巧概要·卷3", "count": 50}]
         with (
             patch(
@@ -106,7 +104,10 @@ class TestAutoScheduleReadsDb(unittest.TestCase):
 
     def test_db_plan_skipped_when_inventory_short(self):
         # #111 对照：同材料链库存 owned < count → skipped（确保正分支不是恒 True）
-        cultivate_path, skill_path = _write_inventory_files(self.tmp.name, "item_T3", 5)
+        cultivate_path, skill_path = _write_inventory_files(
+            self.tmp.name, "item_T3", 70
+        )
+        self.inventory.return_value = {"技巧概要·卷3": 5}
         mats = [{"name": "技巧概要·卷3", "count": 50}]
         with (
             patch(
@@ -190,104 +191,6 @@ class TestAutoScheduleReadsDb(unittest.TestCase):
         ):
             result = rec.auto_schedule_mastery_tasks()
         self.assertEqual(result, {"scheduled": [], "skipped": []})
-
-
-class TestComputeWorkshopConfigReadsDb(unittest.TestCase):
-    """#83：compute_workshop_config 按 DB 计划核算材料需求。"""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        skill_path = os.path.join(self.tmp.name, "skill_data.json")
-        with open(skill_path, "w", encoding="utf-8") as f:
-            json.dump({"items": {}}, f)
-        patcher = patch.object(rec, "_find_skill_data", return_value=skill_path)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_db_plan_drives_book_demand(self):
-        # DB 计划 (char_A, 1) → 推荐链材料 技巧概要·卷3×5 → 合成配置 book 上限=5
-        mats = [{"name": "技巧概要·卷3", "count": 5}]
-        cultivate_path, skill_path = _write_inventory_files(self.tmp.name, "3303", 0)
-        with open(skill_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "items": {
-                        "3303": {"name": "技巧概要·卷3"},
-                        "3302": {"name": "技巧概要·卷2"},
-                    }
-                },
-                f,
-            )
-        with open(cultivate_path, "w", encoding="utf-8") as f:
-            json.dump({"data": {"items": [{"id": "3302", "count": 15}]}}, f)
-        with (
-            patch(
-                "arknights_mower.utils.mastery_db.get_all_plans",
-                return_value=[_plan(char_id="char_A", skill_index=1)],
-            ),
-            patch.object(
-                rec,
-                "get_mastery_recommendations",
-                return_value=_recommendations("char_A", 1, mats),
-            ),
-            patch.object(
-                rec,
-                "get_path",
-                return_value=cultivate_path,
-            ),
-        ):
-            config = rec.compute_workshop_config()
-        self.assertIsNotNone(config)
-        book = [c for c in config if c["operator"] == "司霆惊蛰"]
-        self.assertEqual(len(book), 1)
-        self.assertEqual(
-            book[0]["items"],
-            [
-                {
-                    "item_names": ["技巧概要·卷3"],
-                    "children_lower_limit": 0,
-                    "self_upper_limit": 5,
-                }
-            ],
-        )
-
-    def test_plan_not_in_db_no_demand(self):
-        # 推荐链材料属于无 DB 计划的 (char_B, 2) → 不计入需求（book 空）
-        mats = [{"name": "技巧概要·卷3", "count": 5}]
-        with (
-            patch(
-                "arknights_mower.utils.mastery_db.get_all_plans",
-                return_value=[_plan(char_id="char_A", skill_index=1)],
-            ),
-            patch.object(
-                rec,
-                "get_mastery_recommendations",
-                return_value=_recommendations("char_B", 2, mats),
-            ),
-            patch.object(
-                rec,
-                "get_path",
-                return_value=os.path.join(self.tmp.name, "no_cultivate.json"),
-            ),
-        ):
-            config = rec.compute_workshop_config()
-        self.assertIsNotNone(config)
-        book = [c for c in config if c["operator"] == "司霆惊蛰"]
-        self.assertEqual(book, [])
-
-    def test_no_db_plans_clears_automatic_config(self):
-        # 无 DB 计划 → 空配置，避免继续合成旧计划或全量默认材料。
-        with (
-            patch("arknights_mower.utils.mastery_db.get_all_plans", return_value=[]),
-            patch.object(
-                rec,
-                "get_path",
-                return_value=os.path.join(self.tmp.name, "no_cultivate.json"),
-            ),
-        ):
-            config = rec.compute_workshop_config()
-        self.assertEqual(config, [])
 
 
 if __name__ == "__main__":

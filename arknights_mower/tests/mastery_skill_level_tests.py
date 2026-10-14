@@ -18,7 +18,7 @@ CHAR_ID = "char_4186_tmoris"
 
 
 @pytest.fixture
-def roster(tmp_path, monkeypatch):
+def roster(tmp_path, monkeypatch, income_db):
     path = tmp_path / "cultivate.json"
     skills_path = tmp_path / "skill_data.json"
     skills_path.write_text(
@@ -91,6 +91,8 @@ def test_all_plan_modes_reject_low_base_level_before_insert(
     plan_id, reason = db.add_plan_checked(CHAR_ID, 0, support_mode=mode)
     assert plan_id == -1
     assert f"仅 {level} 级" in reason
+    assert "升至 7 级后" in reason
+    assert "「养成规划」页面手动点击「刷新」" in reason
     insert.assert_not_called()
 
 
@@ -108,6 +110,7 @@ def test_unknown_or_invalid_level_is_not_assumed_seven(roster, level):
     roster(level)
     op = rec.get_mastery_recommendations()["operators"][0]
     assert "无法确认" in op["mastery_error"]
+    assert "「养成规划」页面手动点击「刷新」" in op["mastery_error"]
     assert db.add_plan_checked(CHAR_ID, 0, support_mode="route")[0] == -1
 
 
@@ -132,7 +135,7 @@ def test_api_rejects_low_level_and_does_not_dispatch(roster, monkeypatch, legacy
     dispatch.assert_not_called()
 
 
-def test_legacy_low_level_plan_is_not_scheduled_or_prepared(roster, monkeypatch):
+def test_legacy_low_level_plan_is_not_scheduled(roster, monkeypatch):
     plan = {
         "id": 1,
         "char_id": CHAR_ID,
@@ -142,7 +145,6 @@ def test_legacy_low_level_plan_is_not_scheduled_or_prepared(roster, monkeypatch)
     }
     monkeypatch.setattr(db, "get_all_plans", lambda: [plan])
     assert rec.auto_schedule_mastery_tasks()["scheduled"] == []
-    assert rec.compute_workshop_config([], [], []) == []
     roster(7)
     assert rec.auto_schedule_mastery_tasks()["scheduled"][0]["char_id"] == CHAR_ID
 

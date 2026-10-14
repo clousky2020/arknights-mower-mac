@@ -7,6 +7,7 @@ import re
 import struct
 import subprocess
 import unittest
+from datetime import datetime
 from pathlib import Path
 from threading import Event, RLock
 from types import SimpleNamespace
@@ -32,7 +33,8 @@ from arknights_mower.utils.device.adb_client.server import SharedADBError
 from arknights_mower.utils.device.adb_client.server import run_adb as guarded_run_adb
 from arknights_mower.utils.device.application import DeviceControl
 from arknights_mower.utils.device.device import Device
-from arknights_mower.utils.device.session import DeviceSession
+from arknights_mower.utils.device.recovery import DeviceRecoveryError
+from arknights_mower.utils.device.session import DeviceSession, RecoveryPolicy
 from arknights_mower.utils.device.touch_backend import TouchFailure
 
 MODULE = "arknights_mower.utils.device.droidcast"
@@ -456,6 +458,153 @@ class DroidCastTests(unittest.TestCase):
         self.assertEqual(self.android.processes[0].terminated, 1)
         self.assertEqual(self.http.closed, 1)
         self.assertEqual(self.conf.model_dump(), before)
+
+    def test_pending_cleanup_recovers_selected_transport_before_replacement(self):
+        self.assertTrue(self.control.capture().ok)
+        helper = self.control._device._droidcast
+        self.android.transport_error = b"adb: device offline\n"
+        self.adb.rows = [("USB-A", "offline")]
+        self.assertFalse(self.control.close().ok)
+        self.android.remote[456] = "foreign-process"
+        self.android.forwards["tcp:23456"] = ("OTHER", "tcp:12345")
+        pause = TouchFailure(
+            self.conf.device,
+            "linux",
+            ConnectionError("unverified input"),
+            delivery_unknown=True,
+        )
+        self.control.pause_dispatch(pause)
+
+        def reconnect():
+            self.android.transport_error = None
+            self.adb.rows = [("USB-A", "device")]
+
+        self.adb.on_recover = reconnect
+        adapter = Adapter()
+
+        def open_verified(configuration, result):
+            self.assertIsNone(self.control._cleanup_device)
+            self.assertEqual(self.android.remote, {456: "foreign-process"})
+            return adapter.open_verified(configuration, result)
+
+        self.control._adapter = SimpleNamespace(open_verified=open_verified)
+        recovered = self.control.recover()
+
+        self.assertTrue(recovered.ok, recovered.error)
+        self.assertEqual(self.adb.actions, ["USB-A"])
+        self.assertFalse(helper._remote_cleanup_pending)
+        self.assertEqual(self.android.remote, {456: "foreign-process"})
+        self.assertEqual(self.android.forwards, {"tcp:23456": ("OTHER", "tcp:12345")})
+        self.assertEqual(self.http.closed, 1)
+        self.assertIsNone(self.control._cleanup_device)
+        self.assertEqual(recovered.status, "paused")
+        self.assertIs(self.control._dispatch_pause, pause)
+        self.assertEqual(self.conf.model_dump(), self.before)
+
+    def test_idle_stop_releases_helpers_before_transport_goes_offline(self):
+        self.conf.device.preset_id = "windows.mumu12"
+        self.conf.close_simulator_when_idle = True
+        self.assertTrue(self.control.capture().ok)
+
+        def stop(profile, timeout):
+            self.assertEqual(self.android.remote, {})
+            self.assertEqual(self.android.forwards, {})
+            self.assertEqual(self.http.closed, 1)
+            self.assertEqual(self.android.processes[0].terminated, 1)
+            self.input_control.close.assert_called_once_with()
+            self.android.transport_error = b"adb: device offline\n"
+            return True
+
+        self.simulator.stop = Mock(side_effect=stop)
+        self.assertTrue(self.control.stop_bound_simulator())
+        self.assertTrue(self.control.close().ok)
+        self.simulator.stop.assert_called_once_with(self.conf.device, 10)
+
+    def test_idle_cleanup_failure_prevents_simulator_stop(self):
+        self.conf.device.preset_id = "windows.mumu12"
+        self.conf.close_simulator_when_idle = True
+        self.assertTrue(self.control.capture().ok)
+        self.android.transport_error = b"adb: device offline\n"
+        self.simulator.stop = Mock()
+
+        with self.assertRaises(DeviceRecoveryError) as raised:
+            self.control.stop_bound_simulator()
+
+        self.assertTrue(raised.exception.cleanup_failed)
+        self.simulator.stop.assert_not_called()
+        self.assertIsNotNone(self.control._cleanup_device)
+        self.assertEqual(self.http.closed, 1)
+
+    def test_cleanup_and_replacement_share_one_recovery_budget(self):
+        self.assertTrue(self.control.capture().ok)
+        self.android.transport_error = b"adb: device offline\n"
+        self.adb.rows = [("USB-A", "offline")]
+        self.assertFalse(self.control.close().ok)
+        session = self.control._session
+        session.policy = RecoveryPolicy(timeout=10, local_wait=0)
+
+        def reconnect():
+            self.clock.sleep(4)
+            self.android.transport_error = None
+            self.adb.rows = [("USB-A", "device")]
+
+        run = self.android.run
+
+        def cleanup(argv, **options):
+            if argv[3:5] == ["shell", "kill"]:
+                self.clock.sleep(3)
+            return run(argv, **options)
+
+        adapter = Adapter()
+
+        def open_verified(configuration, result):
+            self.assertEqual(session.remaining(), 3)
+            self.assertEqual(session.actions, 1)
+            return adapter.open_verified(configuration, result)
+
+        self.control._adapter = SimpleNamespace(open_verified=open_verified)
+        self.adb.on_recover = reconnect
+        with patch(f"{MODULE}.run_adb", cleanup):
+            recovered = self.control.recover()
+
+        self.assertTrue(recovered.ok, recovered.error)
+
+    def test_cleanup_recovery_cancellation_retains_owner_and_never_replaces(self):
+        self.assertTrue(self.control.capture().ok)
+        self.android.transport_error = b"adb: device offline\n"
+        self.adb.rows = [("USB-A", "offline")]
+        self.assertFalse(self.control.close().ok)
+        owner = self.control._cleanup_device
+
+        def reconnect():
+            self.adb.rows = [("USB-A", "device")]
+            self.android.transport_error = None
+            self.control.begin_shutdown()
+
+        self.adb.on_recover = reconnect
+        adapter = Mock()
+        self.control._adapter = adapter
+        recovered = self.control.recover()
+
+        self.assertFalse(recovered.ok)
+        self.assertEqual(recovered.status, "cancelled")
+        self.assertIs(self.control._cleanup_device, owner)
+        adapter.open_verified.assert_not_called()
+
+    def test_failed_idle_stop_restores_a_verified_session(self):
+        self.conf.device.preset_id = "windows.mumu12"
+        self.conf.close_simulator_when_idle = True
+        self.assertTrue(self.control.capture().ok)
+        self.simulator.stop = Mock(return_value=False)
+        self.control._adapter = Adapter()
+
+        self.assertFalse(self.control.stop_bound_simulator())
+
+        self.assertTrue(self.control.active)
+        self.assertIsNot(self.control._device, self.device)
+        self.assertEqual(self.android.remote, {})
+        self.assertEqual(self.android.forwards, {})
+        self.assertEqual(self.http.closed, 1)
 
     def test_cleanup_recovery_preserves_uncertain_input_pause(self):
         self.assertTrue(self.control.capture().ok)
@@ -931,6 +1080,137 @@ class DroidCastTests(unittest.TestCase):
         serial, _ = next(iter(self.android.forwards.values()))
         self.assertEqual(serial, "USB-A")
         self.assertEqual(self.android.processes[0].terminated, 1)
+
+    def test_missing_mapping_and_input_eof_rebuild_capture_before_degradation(self):
+        self.assertTrue(self.control.capture().ok)
+        helper = self.device._droidcast
+        del self.android.forwards[f"tcp:{helper.port}"]
+        helper._frames_until_mapping_check = 0
+        self.android.forwards["tcp:23456"] = ("OTHER", "tcp:12345")
+        self.input_control.input_alive.return_value = False
+
+        def repair_input():
+            self.input_control.input_alive.return_value = True
+
+        self.device.rebuild_input = Mock(side_effect=repair_input)
+        rebind = self.control._adapter.rebind
+
+        self.control._adapter.rebind = Mock(wraps=rebind)
+        result = self.control.capture()
+        self.assertTrue(result.ok, result.error)
+        self.assertFalse(
+            self.control.settings_status()["screenshot_backend"]["degraded"]
+        )
+        self.assertTrue(np.all(result.value == 0))
+        self.assertEqual(len(self.android.processes), 2)
+        self.device.rebuild_input.assert_called_once()
+        self.control._adapter.rebind.assert_not_called()
+        self.assertEqual(self.android.forwards["tcp:23456"], ("OTHER", "tcp:12345"))
+        self.assertEqual(self.conf.model_dump(), self.before)
+        self.assertEqual(self.simulator.actions, [])
+
+    def test_held_swipe_keeps_degraded_backend_and_releases_once(self):
+        self.http.failure = requests.ReadTimeout("read stalled")
+        self.assert_adb_degraded(self.control.capture(), "droidcast_http_timeout")
+        self.android.forwards.clear()
+        self.android.forwards["tcp:23456"] = ("OTHER", "tcp:12345")
+        self.device._droidcast._frames_until_mapping_check = 0
+        helper_calls = len(self.android.commands), len(self.http.calls)
+        events = []
+
+        def swipe(*args, before_release, **kwargs):
+            events.append("down")
+            before_release()
+            events.append("up")
+
+        self.input_control.swipe_ext = swipe
+        for name, value in (
+            ("screenshot_time", datetime.min),
+            ("screenshot_avg", None),
+            ("screenshot_count", 0),
+        ):
+            self.enterContext(patch.object(config, name, value))
+        self.conf.screenshot_interval = 0
+        before = self.conf.model_dump()
+        with (
+            patch("arknights_mower.utils.device.device.budget_sleep", self.clock.sleep),
+            patch("arknights_mower.utils.device.device.save_screenshot_frame"),
+        ):
+            result = self.control.execute(
+                lambda device: device.swipe_ext(
+                    [(900, 970), (800, 970)], [0], up_wait=400, capture=True
+                )
+            )
+        self.assertTrue(result.ok, result.error)
+        self.assertTrue(np.array_equal(result.value[1], self.standard.frame))
+        self.assertEqual(events, ["down", "up"])
+        self.assertEqual(
+            (len(self.android.commands), len(self.http.calls)), helper_calls
+        )
+        self.assertEqual(self.conf.model_dump(), before)
+        self.assertEqual(self.simulator.actions, [])
+        self.assertEqual(self.adb.actions, [])
+        self.assertEqual(self.android.forwards, {"tcp:23456": ("OTHER", "tcp:12345")})
+
+    def test_held_degraded_capture_failure_releases_without_helper_recovery(self):
+        self.http.failure = requests.ReadTimeout("read stalled")
+        self.assert_adb_degraded(self.control.capture(), "droidcast_http_timeout")
+        self.standard.failure = OSError("ADB capture unavailable")
+        helper_calls = len(self.android.commands), len(self.http.calls)
+        events = []
+
+        def swipe(*args, before_release, **kwargs):
+            before_release()
+            events.append("up")
+
+        self.input_control.swipe_ext = swipe
+        self.conf.screenshot_interval = 0
+        with patch(
+            "arknights_mower.utils.device.device.budget_sleep", self.clock.sleep
+        ):
+            result = self.control.execute(
+                lambda device: device.swipe_ext(
+                    [(900, 970), (800, 970)], [0], up_wait=400, capture=True
+                )
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.code, "screenshot_failed")
+        self.assertEqual(events, ["up"])
+        self.assertIsNone(getattr(self.device, "_recovery_error", None))
+        self.assertEqual(
+            (len(self.android.commands), len(self.http.calls)), helper_calls
+        )
+        self.assertEqual(self.simulator.actions, [])
+
+    def test_held_capture_cancellation_does_not_close_resources_before_release(self):
+        self.assertTrue(self.control.capture().ok)
+        helper_calls = len(self.android.commands), len(self.http.calls)
+        events = []
+
+        def swipe(*args, before_release, **kwargs):
+            self.control._pending_close.set()
+            self.control._deferred_close = True
+            before_release()
+            self.input_control.close.assert_not_called()
+            self.assertEqual(
+                (len(self.android.commands), len(self.http.calls)), helper_calls
+            )
+            events.append("up")
+
+        self.input_control.swipe_ext = swipe
+        self.conf.screenshot_interval = 0
+        with patch(
+            "arknights_mower.utils.device.device.budget_sleep", self.clock.sleep
+        ):
+            result = self.control.execute(
+                lambda device: device.swipe_ext(
+                    [(900, 970), (800, 970)], [0], up_wait=400, capture=True
+                )
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(events, ["up"])
+        self.assertIsNone(self.control._device)
+        self.assertEqual(self.simulator.actions, [])
 
 
 if __name__ == "__main__":

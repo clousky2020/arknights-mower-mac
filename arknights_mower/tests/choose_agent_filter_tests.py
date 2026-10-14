@@ -12,6 +12,7 @@ sys.modules.setdefault("arknights_mower.utils.skland", MagicMock())
 
 from arknights_mower.solvers import base_mixin, base_schedule  # noqa: E402
 from arknights_mower.solvers.base_schedule import BaseSchedulerSolver  # noqa: E402
+from arknights_mower.utils.operators import Operators  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("low_frame_rate")
 
@@ -363,6 +364,7 @@ def selection_solver(monkeypatch, residents=None):
     solver.recog = SimpleNamespace(w=1920, h=1080, img=None, update=MagicMock())
     solver.op_data = SimpleNamespace(
         operators={},
+        dorm_mood_estimates={},
         plan={},
         config=SimpleNamespace(free_blacklist=[], ope_resting_priority=[]),
         profession_filter=set(),
@@ -371,8 +373,12 @@ def selection_solver(monkeypatch, residents=None):
         is_dynamic_dorm_position=lambda *args, **kwargs: False,
         is_dorm_replacement_for_slot=lambda *args, **kwargs: False,
         get_current_operator=lambda *args, **kwargs: None,
+        dorm_capacity_allows=lambda *args, **kwargs: True,
     )
     solver.op_data.add = lambda op: solver.op_data.operators.setdefault(op.name, op)
+    solver.op_data.arrangement_group_transitions = lambda plan, **kwargs: (
+        Operators.arrangement_group_transitions(solver.op_data, plan, **kwargs)
+    )
     solver.last_room = ""
     solver.choose_error = set()
     solver.preserve_resting_crafters = MagicMock()

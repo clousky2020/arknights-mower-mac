@@ -12,7 +12,7 @@ import time
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
-from threading import RLock, Thread, Timer
+from threading import Event, RLock, Thread, Timer
 from urllib.parse import urlparse
 from uuid import uuid4
 from zlib import error as ZlibError
@@ -41,6 +41,7 @@ from arknights_mower.utils.diagnostics import (
     archive_window,
     error_events,
     export_bundle,
+    screenshots_between,
     timeline,
 )
 from arknights_mower.utils.lifecycle import shutdown
@@ -75,6 +76,9 @@ mimetypes.add_type("image/webp", ".webp")
 app = Flask(__name__, static_folder="ui/dist", static_url_path="")
 app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25, "max_message_size": 64 * 1024}
 app.config["WEBVIEW_LOCAL_ONLY_NO_TOKEN"] = False
+app.config["AI_ASSISTANT_ENABLED"] = config.conf.assistant_enabled_for_launch(
+    managed=os.environ.get("MOWER_MANAGED") == "1"
+)
 sock = Sock(app)
 CORS(app)
 network_settings.start_proxy_sync()
@@ -98,6 +102,69 @@ log_stream = LogStream()
 scheduled_start_lock = RLock()
 scheduled_start_timer = None
 scheduled_start_at = None
+performance_test_lock = RLock()
+performance_test_cancel = Event()
+performance_test_job = {"status": "idle", "id": None}
+
+
+def _performance_test_status():
+    from copy import deepcopy
+
+    with performance_test_lock:
+        return deepcopy(performance_test_job)
+
+
+def _report_performance_test(values):
+    with performance_test_lock:
+        performance_test_job.update(values)
+
+
+def _run_performance_test(configuration):
+    from arknights_mower.__main__ import device_control
+    from arknights_mower.solvers.performance_test import SelectionPerformanceTest
+    from arknights_mower.utils.csleep import MowerExit, cancellation_scope
+    from arknights_mower.utils.device.io_budget import device_io_budget
+
+    def check_cancelled():
+        return performance_test_cancel.is_set() or config.stop_mower.is_set()
+
+    def remaining():
+        if check_cancelled():
+            raise MowerExit("游戏内性能测试已取消")
+        return 30.0
+
+    try:
+        with cancellation_scope(check_cancelled):
+            with device_control.run(defer_cancel_close=True):
+                with device_io_budget(remaining):
+                    device = device_control.start(connection_retries=1).unwrap()
+                    solver = SelectionPerformanceTest(
+                        device,
+                        configuration,
+                        performance_test_cancel.is_set,
+                        _report_performance_test,
+                    )
+                result = solver.run()
+        _report_performance_test(result)
+    except MowerExit as exc:
+        _report_performance_test(
+            {
+                "status": "cancelled",
+                "recommended_mode": None,
+                "message": str(exc) or "游戏内性能测试已取消",
+                "phase": "done",
+            }
+        )
+    except Exception as exc:
+        logger.exception("游戏内性能测试中止")
+        _report_performance_test(
+            {
+                "status": "failed",
+                "recommended_mode": None,
+                "message": str(exc),
+                "phase": "done",
+            }
+        )
 
 
 def _cancel_scheduled_start():
@@ -146,6 +213,12 @@ def _mower_busy_response():
     笼统失败。
     """
     from arknights_mower.__main__ import base_scheduler
+
+    if _performance_test_status()["status"] == "running":
+        return {
+            "ok": False,
+            "message": "游戏内性能测试正在运行，请等待测试结束后再更新",
+        }
 
     if (
         mower_thread
@@ -403,10 +476,6 @@ def _run_maa_update(
             system=system,
             channel=channel,
         )
-        clear_loaded_maa_cache(result["target"])
-        result["installed_version"] = read_installed_version(
-            result["target"], fresh=True
-        )
     except Exception as e:
         logger.exception(f"MAA {operation}失败：{e}")
         with maa_update_lock:
@@ -423,9 +492,30 @@ def _run_maa_update(
             )
         return
 
+    # Installation has committed. Runtime activation cannot undo that result.
+    result.setdefault("restart_required", False)
+    if result.get("updated") is not False:
+        try:
+            clear_loaded_maa_cache(result["target"])
+        except Exception as error:
+            result["restart_required"] = True
+            logger.warning(
+                "MAA 已安装，核心清理未完成，请重启 Mower：%s", error, exc_info=True
+            )
+        try:
+            result["installed_version"] = read_installed_version(
+                result["target"], fresh=True
+            )
+        except Exception as error:
+            result["installed_version"] = ""
+            logger.warning("MAA 已安装，读取新核心版本失败：%s", error, exc_info=True)
     operation = "更新" if result["operation"] == "update" else "下载"
     channel_label = "公测版" if result["channel"] == "beta" else "正式版"
-    if result["platform"] == "android":
+    if result.get("updated") is False:
+        success_message = (
+            f"当前 MAA {result['installed_version']} 无需更新（{channel_label}）"
+        )
+    elif result["platform"] == "android":
         success_message = result.get(
             "message", "Android MAA 组件已更新，重启服务后生效"
         )
@@ -452,6 +542,11 @@ def _run_maa_update(
             f"{result['python_downloaded']} 字节（完整 Windows 包 "
             f"{result['python_full_size']} 字节）"
         )
+    if result["platform"] != "android":
+        if result["restart_required"]:
+            success_message += "；请重启 Mower 后再运行 MAA"
+        if not result["installed_version"]:
+            success_message += "；无法读取已安装核心版本，请检查 MAA 安装"
     with maa_update_lock:
         maa_update_job.update(
             {
@@ -481,7 +576,6 @@ def _run_maa_resource_update(
         install_maa_resource_update,
         read_maa_resource_info,
     )
-    from arknights_mower.utils.maa_update import clear_loaded_maa_cache
 
     try:
         result = install_maa_resource_update(
@@ -491,13 +585,11 @@ def _run_maa_resource_update(
             system=system,
             callback=_set_maa_resource_update_progress,
         )
-        if result["updated"]:
-            if os.environ.get("MOWER_ANDROID") == "1":
-                from mower_android.managed import pack_component
+        if result["updated"] and os.environ.get("MOWER_ANDROID") == "1":
+            from mower_android.managed import pack_component
 
-                pack_component(result["target"])
-                result["restart_required"] = True
-            clear_loaded_maa_cache(result["target"])
+            pack_component(result["target"])
+            result["restart_required"] = True
         result["installed"] = read_maa_resource_info(result["target"])
     except Exception as e:
         logger.exception(f"MAA 资源更新失败：{e}")
@@ -672,7 +764,10 @@ def _authorize_websocket(ws, allow_local_log=False):
     origin = request.headers.get("Origin", "")
     if allow_local_log and _local_log_request_allowed(require_origin=True):
         return True
-    if not expected or not origin or not _diagnostic_delete_origin_allowed(origin):
+    if not expected or (
+        not allow_local_log
+        and (not origin or not _diagnostic_delete_origin_allowed(origin))
+    ):
         return reject()
     try:
         first = ws.receive(timeout=5)
@@ -685,6 +780,50 @@ def _authorize_websocket(ws, allow_local_log=False):
     except (ConnectionClosed, OSError, ValueError, TypeError):
         return reject()
     return True
+
+
+def _load_frontend_pages():
+    # routes.test.js keeps this manifest aligned with Vue, including older dist.
+    manifest = Path(app.static_folder) / "frontend-routes.json"
+    if not manifest.is_file():
+        manifest = get_path("@internal/ui/public/frontend-routes.json")
+    try:
+        return frozenset(
+            p.rstrip("/").lower() or "/"
+            for p in json.loads(manifest.read_text("utf-8"))
+        )
+    except (OSError, ValueError):
+        return frozenset()
+
+
+frontend_pages = _load_frontend_pages()
+
+
+def _is_frontend_page(path):
+    return (path.rstrip("/").lower() or "/") in frontend_pages
+
+
+def _is_html_navigation():
+    return any(
+        mime == "text/html" and quality > 0
+        for mime, quality in request.accept_mimetypes
+    ) and request.headers.get("Sec-Fetch-Dest", "") in {"", "document", "iframe"}
+
+
+@app.before_request
+def serve_frontend_page():
+    if request.method not in {"GET", "HEAD"} or not _is_frontend_page(request.path):
+        return None
+    g.frontend_page = True
+    if _is_html_navigation():
+        return send_from_directory(app.static_folder, "index.html")
+
+
+@app.after_request
+def vary_frontend_response(response):
+    if g.get("frontend_page"):
+        response.vary.update(("Accept", "Sec-Fetch-Dest"))
+    return response
 
 
 @app.before_request
@@ -708,7 +847,10 @@ def serialize_configuration_requests():
     ):
         backup_lock.acquire()
         g.configuration_locked = True
-    if request.path == "/conf" or request.path.startswith("/device/"):
+    if request.path == "/conf" or (
+        request.path.startswith("/device/")
+        and request.path != "/device/performance-test"
+    ):
         from arknights_mower.__main__ import device_control
 
         device_control.configuration_lock.acquire()
@@ -760,14 +902,27 @@ def serve_resource_overlay():
 
 @app.route("/basement_skill/<filename>")
 def serve_basement_skill(filename):
-    """基建技能 JSON 与当前整包资源一致；内置资源由前端自身加载。"""
-    from arknights_mower.utils.resource_pkg import resource_ui_path
+    """基建技能读取共享数据；其他展示数据由资源包或前端内置资源提供。"""
+    from arknights_mower.utils.res_version import BUILDING_SKILL_DATA
+    from arknights_mower.utils.resource_pkg import resource_pkg_path, resource_ui_path
 
+    if filename == "skill.json":
+        selected = resource_pkg_path(BUILDING_SKILL_DATA)
+        return _serve_resource(selected.parent, selected.name) or ("", 404)
     selected = resource_ui_path("pages/basement_skill", source=True)
     if selected is None:
         return "", 404
     # 直接返回 404，避免全局错误处理器把缺失 JSON 替换成 index.html。
     return _serve_resource(selected, filename) or ("", 404)
+
+
+@app.after_request
+def forbid_caching_sensitive_responses(response):
+    # /conf carries the sign-in password value, so no HTTP cache may retain it. The
+    # static assets below stay cacheable; only this endpoint is marked no-store.
+    if request.path == "/conf":
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.after_request
@@ -824,18 +979,7 @@ def not_found(e):
         except NotFound:
             return "<h1>404 Not Found</h1>", 404
 
-    # 与 Vue 路由表保持一致（routes.test.js 校验）；源码部署兼容尚未重建的 dist。
-    manifest = Path(app.static_folder) / "frontend-routes.json"
-    if not manifest.is_file():
-        manifest = get_path("@internal/ui/public/frontend-routes.json")
-    try:
-        pages = {
-            p.rstrip("/").lower() or "/"
-            for p in json.loads(manifest.read_text("utf-8"))
-        }
-    except (OSError, ValueError):
-        pages = set()
-    if (path.rstrip("/").lower() or "/") in pages:
+    if _is_frontend_page(path):
         return send_from_directory(app.static_folder, "index.html")
 
     # 未知 API 和缺失资源必须保留 404，不能用首页掩盖错误。
@@ -853,11 +997,11 @@ def not_found(e):
         "basement_skill",
         "screenshots",
     }
-    navigation = any(
-        mime == "text/html" and quality > 0
-        for mime, quality in request.accept_mimetypes
-    ) and request.headers.get("Sec-Fetch-Dest", "") in {"", "document", "iframe"}
-    if navigation and root not in api_roots | resource_roots and not Path(path).suffix:
+    if (
+        _is_html_navigation()
+        and root not in api_roots | resource_roots
+        and not Path(path).suffix
+    ):
         # 保留 Vue 的未知页面提示；接口客户端和静态资源请求不进入该兜底。
         return send_from_directory(app.static_folder, "index.html")
     return {"error": "Not Found"}, 404
@@ -1000,6 +1144,101 @@ def device_preflight():
         ).to_dict()
 
 
+@app.route("/device/performance-test", methods=["GET", "POST", "DELETE"])
+@require_token
+def device_performance_test():
+    global mower_thread
+    from arknights_mower.__main__ import device_control
+
+    if request.method == "GET":
+        return _performance_test_status()
+    payload = request.get_json(silent=True)
+    if request.method == "DELETE":
+        with maa_maintenance_lock:
+            status = _performance_test_status()
+            if not isinstance(payload, dict) or set(payload) != {"id"}:
+                return {"message": "请指定要取消的性能测试"}, 400
+            if status.get("id") != payload["id"] or status["status"] != "running":
+                return {"message": "该性能测试已结束或被替换"}, 409
+            performance_test_cancel.set()
+            _report_performance_test({"message": "正在取消测试并退出选人页"})
+            return _performance_test_status()
+    if payload != {}:
+        return {"message": "性能测试使用已保存的设置，请先保存当前配置"}, 400
+    _collect_maa_check_result()
+    with (
+        backup_lock,
+        maa_maintenance_lock,
+        maa_check_lock,
+        device_control.configuration_lock,
+    ):
+        if (
+            shutdown.closing
+            or active_job()
+            or device_control.active
+            or (mower_thread and mower_thread.is_alive())
+            or _job_running(maa_update_job)
+            or _job_running(maa_resource_update_job)
+            or resource_update.running()
+            or maa_check_job["status"] == "running"
+        ):
+            return {"message": "请停止当前任务并等待设备操作结束后测试"}, 409
+        configuration = config.conf.model_copy(deep=True)
+        performance_test_cancel.clear()
+        config.stop_mower.clear()
+        with performance_test_lock:
+            performance_test_job.clear()
+            performance_test_job.update(
+                {
+                    "id": uuid4().hex,
+                    "started_ns": time.time_ns(),
+                    "status": "running",
+                    "phase": "starting",
+                    "recommended_mode": None,
+                    "trials": [],
+                    "message": "正在连接设备",
+                    "device": configuration.device.model_dump(),
+                    "timing": {
+                        key: getattr(configuration, key)
+                        for key in (
+                            "screenshot_interval",
+                            "selection_poll_interval",
+                            "selection_transition_timeout",
+                        )
+                    },
+                }
+            )
+        mower_thread = Thread(
+            target=_run_performance_test, args=(configuration,), daemon=True
+        )
+        # The shared worker slot also gates starts, updates and process shutdown.
+        set_mower_thread(None)
+        try:
+            mower_thread.start()
+        except Exception:
+            mower_thread = None
+            set_mower_thread(None)
+            _report_performance_test(
+                {"status": "failed", "message": "未能启动性能测试"}
+            )
+            raise
+        _cancel_scheduled_start()
+        return _performance_test_status(), 202
+
+
+@app.route("/device/performance-test/screenshot", methods=["GET"])
+@require_token
+def performance_test_screenshot():
+    from arknights_mower.views.screenshot import latest_screenshot_response
+
+    with performance_test_lock:
+        if performance_test_job["status"] != "running" or request.args.get(
+            "id"
+        ) != performance_test_job.get("id"):
+            return {"message": "该性能测试已结束或被替换"}, 404
+        return latest_screenshot_response(after_ns=performance_test_job["started_ns"])
+
+
 @app.route("/device/boss_key", methods=["POST"])
 @require_token
 def device_boss_key():
@@ -1059,7 +1298,26 @@ def load_config():
                 "message": "配置必须是 JSON 对象",
             }, 400
         req = dict(payload)
+        if "ai_assistant_enabled" in req:
+            if req["ai_assistant_enabled"] != config.conf.ai_assistant_enabled:
+                return {
+                    "error": "manager_owned_setting",
+                    "message": "请在实例停止后通过多开管理器修改 Mower AI 助手开关",
+                }, 403
+            req.pop("ai_assistant_enabled")
         from arknights_mower.__main__ import device_control
+
+        if _performance_test_status()["status"] == "running" and set(req) & {
+            "performance_mode",
+            "low_frame_rate_mode",
+            "screenshot_interval",
+            "selection_poll_interval",
+            "selection_transition_timeout",
+        }:
+            return {
+                "error": "performance_test_active",
+                "message": "请等待性能测试结束后修改档位或时间参数",
+            }, 409
 
         if device_control.active or (mower_thread and mower_thread.is_alive()):
             try:
@@ -1182,18 +1440,22 @@ def _save_rescue_plan(plan):
 @app.route("/rescue-plan/validate", methods=["POST"])
 @require_token
 def validate_rescue_plan_route():
-    from arknights_mower.utils.emergency_plan import effective_rescue_plan
+    from arknights_mower.utils.emergency_plan import (
+        effective_rescue_plan,
+        validate_rescue_schedule,
+    )
 
     try:
         data = Operators(build_global_plan())
         error = data.init_and_validate()
         if error:
             return {"success": False, "message": str(error)}
+        validate_rescue_schedule(data, config.conf.automatic_rescue_plan)
         if data.backup_plans or config.conf.automatic_rescue_plan.backup_plans:
             return {
                 "success": True,
                 "status": "incomplete",
-                "message": "排班含副表条件，设施类型、等级及产物需在初始化实测后，按双方生效排班核验；当前静态验证不能确认是否可进入救急。",
+                "message": "救急表自身校验通过；排班含副表条件，设施类型、等级及产物仍需在初始化实测后按双方生效排班核验。",
             }
         effective_rescue_plan(data, config.conf.automatic_rescue_plan)
     except (ValueError, TypeError) as exc:
@@ -1392,7 +1654,12 @@ def get_status():
     with scheduled_start_lock:
         start_at = scheduled_start_at.isoformat() if scheduled_start_at else None
     response = {
-        "auto_start_handled": bool(os.environ.get("MOWER_RESTART_JOB")),
+        "ai_assistant_enabled": app.config["AI_ASSISTANT_ENABLED"],
+        "desktop_startup_handled": bool(app.config.get("DESKTOP_STARTUP_HANDLED")),
+        "auto_start_handled": bool(
+            app.config.get("DESKTOP_STARTUP_HANDLED")
+            or os.environ.get("MOWER_RESTART_JOB")
+        ),
         "plan_condition": [],
         "status": "stopped",
         "scheduled_start_at": start_at,
@@ -1667,7 +1934,20 @@ def diagnostic_timeline():
         center = datetime.datetime.fromtimestamp(timestamp / 1000)
     except (OverflowError, OSError, ValueError):
         return {"error": "请选择有效的查看时间"}, 400
-    return {"logs": timeline(get_path("@app/log"), get_path("@app/screenshot"), center)}
+    screenshot_folder = get_path("@app/screenshot")
+    images = screenshots_between(
+        screenshot_folder,
+        center - datetime.timedelta(minutes=5),
+        center + datetime.timedelta(minutes=5),
+    )
+    rows = timeline(
+        get_path("@app/log"), screenshot_folder, center, limit=1001, images=images
+    )
+    return {
+        "logs": rows[-1000:],
+        "screenshots": [relative for _, relative in images],
+        "truncated": len(rows) > 1000,
+    }
 
 
 @app.route("/diagnostics/errors")
@@ -1949,7 +2229,7 @@ def upload_sss_copilot():
         else:
             return {"exists": False}
     else:
-        print(request.files)
+        logger.debug("上传保全派驻作业：%s", request.files)
         data = request.files["copilot"]
         data.save(copilot)
         data.seek(0)
@@ -1988,12 +2268,24 @@ def save_file_dialog():
 
     upper = Image.open(img)
 
-    if request.args.get("rescue") == "1":
+    if "plan" in request.form:
+        from arknights_mower.utils.config.plan import parse_plan_document
+
+        try:
+            plan_data = parse_plan_document(
+                json.loads(request.form["plan"])
+            ).model_dump(exclude_none=True)
+        except (ValueError, TypeError):
+            return {"error": "导出排班快照格式无效"}, 400
+    elif request.args.get("rescue") == "1":
         plan_data = config.conf.automatic_rescue_plan.model_dump(exclude_none=True)
     else:
         plan_data = config.plan.model_dump(exclude_none=True)
         plan_data["advanced_settings"] = export_advanced_settings(config.conf)
-    img = qrcode.export(plan_data, upper, config.conf.theme)
+    theme = request.form.get("theme", config.conf.theme)
+    if theme not in ("light", "dark"):
+        return {"error": "导出主题无效"}, 400
+    img = qrcode.export(plan_data, upper, theme)
     buffer = BytesIO()
     img.save(buffer, format="JPEG")
     buffer.seek(0)
@@ -2018,9 +2310,6 @@ def validate_backup_plans_route():
     try:
         global_plan = build_global_plan()
         op = Operators(global_plan)
-        validation_msg = op.init_and_validate()
-        if validation_msg is not None:
-            return {"success": False, "status": "failed", "message": validation_msg}
         result = op.validate_backup_plans()
         return result
     except Exception as e:
@@ -2037,7 +2326,12 @@ def validate_backup_plans_route():
 def get_maa_adb_version():
     from arknights_mower.__main__ import device_control
 
+    if _performance_test_status()["status"] == "running":
+        return {"status": "error", "message": "请等待游戏内性能测试结束后测试 MAA"}
+
     with maa_check_lock:
+        if _performance_test_status()["status"] == "running":
+            return {"status": "error", "message": "请等待游戏内性能测试结束后测试 MAA"}
         _collect_maa_check_result()
         if maa_check_job["status"] == "running":
             return {
@@ -2522,11 +2816,6 @@ def check_maa_resource_update():
     ).strip()
     if source not in {"github", "mirrorchyan"}:
         return {"ok": False, "message": "未知的 MAA 资源更新源"}
-    if os.environ.get("MOWER_ANDROID") == "1" and source == "mirrorchyan":
-        return {
-            "ok": False,
-            "message": "Android 暂不支持 Mirror酱，请使用 GitHub 官方源",
-        }
     if source == "mirrorchyan" and not mirror_token:
         return {"ok": False, "message": "请填写 Mirror酱 CDK"}
 
@@ -2589,11 +2878,6 @@ def start_maa_resource_update():
         return {"ok": False, "message": "请先下载并设置有效的 MAA 目录"}
     if source not in {"github", "mirrorchyan"}:
         return {"ok": False, "message": "未知的 MAA 资源更新源"}
-    if os.environ.get("MOWER_ANDROID") == "1" and source == "mirrorchyan":
-        return {
-            "ok": False,
-            "message": "Android 暂不支持 Mirror酱，请使用 GitHub 官方源",
-        }
     if source == "mirrorchyan" and not mirror_token:
         return {"ok": False, "message": "请填写 Mirror酱 CDK"}
     if source == "mirrorchyan" and mirror_token != config.conf.maa_mirrorchyan_token:
@@ -2618,7 +2902,8 @@ def start_maa_resource_update():
                 check_id,
             )
             try:
-                newer = parse_resource_version(checked_latest) > parse_resource_version(
+                published = parse_resource_version(checked_latest)
+                newer = not current_version or published > parse_resource_version(
                     current_version
                 )
             except MaaUpdateError:
@@ -2672,12 +2957,23 @@ def get_maa_conn_presets():
     config_path = os.path.join(
         resolve_config_path(config.conf.maa_path), "resource", "config.json"
     )
-    if not os.path.exists(config_path):
-        logger.warning(f"MAA 配置文件不存在，返回空预设: {config_path}")
-        return []
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             presets = [item["configName"] for item in json.load(f)["connection"]]
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "message": f"MAA 连接配置文件不存在：{config_path}。请更新 MAA 资源或重新安装完整的 MAA。",
+        }
+    except PermissionError:
+        message = f"无法读取 MAA 连接配置 {config_path}：访问被拒绝。请关闭外部 MAA 后重试，并检查当前用户的文件读取权限。"
+        logger.warning(message)
+        return {"ok": False, "message": message}
+    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
+        return {
+            "ok": False,
+            "message": f"MAA 连接配置文件格式无效：{config_path}。请更新 MAA 资源或重新安装完整的 MAA。",
+        }
     except Exception as e:
         logger.exception(e)
         presets = []
@@ -2729,6 +3025,94 @@ def getTradingHistory():
     from arknights_mower.solvers import record
 
     return record.get_trading_history(start_date, end_date)
+
+
+@app.route("/report/recycling_history")
+@require_token
+def get_recycling_history():
+    from arknights_mower.solvers import record
+
+    today = datetime.datetime.now().date()
+    try:
+        return record.get_recycling_history(
+            request.args.get("startDate", str(today - datetime.timedelta(days=29))),
+            request.args.get("endDate", str(today)),
+            int(request.args.get("page", 1)),
+            int(request.args.get("pageSize", 50)),
+        )
+    except (ValueError, OverflowError) as exc:
+        return {"error": str(exc)}, 400
+
+
+@app.route("/report/recycling_settings", methods=["GET", "PUT", "DELETE"])
+@require_token
+def recycling_settings():
+    from arknights_mower.solvers import record
+
+    try:
+        if request.method == "DELETE":
+            return record.update_recycling_valuation(reset=True)
+        if request.method == "PUT":
+            from arknights_mower.utils.recycling_valuation import validate_ratios
+
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict) or "ratios" not in payload:
+                raise ValueError("请提供产物价值比例")
+            return record.update_recycling_valuation(
+                ratios=validate_ratios(payload["ratios"]),
+                base_algorithm=payload.get("base_algorithm"),
+            )
+        return record.get_recycling_valuation()
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+
+@app.route("/report/recycling_settings/import", methods=["POST"])
+@require_token
+def import_recycling_values():
+    from arknights_mower.solvers import record
+    from arknights_mower.utils.recycling_valuation import (
+        MAX_IMPORT_BYTES,
+        import_yituliu_values,
+    )
+
+    if request.content_length and request.content_length > MAX_IMPORT_BYTES + 65536:
+        return {"error": "请导入不超过 2 MiB 的一图流物品价值表 Excel"}, 400
+    upload = request.files.get("file")
+    if upload is None or not (upload.filename or "").lower().endswith(".xlsx"):
+        return {"error": "请选择一图流导出的 .xlsx 物品价值表"}, 400
+    try:
+        imported = import_yituliu_values(upload.stream.read(MAX_IMPORT_BYTES + 1))
+        return record.update_recycling_valuation(imported=imported)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+
+@app.route("/report/recycling_history/export")
+@require_token
+def export_recycling_history():
+    from arknights_mower.solvers import record
+
+    today = datetime.datetime.now().date()
+    start = request.args.get("startDate", str(today - datetime.timedelta(days=29)))
+    end = request.args.get("endDate", str(today))
+    try:
+        workbook = record.export_recycling_history(start, end)
+    except (ValueError, OverflowError) as exc:
+        return {"error": str(exc)}, 400
+    try:
+        response = send_file(
+            workbook,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=f"回收站材料统计-{start}-{end}.xlsx",
+            max_age=0,
+        )
+        response.call_on_close(workbook.close)
+        return response
+    except BaseException:
+        workbook.close()
+        raise
 
 
 @app.route("/record/clear-data", methods=["DELETE"])
@@ -3128,7 +3512,10 @@ def mastery_recommendation_debug():
 def mastery_recommendation():
     from arknights_mower.utils.mastery_recommendation import get_mastery_recommendations
 
-    return get_mastery_recommendations()
+    return get_mastery_recommendations(
+        include_materials=request.args.get("materials") != "0",
+        char_id=request.args.get("char_id"),
+    )
 
 
 @app.route("/growth-survey", methods=["GET"])
@@ -3162,13 +3549,13 @@ def growth_sync_token():
 @app.route("/growth-sync", methods=["POST"])
 @require_token
 def growth_sync():
-    from arknights_mower.utils.yituliu_sync import sync_cached_operators
+    from arknights_mower.utils.yituliu_sync import refresh_and_sync_operators
 
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict) or payload.get("confirmed") is not True:
         return {"message": "请在设置中明确选择立即同步"}, 400
     try:
-        return sync_cached_operators()
+        return refresh_and_sync_operators()
     except ValueError as exc:
         return {"success": False, "message": str(exc)}, 400
     except OSError:
@@ -3238,6 +3625,20 @@ def growth_crafting_order():
         return {"error": str(exc)}, 400
 
 
+def current_workshop_status():
+    from arknights_mower.__main__ import base_scheduler
+    from arknights_mower.utils.workshop_status import workshop_status
+
+    running = bool(mower_thread and mower_thread.is_alive())
+    return workshop_status(base_scheduler if running else None, running=running)
+
+
+@app.route("/workshop-status", methods=["GET"])
+@require_token
+def get_workshop_status():
+    return current_workshop_status()
+
+
 @app.route("/workshop-auto-config", methods=["POST"])
 def workshop_auto_config():
     import traceback
@@ -3249,12 +3650,13 @@ def workshop_auto_config():
         fodder_ops = req.get("fodder_operators", config.conf.fodder_operators)
         t5_ops = req.get("t5_operators", config.conf.t5_operators)
         book_ops = req.get("book_operators", config.conf.book_operators)
-        return update_workshop_config(
+        result = update_workshop_config(
             explicit=True,
             fodder_operators=fodder_ops,
             t5_operators=t5_ops,
             book_operators=book_ops,
         )
+        return {**result, "crafting_status": current_workshop_status()}
     except Exception as e:
         return {"error": str(e), "traceback": traceback.format_exc()}, 500
 
@@ -3360,6 +3762,14 @@ def basement_skill_operators():
     return load_skill_snapshot()
 
 
+@app.route("/riic/income-cache", methods=["GET"])
+@require_token
+def riic_income_cache():
+    from arknights_mower.utils.building_skills import load_income_cache
+
+    return load_income_cache()
+
+
 @app.route("/cultivate-fetch")
 @require_token
 def cultivate_fetch():
@@ -3367,7 +3777,7 @@ def cultivate_fetch():
 
     try:
         syncer = cultivate()
-        if not syncer.start():
+        if not syncer.start(force_inventory=True):
             return {
                 "success": False,
                 "message": "未同步到干员数据，请检查森空岛账号及官服/B服选择",
@@ -3533,6 +3943,17 @@ def submit_feedback():
 def ws_chat(ws):
     if not _authorize_websocket(ws):
         return
+    if not app.config["AI_ASSISTANT_ENABLED"]:
+        ws.send(
+            json.dumps(
+                {
+                    "error": "当前实例暂未开启该功能，请联系管理员。",
+                    "code": "ai_assistant_disabled",
+                }
+            )
+        )
+        ws.close(reason=4403, message="AI assistant disabled")
+        return
     context = []
     while True:
         try:
@@ -3565,6 +3986,7 @@ def ws_chat(ws):
                     last_reply = reply
                 if last_reply:
                     context.append({"role": "assistant", "content": reply})
+                ws.send(json.dumps({"done": True}))
         except (ConnectionClosed, OSError):
             break
         except Exception as e:

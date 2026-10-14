@@ -35,7 +35,7 @@ export const routes = [
       {
         path: 'maasettings',
         component: () => import('@/pages/maasettings.vue'),
-        meta: { title: 'MAA设置' },
+        meta: { title: '日常设置' },
         name: 'maasettings'
       },
       {
@@ -88,6 +88,12 @@ export const routes = [
             component: () => import('@/pages/trading_analysis.vue'),
             meta: { title: '贸易订单分析' },
             name: 'trading_analysis'
+          },
+          {
+            path: 'recycling',
+            component: () => import('@/pages/RecyclingStats.vue'),
+            meta: { title: '回收站材料统计' },
+            name: 'recycling'
           },
           {
             path: 'log-schedule',

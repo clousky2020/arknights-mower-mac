@@ -30,7 +30,7 @@ from arknights_mower.utils.device.session import (  # noqa: E402
 )
 from arknights_mower.utils.device.touch_backend import TouchFailure  # noqa: E402
 from arknights_mower.utils.logic_expression import LogicExpression  # noqa: E402
-from arknights_mower.utils.operators import Operator  # noqa: E402
+from arknights_mower.utils.operators import Operator, Operators  # noqa: E402
 from arknights_mower.utils.plan import Plan, PlanConfig, Room  # noqa: E402
 from arknights_mower.utils.recognize import (  # noqa: E402
     RecognizeError,
@@ -78,6 +78,7 @@ class TestIdleSimulatorWake(unittest.TestCase):
         self.solver = object.__new__(BaseSchedulerSolver)
         self.solver._simulator_closed_for_idle = False
         self.solver.device = MagicMock()
+        self.solver.device.session_control = None
         self.solver.recog = MagicMock()
         self.now = datetime(2026, 9, 5, 13, 0)
         self.wake = Event()
@@ -239,6 +240,9 @@ class TestMoodInitialization(unittest.TestCase):
         scheduler.rest_until_next_task.side_effect = base_schedule.MowerExit
         self.initialize.return_value = scheduler
         with (
+            patch(
+                "arknights_mower.solvers.trust_rotation.run_trust_rotation"
+            ) as trust_rotation,
             patch.object(self.main.NewsChecker, "get_maintenance", return_value=None),
             patch.object(self.main, "refresh_resource_at_boundary"),
             patch.object(
@@ -262,6 +266,9 @@ class TestMoodInitialization(unittest.TestCase):
         scheduler.recruit_plan_solver.assert_called_once()
         scheduler.mower_plan_solver.assert_called_once()
         scheduler.maa_plan_solver.assert_called_once()
+        trust_rotation.assert_called_once_with(
+            scheduler.device, scheduler.recog, scheduler.tasks[0].time
+        )
 
     def test_fresh_start_defers_backup_plan_until_mood_read(self):
         scheduler = MagicMock()
@@ -347,6 +354,7 @@ class TestMoodInitialization(unittest.TestCase):
             "operators": {},
             "dorm": [],
             "facility_states": {},
+            "room_observations": {"room_1_1": 3},
             "party_time": None,
             "daily_visit_friend": date.min,
             "daily_report": date.min,
@@ -355,6 +363,10 @@ class TestMoodInitialization(unittest.TestCase):
             "task_count": 0,
         }
         self.main.simulate(saved)
+        self.assertEqual(scheduler.op_data.room_observations, {"room_1_1": 3})
+        self.assertIsNot(
+            scheduler.op_data.room_observations, saved["room_observations"]
+        )
         scheduler.backup_plan_solver.assert_called_once_with()
         scheduler.run.assert_called_once_with()
 
@@ -1749,7 +1761,7 @@ class TestBaseScheduler(unittest.TestCase):
     def test_agent_get_mood_freezes_trainee_slot_when_locked_and_following_schedule(
         self,
     ):
-        # 训练室锁定但开启协助位跟随：训练位保持 Current，仅协助位纠错
+        # 保护生效后整房跳过，协助位跟随不保留纠错目标。
         solver = self._train_mismatch_solver(["褐果", "桃金娘"])
         locked_room = mastery_reader.RoomState(
             "training", mastery_reader.RoomPanel(countdown_state="active")
@@ -1771,10 +1783,7 @@ class TestBaseScheduler(unittest.TestCase):
         task = next(
             (t for t in solver.tasks if t.type == TaskTypes.SELF_CORRECTION), None
         )
-        self.assertIsNotNone(task)
-        self.assertIn("train", task.plan)
-        self.assertEqual(task.plan["train"][1], "Current")
-        self.assertEqual(task.plan["train"][0], "褐果")
+        self.assertIsNone(task)
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
     def test_train_mastery_active_signals(self):
@@ -2051,9 +2060,8 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         )
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_stale_active_empty_room_resets_db_and_proceeds(self):
-        """死锁修复核心：DB active 不再整房跳过——照常进房读屏幕，截图权威把过期
-        active 重置 idle，空闲×未保护 → 正常安排。"""
+    def test_active_mastery_defers_room_reconciliation_to_mastery(self):
+        """活跃专精的状态校正交由专精流程，排班不进入受保护房间。"""
         plan = {"train": ["干员A", "干员B"]}
         solver = self._make_solver(plan)
         stale = {"id": 7, "status": "training"}
@@ -2076,9 +2084,9 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
             ),
         ):
             result = solver.agent_arrange_room({}, "train", plan)
-        solver.enter_room.assert_called_with("train")
-        upd.assert_called_once_with(7, "idle")  # 截图权威：过期 active → idle
-        solver.turn_on_room_detail.assert_called_with("train")  # 未早退跳过
+        solver.enter_room.assert_not_called()
+        upd.assert_not_called()
+        solver.turn_on_room_detail.assert_not_called()
         self.assertEqual(result, {})
         self.assertNotIn("train", plan)  # 排班正常完成
 
@@ -2104,7 +2112,7 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         self.assertEqual(result, {})
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_locked_room_freezes_train_slot_when_following_schedule(self):
+    def test_locked_room_skips_when_following_schedule(self):
         plan = {"train": ["干员A", "干员B"]}
         solver = self._make_solver(plan)
         with (
@@ -2117,12 +2125,10 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
             patch("arknights_mower.solvers.mastery_reader.reconcile_short"),
         ):
             result = solver.agent_arrange_room({}, "train", plan)
-        solver.back.assert_called_once_with(0.5)  # 冻结不早退；仅排班收尾 back
+        solver.back.assert_called_once_with()
         solver.refresh_current_room.assert_not_called()
-        solver.choose_train.assert_called_once_with(
-            ["干员A", "Current"], fast_mode=True, choose_error=0
-        )
-        solver.turn_on_room_detail.assert_called_with("train")
+        solver.choose_train.assert_not_called()
+        solver.turn_on_room_detail.assert_not_called()
         self.assertEqual(result, {})
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
@@ -2148,9 +2154,8 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         self.assertNotIn("train", plan)
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_enable_mastery_off_keeps_blocked_room_check_no_reconcile(self):
-        """§7.3：OFF 时排班照常但保留「被占用就不硬塞」防卡检查——锁定房仍跳过，
-        但不跑 reconcile（自动收取/对账全停）。"""
+    def test_enable_mastery_off_keeps_busy_trainee_and_arranges_assistant(self):
+        """自动专精关闭时仅跳过训练位，协助位正常换班且不执行专精核对。"""
         plan = {"train": ["干员A", "干员B"]}
         solver = self._make_solver(plan)
         with (
@@ -2166,7 +2171,10 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         ):
             solver.agent_arrange_room({}, "train", plan)
         rec.assert_not_called()
-        solver.back.assert_called_once_with()
+        solver.turn_on_room_detail.assert_called_once_with("train")
+        solver.choose_train.assert_called_once_with(
+            ["干员A", "Current"], fast_mode=True, choose_error=0
+        )
         self.assertNotIn("train", plan)
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
@@ -2211,8 +2219,8 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         self.assertNotIn("train", plan)  # 锁定 → 跳过
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_gate_waiting_collect_collected_no_reread(self):
-        """#210：reconcile 收集后 gate 复用 ① 槽位 + 状态设空闲 + 重算保护，不再重读。"""
+    def test_gate_waiting_collect_skips_without_collecting(self):
+        """待收取状态交由专精处理，排班跳过整房。"""
         plan = {"train": ["干员A", "干员B"]}
         solver = self._make_solver(plan)
         wc = mastery_reader.RoomState("waiting_collect", mastery_reader.RoomPanel())
@@ -2233,7 +2241,7 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         ):
             result = solver.agent_arrange_room({}, "train", plan)
         self.assertEqual(mock_read.call_count, 1)  # 收集后不再重读
-        solver.turn_on_room_detail.assert_called_with("train")  # 状态设空闲 → 正常安排
+        solver.turn_on_room_detail.assert_not_called()
         self.assertEqual(result, {})
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
@@ -2291,8 +2299,8 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         self.assertEqual(result, {})
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_gate_collected_no_slots_read_rereads(self):
-        """#210 review：TRAIN_FINISH 横幅页首次进房未读槽位，收集后重读拿进驻数据+保护。"""
+    def test_gate_waiting_collect_without_slots_skips(self):
+        """待收取页面未读槽位时也不由排班收取训练。"""
         plan = {"train": ["干员A", "干员B"]}
         solver = self._make_solver(plan)
         wc = mastery_reader.RoomState("waiting_collect", mastery_reader.RoomPanel())
@@ -2312,13 +2320,13 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
             ),
         ):
             result = solver.agent_arrange_room({}, "train", plan)
-        self.assertEqual(mock_read.call_count, 2)  # ① + 收集后重读
-        solver.turn_on_room_detail.assert_called_with("train")  # 重读后空闲 → 正常安排
+        self.assertEqual(mock_read.call_count, 1)
+        solver.turn_on_room_detail.assert_not_called()
         self.assertEqual(result, {})
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_gate_read_failure_freezes_train_slot_when_following(self):
-        """#211：读失败（room_state=None）保守冻结训练位，替代已删的 train_slot_locked。"""
+    def test_gate_read_failure_skips_room_when_following(self):
+        """训练室读取失败时跳过整房。"""
         plan = {"train": ["干员A", "干员B"]}
         solver = self._make_solver(plan)
         with (
@@ -2331,9 +2339,7 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         ):
             result = solver.agent_arrange_room({}, "train", plan)
         solver.refresh_current_room.assert_not_called()
-        solver.choose_train.assert_called_once_with(
-            ["干员A", "Current"], fast_mode=True, choose_error=0
-        )
+        solver.choose_train.assert_not_called()
         self.assertEqual(result, {})
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
@@ -2819,46 +2825,70 @@ class TestDroneAccelerate(unittest.TestCase):
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
     def test_infra_main_keeps_run_order_task_alive_across_two_passes(self):
-        """#907：无人机加速失败后跑单任务不被消费、计划保持非空。
-
-        真实路径是 agent_arrange_room 会 del plan[room] 清空 self.task.plan；若
-        drone() 失败仅保留任务而不恢复计划，下一轮该空计划任务会绕过排班分支在
-        infra_main 被误消费。本测试连续两轮验证任务留存且计划被恢复。
-        """
+        """无人机失败保留同一任务，下一轮只恢复实测原班后消费。"""
+        room = "room_1_1"
+        original = ["干员"]
         task = SchedulerTask(
             time=datetime.now(),
-            task_plan={"trading_1": ["干员"]},
+            task_plan={room: ["但书"]},
             task_type=TaskTypes.RUN_ORDER,
+            meta_data=room,
             adjusted=True,  # 强制走「开始插拔」无人机跑单分支
         )
         solver = BaseSchedulerSolver()
         solver.error = False
         solver.tasks = [task]
-        solver.op_data = SimpleNamespace(dorm=[], operators={}, plan={})
+        solver.op_data = SimpleNamespace(
+            dorm=[], operators={}, plan={}, all_dorms=lambda: []
+        )
+        solver.op_data.arrangement_group_transitions = (
+            Operators.arrangement_group_transitions.__get__(solver.op_data)
+        )
+        arrangements = []
+        original_time = task.time
 
         def fake_arrange_room(new_plan, room, plan, get_time=False):
+            arrangements.append(plan[room].copy())
+            inserting = bool(task.meta_data)
+            if inserting:
+                task.run_order_original_roster = {room: original.copy()}
+                task.run_order_restore_pending = True
             del plan[room]  # 与真实 agent_arrange_room 一致：清空 self.task.plan
-            return {room: ["干员"]}
+            return {room: original.copy()} if inserting else {}
 
-        for _ in range(2):  # 连续两轮，验证第二轮不被误消费
+        with (
+            patch.object(solver, "find", return_value=((0, 0), (10, 10))),
+            patch.object(
+                solver, "agent_arrange_room", side_effect=fake_arrange_room
+            ) as arrange_room,
+            patch.object(solver, "drone", side_effect=RecognizeError("boom")) as drone,
+            patch.object(base_schedule, "save_exception"),
+        ):
             solver.task = task
             solver.refresh_connecting = True  # 跳过 run_order_grandet_mode 提前返回
-            with (
-                patch.object(solver, "find", return_value=((0, 0), (10, 10))),
-                patch.object(
-                    solver, "agent_arrange_room", side_effect=fake_arrange_room
-                ) as arrange_room,
-                patch.object(
-                    solver, "drone", side_effect=RecognizeError("boom")
-                ) as drone,
-                patch.object(base_schedule, "save_exception"),
-            ):
-                solver.infra_main()
+            solver.infra_main()
             arrange_room.assert_called_once()
-            drone.assert_called_once_with("trading_1", not_customize=True)
-            self.assertEqual(solver.tasks, [task])  # 任务未被消费
-            self.assertEqual(task.plan, {"trading_1": ["干员"]})  # 计划已恢复
-        self.assertTrue(solver.error)  # 失败已置位，走既有退避
+            drone.assert_called_once_with(room, not_customize=True)
+            self.assertEqual(solver.tasks, [task])
+            self.assertEqual(task.plan, {room: original})
+            self.assertEqual(task.meta_data, "")
+            self.assertTrue(task.run_order_restore_pending)
+            self.assertFalse(solver.error)
+            self.assertFalse(hasattr(task, "execution_failure"))
+            self.assertEqual(task.time, original_time)
+            self.assertIs(find_next_task(solver.tasks), task)
+
+            solver.task = task
+            solver.infra_main()
+
+            self.assertEqual(arrange_room.call_count, 2)
+            drone.assert_called_once_with(room, not_customize=True)
+        self.assertEqual(arrangements, [["但书"], original])
+        self.assertEqual(solver.tasks, [])
+        self.assertEqual(task.plan, {})
+        self.assertFalse(getattr(task, "run_order_restore_pending", False))
+        self.assertFalse(hasattr(task, "run_order_original_roster"))
+        self.assertFalse(solver.error)
 
 
 if __name__ == "__main__":
@@ -3014,6 +3044,7 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
             task_type=TaskTypes.RUN_ORDER,
             meta_data=room,
         )
+        solver.tasks = [solver.task]
         solver.op_data = MagicMock()
         solver.op_data.run_order_rooms = {room: ["但书"]}
         solver.op_data.get_current_room.return_value = ["旧干员"]
@@ -3022,6 +3053,7 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         solver.recog.h = 1080
         solver.waiting_scene = []
         solver.enter_room = MagicMock()
+        solver.back_to_infrastructure = MagicMock()
         solver.turn_on_room_detail = MagicMock()
         solver.refresh_current_room = MagicMock(return_value=["旧干员"])
         solver.ensure_dorm_recovery_order = MagicMock(return_value=False)
@@ -3031,9 +3063,15 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
             side_effect=lambda *_args, **_kw: events.append("choose")
         )
         solver.tap_confirm = MagicMock(side_effect=lambda *_: events.append("confirm"))
-        solver.get_agent_from_room = MagicMock(
-            side_effect=lambda *_: events.append("verify") or [{"agent": target}]
-        )
+
+        def read_room(*_):
+            if not solver.choose_agent.call_count:
+                events.append("roster")
+                return [{"agent": "旧干员"}]
+            events.append("verify")
+            return [{"agent": target}]
+
+        solver.get_agent_from_room = MagicMock(side_effect=read_room)
         solver.get_order_remaining_time = MagicMock(
             side_effect=lambda: events.append("countdown") or 120
         )
@@ -3059,7 +3097,16 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["detail", "countdown", "back", "detail", "choose", "confirm", "verify"],
+            [
+                "detail",
+                "roster",
+                "countdown",
+                "back",
+                "detail",
+                "choose",
+                "confirm",
+                "verify",
+            ],
         )
         solver.get_order_remaining_time.assert_called_once_with()
         solver.sleep.assert_called_once_with(90.0)
@@ -3166,13 +3213,11 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
     def test_adjusted_order_can_continue_with_out_of_range_countdown(self):
         solver, room, events = self.make_solver()
         solver.task.adjusted = True
-        original_time = solver.task.time
         solver.get_order_remaining_time.side_effect = lambda: (
             events.append("countdown") or 900
         )
         solver.agent_arrange_room({}, room, solver.task.plan)
-        self.assertEqual(solver.task.time, original_time)
-        self.assertEqual(events, ["choose", "confirm", "verify"])
+        self.assertEqual(events, ["roster", "choose", "confirm", "verify"])
         solver.get_order_remaining_time.assert_not_called()
         self.assertEqual(solver.turn_on_room_detail.call_count, 1)
         solver.reset_room_time.assert_not_called()
@@ -3235,7 +3280,7 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         self.conf.run_order_buffer_time = 0
         solver, room, events = self.make_solver()
         solver.agent_arrange_room({}, room, solver.task.plan)
-        self.assertEqual(events, ["choose", "confirm", "verify"])
+        self.assertEqual(events, ["roster", "choose", "confirm", "verify"])
         solver.get_order_remaining_time.assert_not_called()
 
     def test_restoring_original_operators_does_not_read_before_check_in(self):
@@ -3246,57 +3291,84 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         solver.choose_agent.assert_called_once()
         solver.get_order_remaining_time.assert_not_called()
 
-    def test_unchanged_operators_do_not_read_before_check_in(self):
+    def test_observed_trade_operators_cancel_stale_insertion_before_countdown(self):
         solver, room, _ = self.make_solver()
         solver.op_data.get_current_room.return_value = ["但书"]
-        solver.agent_arrange_room({}, room, solver.task.plan)
+        solver.get_agent_from_room.side_effect = None
+        solver.get_agent_from_room.return_value = [{"agent": "但书"}]
+        result = solver.agent_arrange_room({}, room, solver.task.plan)
+        self.assertIs(result, False)
+        self.assertEqual(solver.task.plan, {})
+        self.assertTrue(
+            any(task.type == TaskTypes.NOT_SPECIFIC for task in solver.tasks)
+        )
+        solver.get_agent_from_room.assert_called_once_with(room)
         solver.choose_agent.assert_not_called()
         solver.get_order_remaining_time.assert_not_called()
 
-    def test_selection_retry_does_not_reread_countdown(self):
+    def test_selection_failure_preserves_roster_without_repeated_insertion(self):
         solver, room, _ = self.make_solver()
-        solver.choose_agent.side_effect = [RuntimeError("选人失败"), None]
-        solver.scene.return_value = Scene.INFRA_MAIN
-        solver.get_agent_from_room.side_effect = [
-            [{"agent": "旧干员"}],  # 确认失败后的实际驻员
-            [{"agent": "旧干员"}],  # 重试复核
-            [{"agent": "但书"}],
-        ]
+        solver.choose_agent.side_effect = RuntimeError("选人失败")
         with patch.object(base_schedule, "save_exception"):
-            result = solver.agent_arrange_room({}, room, solver.task.plan)
-        self.assertEqual(result, {room: ["旧干员"]})
-        self.assertEqual(solver.choose_agent.call_count, 2)
+            with self.assertRaisesRegex(RuntimeError, "选人失败"):
+                solver.agent_arrange_room({}, room, solver.task.plan)
+        solver.choose_agent.assert_called_once()
+        solver.tap_confirm.assert_not_called()
+        solver.get_agent_from_room.assert_called_once_with(room)
         solver.get_order_remaining_time.assert_called_once_with()
+        self.assertEqual(solver.task.run_order_original_roster, {room: ["旧干员"]})
+        self.assertTrue(solver.task.run_order_restore_pending)
 
-    def test_selection_feedback_error_is_counted_at_room_retry_boundary(self):
+    def test_order_selection_feedback_error_is_counted_without_retry(self):
         solver, room, _ = self.make_solver()
-        solver.choose_agent.side_effect = [
-            AgentSelectionNotReady("排序反馈未到"),
-            None,
-        ]
-        solver.scene.return_value = Scene.INFRA_MAIN
-        solver.get_agent_from_room.side_effect = [
-            [{"agent": "旧干员"}],
-            [{"agent": "旧干员"}],
-            [{"agent": "但书"}],
-        ]
+        solver.choose_agent.side_effect = AgentSelectionNotReady("排序反馈未到")
         with (
             patch.object(base_schedule, "save_exception"),
             patch.object(BaseSchedulerSolver, "record_selection_failure") as failure,
             patch.object(BaseSchedulerSolver, "record_selection_success") as success,
         ):
-            solver.agent_arrange_room({}, room, solver.task.plan)
+            with self.assertRaisesRegex(AgentSelectionNotReady, "排序反馈未到"):
+                solver.agent_arrange_room({}, room, solver.task.plan)
         failure.assert_called_once_with()
-        success.assert_called_once_with()
+        success.assert_not_called()
+        solver.choose_agent.assert_called_once()
+        solver.tap_confirm.assert_not_called()
+        self.assertTrue(solver.task.run_order_restore_pending)
 
-    def test_confirm_error_reconciled_as_success_clears_selection_failure(self):
+    def test_order_confirm_error_is_counted_without_repeated_insertion(self):
         solver, room, _ = self.make_solver()
         solver.tap_confirm.side_effect = RecognizeError(
             "干员确认点击未生效，返回房间重试"
         )
+        with (
+            patch.object(base_schedule, "save_exception"),
+            patch.object(BaseSchedulerSolver, "record_selection_failure") as failure,
+            patch.object(BaseSchedulerSolver, "record_selection_success") as success,
+        ):
+            with self.assertRaisesRegex(RecognizeError, "干员确认点击未生效"):
+                solver.agent_arrange_room({}, room, solver.task.plan)
+
+        failure.assert_called_once_with()
+        success.assert_not_called()
+        solver.choose_agent.assert_called_once()
+        solver.tap_confirm.assert_called_once()
+        solver.get_agent_from_room.assert_called_once_with(room)
+        self.assertEqual(solver.task.run_order_original_roster, {room: ["旧干员"]})
+        self.assertTrue(solver.task.run_order_restore_pending)
+
+    def test_confirm_error_reconciled_as_success_clears_selection_failure(self):
+        solver, room, _ = self.make_solver(target="目标干员")
+        solver.task.type = TaskTypes.SHIFT_ON
+        solver.task.meta_data = ""
+        solver.op_data.run_order_rooms = {}
+        solver._can_refresh_idle_dorm_search = MagicMock(return_value=False)
+        solver.tap_confirm.side_effect = RecognizeError(
+            "干员确认点击未生效，返回房间重试"
+        )
         solver.scene.return_value = Scene.INFRA_MAIN
-        solver.get_agent_from_room.return_value = [{"agent": "但书"}]
-        solver.get_agent_from_room.side_effect = None
+        solver.get_agent_from_room.side_effect = [
+            [{"agent": "目标干员"}],
+        ]
 
         with (
             patch.object(base_schedule, "save_exception"),
@@ -3344,11 +3416,21 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         solver.scene = MagicMock(return_value=Scene.INFRA_DETAILS)
         solver.find = MagicMock(return_value=None)
 
-        solver.agent_arrange(task.plan)
+        with patch(
+            "arknights_mower.solvers.mastery_support_runtime.refresh_after_central_change",
+            side_effect=lambda *_: events.append("refresh"),
+        ):
+            solver.agent_arrange(task.plan)
 
         self.assertEqual(
             events,
-            ["arranged_and_verified", "countdown", "accept_order", "restore"],
+            [
+                "arranged_and_verified",
+                "countdown",
+                "accept_order",
+                "restore",
+                "refresh",
+            ],
         )
         solver.get_order_remaining_time.assert_called_once_with()
 
@@ -3541,6 +3623,7 @@ class TestClueProductCompleteWait(unittest.TestCase):
         solver.backup_plan_solver = MagicMock()
         solver.read_party_time = MagicMock(return_value=None)
         solver.set_detected_party_time = MagicMock()
+        solver._read_placed_clue_numbers = MagicMock(return_value=frozenset())
 
         scenes = [
             Scene.INFRA_DETAILS,

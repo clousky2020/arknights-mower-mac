@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("income_db")
+
 # Importing the real sign-in helper performs network work; all sync tests are local.
 sys.modules.setdefault("arknights_mower.utils.skland", MagicMock())
 from arknights_mower.solvers import cultivate_depot as module  # noqa: E402
@@ -284,9 +286,10 @@ def test_craft_during_sync_is_not_overwritten(syncer, stock_db, monkeypatch):
     monkeypatch.setattr(module, "time", lambda: 100)
 
     def respond(*args, **kwargs):
-        with patch.object(stock_db, "datetime") as clock:
-            clock.now.return_value.timestamp.return_value = 101
-            stock_db.apply_workshop_inventory({"固源岩组": -4})
+        if "/cultivate/player" in str(args[1]):
+            with patch.object(stock_db, "datetime") as clock:
+                clock.now.return_value.timestamp.return_value = 101
+                stock_db.apply_workshop_inventory({"固源岩组": -4})
         return SimpleNamespace(
             json=lambda: {
                 "code": 0,
@@ -436,6 +439,120 @@ def test_bidirectional_crafting_rejects_intermediate_cloud_snapshot(
     assert stock_db.get_inventory_counts()[name] == expected + 2
 
 
+@pytest.mark.parametrize("directions", [1, 2, 3])
+def test_warehouse_task_forces_cloud_baseline_and_clears_old_protection(
+    syncer, stock_db, monkeypatch, tmp_path, directions
+):
+    from arknights_mower.solvers import base_schedule
+    from arknights_mower.utils import depot
+
+    name = "技巧概要·卷3"
+    stock_db.save_inventory_counts({name: 70, "碳": 99})
+    with stock_db._conn() as conn:
+        conn.execute(
+            "INSERT INTO workshop_inventory_pending VALUES (?, ?, ?)",
+            (name, 60, directions),
+        )
+        conn.execute(
+            "INSERT INTO workshop_inventory_updates VALUES (?, ?)", (name, 100)
+        )
+        conn.commit()
+    monkeypatch.setattr(module, "time", lambda: 200)
+    payload = {
+        "code": 0,
+        "data": {
+            "characters": [{"id": "char_2027_wang", "evolvePhase": 2}],
+            "items": [{"id": "3303", "count": "7"}],
+        },
+    }
+    monkeypatch.setattr(base_schedule, "cultivateDepotSolver", lambda: syncer)
+    scan = MagicMock()
+    monkeypatch.setattr(base_schedule, "DepotSolver", scan)
+    solver = SimpleNamespace(
+        device=object(), recog=object(), _auto_schedule_mastery_after_scan=MagicMock()
+    )
+    with patch.object(module, "request_with_retry") as get:
+        get.return_value.json.return_value = payload
+        assert base_schedule.BaseSchedulerSolver.仓库扫描(solver)
+    assert stock_db.get_inventory_counts()[name] == 7
+    assert stock_db.get_inventory_counts()["碳"] == 99
+    scan.return_value.run.assert_called_once()
+    solver._auto_schedule_mastery_after_scan.assert_called_once()
+    with stock_db._conn() as conn:
+        assert (
+            conn.execute(
+                "SELECT * FROM workshop_inventory_pending WHERE item_name = ?", (name,)
+            ).fetchall()
+            == []
+        )
+
+    monkeypatch.setattr(
+        depot, "get_path", lambda name: tmp_path / name.rsplit("/", 1)[-1]
+    )
+    for _ in range(2):
+        report = depot.读取仓库()
+        assert report[0]["I技能书"][name]["number"] == 7
+        assert stock_db.get_inventory_counts()[name] == 7
+
+
+def test_forced_warehouse_sync_keeps_changes_confirmed_during_the_request(
+    syncer, stock_db, monkeypatch
+):
+    name = "技巧概要·卷3"
+    stock_db.save_inventory_counts({name: 70})
+    monkeypatch.setattr(module, "time", lambda: 200)
+    payload = {
+        "code": 0,
+        "data": {
+            "characters": [{"id": "char_2027_wang", "evolvePhase": 2}],
+            "items": [{"id": "3303", "count": "7"}],
+        },
+    }
+
+    def response(*args, **kwargs):
+        if "/cultivate/player" in args[1]:
+            with patch.object(stock_db, "datetime") as clock:
+                clock.now.return_value.timestamp.return_value = 201
+                stock_db.apply_workshop_inventory({name: -8})
+        return SimpleNamespace(json=lambda: payload)
+
+    monkeypatch.setattr(module, "request_with_retry", response)
+    assert syncer.start(force_inventory=True)
+    assert stock_db.get_inventory_counts()[name] == 62
+    with stock_db._conn() as conn:
+        assert conn.execute(
+            "SELECT directions FROM workshop_inventory_pending WHERE item_name = ?",
+            (name,),
+        ).fetchone() == (2,)
+
+
+@pytest.mark.parametrize("failure", ["no_binding", "missing_items", "http_error"])
+def test_failed_warehouse_sync_never_scans_or_dispatches_using_cached_stock(
+    syncer, stock_db, monkeypatch, failure
+):
+    from arknights_mower.solvers import base_schedule
+
+    stock_db.save_inventory_counts({"技巧概要·卷3": 70})
+    monkeypatch.setattr(base_schedule, "cultivateDepotSolver", lambda: syncer)
+    scan = MagicMock()
+    monkeypatch.setattr(base_schedule, "DepotSolver", scan)
+    monkeypatch.setattr(base_schedule, "save_exception", MagicMock())
+    solver = SimpleNamespace(_auto_schedule_mastery_after_scan=MagicMock())
+    if failure == "no_binding":
+        monkeypatch.setattr(module, "get_binding_list", lambda _: [])
+    with patch.object(module, "request_with_retry") as get:
+        get.return_value.json.return_value = {
+            "code": 0,
+            "data": {"characters": [{"id": "char_2027_wang", "evolvePhase": 2}]},
+        }
+        if failure == "http_error":
+            get.side_effect = RuntimeError("sync failed")
+        assert base_schedule.BaseSchedulerSolver.仓库扫描(solver) is False
+    assert stock_db.get_inventory_counts()["技巧概要·卷3"] == 70
+    scan.assert_not_called()
+    solver._auto_schedule_mastery_after_scan.assert_not_called()
+
+
 @pytest.fixture(autouse=True)
 def isolate_optional_yituliu_sync(tmp_path, monkeypatch):
     from arknights_mower.utils import yituliu_sync
@@ -487,7 +604,8 @@ def test_fetch_response_keeps_skland_success_when_optional_upload_fails(
 
     outcome = {"success": False, "message": "一图流未确认同步成功"}
 
-    def start():
+    def start(*, force_inventory):
+        assert force_inventory is True
         syncer.yituliu_sync_result = outcome
         return True
 
@@ -542,15 +660,21 @@ def test_concurrent_refreshes_keep_fetch_cache_and_upload_in_order(syncer, monke
     monkeypatch.setattr(yituliu_sync, "sync_after_cultivate", upload)
     with patch.object(module, "request_with_retry") as get:
         get.side_effect = [
-            SimpleNamespace(
-                json=lambda phase=phase: {
-                    "code": 0,
-                    "data": {
-                        "characters": [{"id": "char_2027_wang", "evolvePhase": phase}]
-                    },
-                }
-            )
+            response
             for phase in (1, 2)
+            for response in (
+                SimpleNamespace(
+                    json=lambda phase=phase: {
+                        "code": 0,
+                        "data": {
+                            "characters": [
+                                {"id": "char_2027_wang", "evolvePhase": phase}
+                            ]
+                        },
+                    }
+                ),
+                SimpleNamespace(json=lambda: {"code": 0, "data": {}}),
+            )
         ]
         with ThreadPoolExecutor(max_workers=2) as workers:
             first = workers.submit(syncer.start)
@@ -558,7 +682,7 @@ def test_concurrent_refreshes_keep_fetch_cache_and_upload_in_order(syncer, monke
                 assert uploading.wait(5)
                 second = workers.submit(module.cultivate().start)
                 assert waiting.wait(5)
-                assert get.call_count == 1
+                assert get.call_count == 2
                 assert phases == [1]
             finally:
                 release.set()
@@ -571,3 +695,94 @@ def test_concurrent_refreshes_keep_fetch_cache_and_upload_in_order(syncer, monke
         ]
         == 2
     )
+
+
+def test_refresh_fetches_facilities_for_the_same_role_and_keeps_only_conditions(syncer):
+    roster = {
+        "code": 0,
+        "data": {"characters": [{"id": "char_2027_wang", "evolvePhase": 2}]},
+    }
+    info = {
+        "code": 0,
+        "data": {
+            "building": {
+                "hire": {"level": 1},
+                "powers": [{"level": 3}] * 2,
+                "manufactures": [{"level": 3}] * 5,
+                "dormitories": [{"level": 1}, {"level": 2}],
+            },
+            "status": {"name": "private"},
+        },
+    }
+    with patch.object(module, "request_with_retry") as get:
+        get.side_effect = [
+            SimpleNamespace(json=lambda: roster),
+            SimpleNamespace(json=lambda: info),
+        ]
+        assert syncer.start() is True
+    saved = json.loads(syncer.record_path.read_text())
+    assert saved["_mower_base_conditions"] == {
+        "recruits": 0,
+        "power": 2,
+        "factories": 5,
+        "dormLevel": 2,
+    }
+    assert "private" not in json.dumps(saved)
+    assert get.call_args.kwargs["timeout"] == 10
+    assert get.call_args.args[1].endswith("?uid=test")
+
+
+def test_facility_fetch_failure_keeps_successful_roster_sync(syncer):
+    roster = {
+        "code": 0,
+        "data": {"characters": [{"id": "char_2027_wang", "evolvePhase": 2}]},
+    }
+    with patch.object(module, "request_with_retry") as get:
+        get.side_effect = [
+            SimpleNamespace(json=lambda: roster),
+            RuntimeError("private response"),
+        ]
+        with patch.object(module.logger, "warning") as logged:
+            assert syncer.start() is True
+    assert json.loads(syncer.record_path.read_text()) == roster
+    assert "private response" not in str(logged.call_args)
+
+
+def test_combined_roster_and_facilities_need_no_second_request(syncer):
+    data = {
+        "code": 0,
+        "data": {
+            "characters": [{"id": "char_2027_wang", "evolvePhase": 2}],
+            "building": {"hire": {"level": 3}},
+        },
+    }
+    with patch.object(module, "request_with_retry") as get:
+        get.return_value.json.return_value = data
+        assert syncer.start() is True
+    assert get.call_count == 1
+    assert json.loads(syncer.record_path.read_text())["_mower_base_conditions"] == {
+        "recruits": 2
+    }
+
+
+def test_manual_refresh_calibrates_existing_70_to_cloud_7(
+    syncer, stock_db, monkeypatch
+):
+    import server
+
+    name = "技巧概要·卷3"
+    stock_db.save_inventory_counts({name: 70})
+    stock_db.apply_workshop_inventory({name: 1})
+    monkeypatch.setattr(module, "cultivate", lambda: syncer)
+    monkeypatch.setattr(server.app, "token", "", raising=False)
+    with patch.object(module, "request_with_retry") as get:
+        get.return_value.json.return_value = {
+            "code": 0,
+            "data": {
+                "characters": [{"id": "char_2027_wang", "evolvePhase": 2}],
+                "items": [{"id": "3303", "count": "7"}],
+            },
+        }
+        response = server.app.test_client().get("/cultivate-fetch").json
+    assert response["success"] is True
+    assert stock_db.get_inventory_counts()[name] == 7

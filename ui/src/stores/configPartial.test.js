@@ -60,8 +60,65 @@ async function setup(overrides = {}) {
 }
 
 describe('partial configuration saves', () => {
-  it.each(['windows', 'darwin', 'linux'])(
-    'starts desktop auto at xhigh on %s',
+  it('defaults deferred clue credit off and saves only its explicit selection', async () => {
+    await setup()
+    expect(store.clue_credit_on_demand).toBe(false)
+    store.clue_credit_on_demand = true
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
+      clue_credit_on_demand: true
+    })
+  })
+
+  it('retains the clue credit selection when changing the friend runner', async () => {
+    await setup({ clue_credit_on_demand: true, visit_friend_mode: 'mower' })
+    expect(store.clue_credit_on_demand).toBe(true)
+    store.visit_friend_mode = 'maa'
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
+      visit_friend_mode: 'maa'
+    })
+    expect(store.clue_credit_on_demand).toBe(true)
+  })
+
+  it.each(['deepseek-flash', 'deepseek-v4-pro', 'deepseek-future-model'])(
+    'loads and saves DeepSeek model %s independently of custom interfaces',
+    async (model) => {
+      await setup({
+        ai_type: 'deepseek',
+        ai_deepseek_model: model,
+        ai_model: 'relay-model',
+        ai_base_url: 'https://relay.example/v1',
+        ai_key: 'deepseek-key',
+        ai_custom_key: 'relay-key'
+      })
+      expect(store.ai_deepseek_model).toBe(model)
+      expect(axios.patch).not.toHaveBeenCalled()
+      store.ai_deepseek_model = 'another-deepseek-model'
+      await nextTick()
+      await store.flush_config_saves()
+      expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
+        ai_deepseek_model: 'another-deepseek-model'
+      })
+      expect(store.ai_model).toBe('relay-model')
+      expect(store.ai_base_url).toBe('https://relay.example/v1')
+      expect(store.ai_key).toBe('deepseek-key')
+      expect(store.ai_custom_key).toBe('relay-key')
+      axios.patch.mockClear()
+      store.ai_type = 'custom-online'
+      await nextTick()
+      await store.flush_config_saves()
+      expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
+        ai_type: 'custom-online'
+      })
+      expect(store.ai_deepseek_model).toBe('another-deepseek-model')
+    }
+  )
+
+  it.each(['windows', 'darwin', 'linux', 'android'])(
+    'starts auto at xhigh on %s',
     async (platform) => {
       await setup({ runtime_platform: platform, performance_mode: 'auto' })
       expect(store.performance_mode).toBe('auto')
@@ -69,9 +126,11 @@ describe('partial configuration saves', () => {
     }
   )
 
-  it('keeps the Android auto baseline at medium', async () => {
+  it('uses shared numeric defaults for Android auto', async () => {
     await setup({ runtime_platform: 'android', performance_mode: 'auto' })
-    expect(store.performance_effective_mode).toBe('medium')
+    expect(store.performance_effective_mode).toBe('xhigh')
+    expect(store.selection_poll_interval).toBe(0.1)
+    expect(store.build_config().low_frame_rate_mode).toBe(false)
   })
 
   it('shows the backend automatic verdict after a downgrade', async () => {
@@ -87,6 +146,20 @@ describe('partial configuration saves', () => {
     await setup({ runtime_platform: 'darwin', performance_mode: 'high' })
     expect(store.performance_mode).toBe('high')
     expect(store.performance_effective_mode).toBe('high')
+  })
+
+  it.each(['high', 'xhigh'])('preserves Android %s through load and save', async (mode) => {
+    await setup({ runtime_platform: 'android', performance_mode: mode })
+    expect(store.performance_mode).toBe(mode)
+    expect(store.performance_effective_mode).toBe(mode)
+    expect(store.build_config()).toMatchObject({
+      performance_mode: mode,
+      low_frame_rate_mode: false
+    })
+    store.performance_mode = mode === 'high' ? 'xhigh' : 'high'
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch.mock.lastCall[1]).toMatchObject({ performance_mode: store.performance_mode })
   })
 
   it('keeps legacy switching disabled and saves only an explicit master toggle', async () => {

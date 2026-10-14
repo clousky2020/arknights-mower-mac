@@ -11,6 +11,7 @@ from arknights_mower.tests import dorm_empty_release_tests
 from arknights_mower.utils import config
 from arknights_mower.utils.operators import Dormitory
 from arknights_mower.utils.plan import Room
+from arknights_mower.utils.scene import Scene
 from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
@@ -260,7 +261,7 @@ def test_arrange_room_resolves_selection_once_before_recovery_order(solver):
     instance.find = MagicMock(
         side_effect=lambda name, *args, **kwargs: name == "confirm_blue"
     )
-    instance.scene = MagicMock(return_value=0)
+    instance.scene = MagicMock(return_value=Scene.INFRA_ARRANGE_ORDER)
     instance.tap_confirm = MagicMock()
     instance.get_agent_from_room = MagicMock(
         side_effect=lambda *args, **kwargs: [{"agent": name} for name in selected]
@@ -311,9 +312,9 @@ def test_planner_and_selection_share_mood_gap_and_exclusion_rules(solver):
     data.add(Operator("陈", "", mood=12, time_stamp=datetime.now()))
     data.plan["meeting"][0].replacement.append("陈")
     red = data.operators["红"]
-    red.mood, red.upper_limit = 10, 12
+    red.mood, red.upper_limit = 9, 12
     data.operators["陈"].lower_limit = 10
-    # 相同层级，陈缺12点、红缺2点；不能用原始心情或下限比例决定补床顺序。
+    # 相同层级，陈缺12点、红缺3点；不能用原始心情或下限比例决定补床顺序。
     assert instance.get_free_list([]) == ["陈", "红"]
     tasks = []
     try_add_release_dorm({}, None, data, tasks)

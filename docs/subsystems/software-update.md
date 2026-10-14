@@ -12,20 +12,29 @@
 
 ## 3. Subsystem Invariants
 
-- **[INV-UPD-06] Cross-Channel Upgrade Selection**: Installed development and beta channels admit newer installable releases from more stable channels, preserve the selected channel and use only a verified OTA from the exact installed version to the selected target.
+- <a id="cleanup-contention-isolation"></a>**Cleanup Contention Isolation**: The [backup cleanup boundary](#16-backup-cleanup-contention) distinguishes routine lock contention from failed maintenance and preserves pending records.
+- <a id="local-update-cache"></a>**Local Update Cache**: Software update coordination, uploads, downloaded packages and job workspaces reside under shared `@app/tmp/updates/`, with installation identity isolation; package-inspection temporary directories use the same tree instead of system cache or temporary directories.
 
-- **[INV-RES-01] Template Glyph Coverage**: Resource generation requires a real glyph for each rendered character and preserves the calibrated glyphs already present in its subsets. Missing source coverage stops generation before either subset file changes.
+- <a id="elevated-windows-desktop-launch"></a>**Elevated Windows Desktop Launch**: Both packaged Windows desktop executables require administrator elevation before application startup; manager-launched instances inherit the manager's elevated token through ordinary process creation.
 
-- **[INV-UPD-04] MAA Resource Platform Parity**: Installed MAA on Windows, macOS and Linux exposes independent resource checks and updates; installation preserves core and Python files, rejects active MAA use, and retains resource rollback copies.
-- **[INV-UPD-05] Release Artifact Scope**: Future release builds exclude macOS x64; OTA publication targets only Windows x64 and Android ARM64, including Nightly, and rejects unsafe Android runtime paths without publishing a new channel index.
-- **[INV-UPD-03] Nightly Direction Evidence**: Same-alpha Nightly updates use valid publication times or verified upstream commit ancestry to determine direction; missing index history alone never establishes a downgrade, and unverified direction retains manual confirmation.
-- **[INV-UPD-01] Owned Command Completion**: Windows update commands own their descendants before execution and verify tree completion within a finite budget before releasing the temporary checkout; cancellation preserves other application instances.
-- **[INV-UPD-02] Complete Registration Scan**: Strict registration scans retry unreadable files within one shared monotonic budget, preserve unverified registrations and raise `InstanceScanError` when that budget expires instead of returning an incomplete snapshot.
-- **[INV-UI-07] Facility Update Drop Isolation**: The Scheduling Plan facility layout, including every card, background and gap, suppresses and clears global update drag hints without intercepting facility sorting; other page regions retain update-package drops.
+- <a id="cross-channel-upgrade-selection"></a>**Cross-Channel Upgrade Selection**: Installed development and beta channels admit newer installable releases from more stable channels, preserve the selected channel and use only a verified OTA from the exact installed version to the selected target.
+
+- <a id="template-glyph-coverage"></a>**Template Glyph Coverage**: Resource generation requires a real glyph for each rendered character and preserves the calibrated glyphs already present in its subsets. Missing source coverage stops generation before either subset file changes. Expansion verifies actual character maps, uses only the matching game font, and preserves existing glyphs and metrics.
+
+- <a id="maa-resource-platform-parity"></a>**MAA Resource Platform Parity**: Installed MAA on Windows, macOS and Linux exposes independent resource checks and updates; installation preserves core and Python files, rejects active MAA use, and retains resource rollback copies.
+- <a id="release-artifact-scope"></a>**Release Artifact Scope**: Future release builds exclude macOS x64; OTA publication targets only Windows x64 and Android ARM64, including Nightly, and rejects unsafe Android runtime paths without publishing a new channel index.
+
+- <a id="shared-skill-data-packaging"></a>**Shared Skill Data Packaging**: Application archives contain the backend-owned building-skill catalog independently of frontend sources or build output; both backend consumers and the frontend share that catalog, while resource packages retain their historical entry path for existing clients.
+- <a id="nightly-direction-evidence"></a>**Nightly Direction Evidence**: Same-alpha Nightly updates use valid publication times or verified upstream commit ancestry to determine direction; missing index history alone never establishes a downgrade, and unverified direction retains manual confirmation.
+- <a id="owned-command-completion"></a>**Owned Command Completion**: Windows update commands own their descendants before execution and verify tree completion within a finite budget before releasing the temporary checkout; cancellation preserves other application instances.
+- <a id="complete-registration-scan"></a>**Complete Registration Scan**: Strict registration scans retry unreadable files within one shared monotonic budget, preserve unverified registrations and raise `InstanceScanError` when that budget expires instead of returning an incomplete snapshot.
+- <a id="facility-update-drop-isolation"></a>**Facility Update Drop Isolation**: The Scheduling Plan facility layout, including every card, background and gap, suppresses and clears global update drag hints without intercepting facility sorting; other page regions retain update-package drops.
 
 ## 4. Registration Scan Boundary
 
 `update_runtime.instances` returns a complete live-registration snapshot in strict mode. Its default five-second retry budget covers the entire scan. A zero timeout performs one attempt and reports unreadable registrations immediately. `strict=False` explicitly permits best-effort results. Read failures never establish process termination or authorize deletion of an unverified registration.
+
+`RuntimeRegistration` publishes a snapshot of its in-memory record under a per-instance lock. Registration writes flush and sync the temporary file before atomic replacement; POSIX also syncs the containing directory. Failed heartbeat publication emits an error through the application logger and retries on the next heartbeat. Configured file and interface handlers receive the error even without console output. Atomic publication preserves a complete previous record when preparation or replacement fails. Closing marks the registration closed, waits up to six seconds for in-flight publication and removes the registration while further publication is excluded. A close timeout preserves the registration for another cleanup attempt. A closed registration never starts another publication.
 
 [Restart readiness scan budget](../../.agents/notes/implemented/testing/2026-10-06-restart-readiness-scan-budget.md) records the focused test correction.
 
@@ -43,9 +52,11 @@ Cancellation and timeout terminate only the owned command tree. Successful root-
 
 ## 7. MAA Resource Updates
 
-`/maa-resource-update/info` reports support for installed MAA on Windows, macOS and Linux. `MaaBasic` displays its independent resource controls from that response. `/maa-resource-update/check` uses the selected GitHub or Mirror酱 source; `/maa-resource-update/start` requires a matching successful check showing a newer resource version. Both resource and core updates share the maintenance lock and reject active MAA use.
+`/maa-resource-update/info` reports support for installed MAA on Windows, macOS and Linux. `MaaBasic` displays its independent resource controls from that response. `/maa-resource-update/check` uses the selected GitHub or Mirror酱 source; `/maa-resource-update/start` follows the [MAA update admission policy](maa-integration.md#29-independent-update-policies), including unknown local versions. Both resource and core updates share the maintenance lock and reject active MAA use.
 
 `install_maa_resource_update` stages an incremental resource merge, preserves core and Python files, and replaces only `resource`. The previous resource tree remains in `resource.old`; failed replacement or version verification restores the original tree and previous backup.
+
+The update worker follows the [MAA runtime activation boundary](maa-runtime.md#3-explicit-update-completion) after installation.
 
 [Windows MAA resource updates](../../.agents/notes/implemented/bug-fix/2026-10-08-windows-maa-resource-update.md) records the platform correction and focused verification.
 
@@ -76,3 +87,45 @@ Installed development checks compare the development, beta and stable indexes. B
 Channel indexes retain their schema and channel-specific targets. Full and OTA assets come from the selected target's same index. OTA requires the exact installed source version; absence or reconstruction failure falls back to that target's full package. MowerRelease reserves recent Nightly sources for beta targets, and recent beta and Nightly sources for stable targets, with independent bounded quotas and platform filtering. Same-alpha Nightly direction retains [publication and commit evidence](#6-nightly-version-direction).
 
 [Cross-channel OTA upgrades](../../.agents/notes/implemented/bug-fix/2026-10-09-cross-channel-ota-upgrades.md) records the decision and focused verification.
+
+## 12. Shared Building-Skill Data
+
+`arknights_mower/data/building_skill.json` is the sole committed building-skill catalog. Dormitory classification and building-skill unlocks read it through `resource_pkg_path`; the frontend imports the same catalog for its bundled fallback. The HTTP filename `/basement_skill/skill.json` remains unchanged. Android and desktop packaging collect the catalog with the backend data directory, and Android publication requires a nonempty catalog.
+
+Resource packages retain `ui/src/pages/basement_skill/skill.json` as their historical archive entry. `write_building_skill_data` serializes the catalog once and writes identical bytes to the shared source and an ignored compatibility export used by the existing resource publisher. The compatibility export is not an application packaging input. `resource_pkg_path` maps the shared catalog request to that entry only when a resource package is selected; a missing entry in a selected package never permits mixing in bundled data. Resource validation, content hashing and existing clients retain their archive contract.
+
+For content hashing, `package_file_paths` collects the shared source when the compatibility export is absent. `content_hash` uses the historical archive name for that catalog's ordering, path digest and text normalization. Clean checkouts and generated resource packages with identical data therefore share the same resource version on LF and CRLF checkouts, without writing a compatibility file during validation.
+
+[Shared building-skill data](../../.agents/notes/implemented/simplification/2026-10-09-shared-building-skill-data.md) records the boundary and verification.
+
+OTA starting-file reads follow the [bundled reconstruction contract](resource-update.md#1-resource-ota).
+
+## 13. Temporary Update Progress Service
+
+`ProgressServers` reuses registered instance ports and credentials while the application is replaced. Its POST handler reads supported request bodies within the existing 1024-byte limit and five-second socket timeout before returning a rejection, preventing unread POST data from aborting the response on Windows. Invalid credentials, update headers or origins retain HTTP 403 precedence; an authenticated unknown path returns HTTP 404. Only an authorized cancellation request with a valid body reaches `cancel_update`; body-reading failures retain the applicable rejection or return HTTP 400. Closing the service releases its registered ports for the restarted application.
+
+## 14. Windows Desktop Elevation
+
+The Windows package embeds `requireAdministrator` with `uiAccess=false` in both `mower.exe` and `多开管理器.exe`. Windows requests elevation before application startup; cancelling consent leaves that application stopped. The elevated manager starts instances through ordinary `Popen`, so they inherit its token without separate elevation requests. Existing desktop children, maintenance workers and restarts retain their parent's permissions. Starting the manager independently from a non-elevated shell still requires its own authorization.
+
+The release workflow verifies both built executable manifests before creating the archive. Source deployments inherit the Python process permissions and require an elevated terminal for administrator access. Elevation does not repair missing or malformed resources or guarantee access through every file ACL.
+
+The first upgrade from an older non-elevated package requires restarting that old application as administrator before updating. Its existing updater uses ordinary process creation and cannot restart the new administrator-required executable from a non-elevated token.
+
+[Windows desktop elevation](../../.agents/notes/implemented/feature/2026-10-11-windows-desktop-elevation.md) records the startup decision and verification limits.
+
+## 15. Update Cache Storage
+
+`update_runtime.state_dir` resolves `@app/tmp/updates/<installation-hash>/` with `space=""`. All instances using the same installation and data root share update coordination; separate installations retain separate directories. Uploaded previews, downloaded packages, detached runners, source preparation and update logs inherit this directory through the existing job workspace. DMG package inspection creates and removes its temporary mount workspace directly under `@app/tmp/updates/`.
+
+`tmp/` sits beside `config/` and `logs/` in the Mower data root. `MOWER_DATA_DIR` redirects this root; macOS frozen applications use their writable application data root rather than the signed `.app` bundle. Resource packages and MAA storage retain their existing contracts. Update rollback backups retain their existing locations and verification lifecycle.
+
+[Local software update cache](../../.agents/notes/implemented/simplification/2026-10-12-local-software-update-cache.md) records the simplification and focused verification.
+
+## 16. Backup Cleanup Contention
+
+Startup instances and verified update workers share the existing nonblocking `backup-cleanup/submission.lock`. `submission_lock` raises `LockBusyError`, a `ValueError` subtype, only for native lock-contention errors. Other acquisition failures retain their original `OSError`; update submission preserves its existing busy message and exception compatibility.
+
+`retry_backup_cleanup` treats a busy lock during acquisition as a completed skipped attempt, without warnings, tracebacks, waiting or record mutation. The lock owner continues cleanup; pending `cleanup.json` records remain available for subsequent startup attempts. Other acquisition failures and cleanup failures retain application logger or detached updater diagnostics. Successful acquisition retains verified-restart, permitted-path and recorded-file-identity checks, with lock release on completion or error. The lock file remains in place.
+
+[Backup cleanup contention](../../.agents/notes/implemented/bug-fix/2026-10-12-backup-cleanup-contention.md) records the decision and focused verification.

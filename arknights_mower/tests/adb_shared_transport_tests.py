@@ -460,6 +460,12 @@ def test_maa_connect_preserves_shared_compatibility(
     assistant = Mock()
     asst = ModuleType("asst.asst")
     asst.Asst = Mock(return_value=assistant)
+    assistant.get_version.return_value = "v6.19.0-beta.1"
+    (tmp_path / "MaaCore.dll").write_bytes(b"offline core")
+    monkeypatch.setattr(
+        "arknights_mower.utils.maa_runtime.read_installed_version",
+        Mock(return_value="v6.19.0-beta.1"),
+    )
     asst_utils = ModuleType("asst.utils")
     asst_utils.InstanceOptionType = SimpleNamespace(
         touch_type="touch", adblite_enabled=4, kill_on_adb_exit=5
@@ -545,13 +551,16 @@ def test_maa_connect_preserves_shared_compatibility(
         ("connected to 127.0.0.1:5559", False),
     ],
 )
+@pytest.mark.parametrize("clock_start", [0.0, 510.2])
 def test_selected_emulator_alias_recovery_connects_only_pinned_ports(
-    response, accepted
+    response, accepted, clock_start
 ):
     runner = Mock(
         return_value=subprocess.CompletedProcess([], 0, response.encode(), b"")
     )
-    adb = ProductionSessionADB(run=runner, probe=lambda timeout: None)
+    adb = ProductionSessionADB(
+        run=runner, probe=lambda timeout: None, monotonic=lambda: clock_start
+    )
     assert adb.recover(ADB, "emulator-5558", 5) is accepted
     runner.assert_called_once()
     assert runner.call_args.args == ([ADB, "connect", "emu:5558,5559"],)

@@ -266,7 +266,8 @@ class ReportSolver(SceneGraphSolver):
         logger.info("蓝字读取完成")
 
         img = cv2.cvtColor(self.recog.img, cv2.COLOR_RGB2HSV)
-        img = cv2.inRange(img, (0, 0, 50), (100, 100, 170))
+        # Grey text can have any hue when capture introduces a slight color tint.
+        img = cv2.inRange(img, (0, 0, 50), (179, 100, 170))
         self.report_res["龙门币订单数"] = self.get_number(
             img, area["iron_order_number"], height=19, thres=200
         )
@@ -282,7 +283,7 @@ class ReportSolver(SceneGraphSolver):
         height: int | None = 18,
         thres: int | None = 100,
     ) -> int | None:
-        """Read a complete field; absent crops or unscorable digits return None."""
+        """Read a complete field; absent crops or unmatched digits return None."""
         if scope is None:
             return None
         img = cropimg(img, scope)
@@ -297,8 +298,22 @@ class ReportSolver(SceneGraphSolver):
         contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         rect = [cv2.boundingRect(c) for c in contours]
         rect.sort(key=lambda c: c[0])
-        value = 0
+        groups = []
         for x, y, w, h in rect:
+            # Combine overlapping strokes without joining adjacent digits.
+            if groups and x < groups[-1][0] + groups[-1][2]:
+                px, py, pw, ph = groups[-1]
+                top = min(py, y)
+                groups[-1] = (
+                    px,
+                    top,
+                    max(px + pw, x + w) - px,
+                    max(py + ph, y + h) - top,
+                )
+            else:
+                groups.append((x, y, w, h))
+        value = 0
+        for x, y, w, h in groups:
             digit = cropimg(img, ((x, y), (x + w, y + h)))
             digit = cv2.copyMakeBorder(
                 digit, 10, 10, 10, 10, cv2.BORDER_CONSTANT, None, (0,)
@@ -311,7 +326,11 @@ class ReportSolver(SceneGraphSolver):
                     score.append((matched, i))
             if not score:
                 return None
-            value = value * 10 + min(score)[1]
+            best_score, number = min(score)
+            # A saturated SQDIFF score cannot identify a digit.
+            if best_score >= 1:
+                return None
+            value = value * 10 + number
         return value
 
 

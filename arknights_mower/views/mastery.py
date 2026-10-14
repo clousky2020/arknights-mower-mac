@@ -1,6 +1,4 @@
 import json
-import os
-from datetime import datetime, timedelta
 from functools import wraps
 from threading import RLock
 
@@ -36,7 +34,6 @@ from arknights_mower.utils.mastery_support_types import (
     decode_json,
     decode_supports,
 )
-from arknights_mower.utils.path import get_path
 from arknights_mower.utils.workshop_automation import refresh_workshop_after_plan_change
 
 
@@ -80,6 +77,11 @@ def _purge_plan_tasks(plan_id):
     if not isinstance(tasks, list):
         return
     current = getattr(base_scheduler, "task", None)
+    if getattr(base_scheduler, "amiya_pending_plan_id", None) == plan_id:
+        base_scheduler.amiya_pending_plan_id = None
+        room = getattr(base_scheduler, "train_room_state", None)
+        if room is not None:
+            room.amiya_form_waiting = False
     keys = {str(plan_id)}
     tasks[:] = [
         t for t in tasks if t is current or getattr(t, "plan_key", None) not in keys
@@ -103,66 +105,32 @@ def _purge_plan_tasks(plan_id):
         logger.debug(f"删除计划后持久化队列同步失败（忽略）: {e}")
 
 
-def _refresh_cultivate_if_stale(force=False):
-    """cultivate.json 缺失/过期（> maa_gap）时刷新（森空岛，纯网络，web 线程安全）。
-
-    #141：立即派发依赖 cultivate.json 新鲜度做材料核算——数据过期/缺失时
-    `auto_schedule_mastery_tasks` 返回空、静默空转（只加计划、不开始训练）。这里在
-    派发前刷新，**尊重 maa_gap 间隔**（新鲜则跳过，不绕过间隔打森空岛）；缺 skland
-    配置时 cultivate.start 内部直接返回（材料数据缺，计划等下次自然扫描兜底）。
-    #141 review 跟进：`force=True` 用于「新干员不在本地数据」——用户显式点了该干员
-    一键专精，强制拉一次让推荐数据包含它（不受 maa_gap 新鲜度跳过）。
-    """
+def _refresh_cultivate():
+    """Refresh the roster before admitting newly added mastery plans."""
     try:
-        path = get_path("@app/tmp/cultivate.json")
-        if not force and os.path.exists(path):
-            mtime = datetime.fromtimestamp(os.path.getmtime(path))
-            if datetime.now() - mtime < timedelta(hours=config.conf.maa_gap):
-                return
         from arknights_mower.solvers.cultivate_depot import cultivate
 
-        cultivate().start()
-    except Exception as e:
-        logger.exception(f"一键专精刷新 cultivate.json 失败: {e}")
-
-
-def _chars_missing_from_cultivate(char_ids) -> set:
-    """char_ids 中不在 cultivate.json `data.characters` 里的（#141 review 跟进：
-    新干员未录入本地数据——cultivate.json 新鲜但干员是刚获得的）。只在确实缺失时返回
-    非空（在数据里的干员，含被推荐过滤的非精二，不算缺失——避免无谓拉取）。
-    """
-    try:
-        path = get_path("@app/tmp/cultivate.json")
-        if not os.path.exists(path):
-            return set(char_ids)
-        with open(path, "r", encoding="utf-8") as f:
-            cdata = json.load(f)
-        have = {c.get("id") for c in cdata.get("data", {}).get("characters", [])}
-        return {cid for cid in char_ids if cid not in have}
+        return cultivate().start()
     except Exception:
-        return set(char_ids)
+        logger.exception("新增专精计划时森空岛同步失败")
+        return False
 
 
-def _dispatch_new_plans_immediately(chars=None, targets=None):
-    """一键专精建计划后立即尝试开始——刷新库存数据后复用仓库扫描的派发逻辑。
-
-    #141（用户拍板方案 A）：建计划成功后**刷新 cultivate.json**（缺失/过期才拉，
-    尊重 maa_gap）→ auto_schedule 用新鲜数据核算材料 → `_dispatch_scan_start_tasks`
-    把材料足够的 idle 计划入队 now 的 SKILL_UPGRADE（plan_key=计划ID），并设
-    `wake_scheduler` 事件唤醒调度休眠——调度器下一轮就执行，**确认后真的开始训练**。
-    #141 review 跟进：`chars` = 本次新增计划的干员 id——若某干员不在本地 cultivate
-    数据（新获得、cultivate.json 还新鲜），强制拉一次让推荐数据包含它再重算，否则
-    新干员一键仍会静默空转。材料不足不派发（继续等下次扫描）；受 enable_mastery 门控
-    （OFF 停专精自动化）；base_scheduler 未运行（None）时防御按无任务处理。
-
-    targets：本次点的那几条 (char_id, skill_index)。给了就只派发这几条——按钮的字面
-    意思是「把这一条排上」，不是「顺手把所有材料够的都排一遍」（与仓库扫描、一键专精
-    的批量派发刻意不一致）。None = 不限（批量派发路径）。
-
-    返回按 targets 过滤后的 {"scheduled": [...], "skipped": [...]}：调用方据此把
-    材料不足或排班冲突的真实原因明说给用户。
-    """
+def _dispatch_new_plans_immediately(targets=None):
+    """Refresh the roster, admit from shared inventory and wake selected plans."""
     nothing = {"scheduled": [], "skipped": []}
+    if not _refresh_cultivate():
+        return {
+            "scheduled": [],
+            "skipped": [
+                {
+                    "char_id": char_id,
+                    "skill_index": skill_index,
+                    "reason": "森空岛同步失败，计划已保留，请刷新后重试",
+                }
+                for char_id, skill_index in targets or []
+            ],
+        }
     if not config.conf.enable_mastery:
         return nothing
     try:
@@ -178,12 +146,7 @@ def _dispatch_new_plans_immediately(chars=None, targets=None):
             auto_schedule_mastery_tasks,
         )
 
-        _refresh_cultivate_if_stale()
         res = auto_schedule_mastery_tasks()
-        if chars and _chars_missing_from_cultivate(chars):
-            # 新干员不在本地数据 → 强制拉一次再重算（用户显式点了一键专精）
-            _refresh_cultivate_if_stale(force=True)
-            res = auto_schedule_mastery_tasks()
         scheduled = res.get("scheduled", [])
         skipped = res.get("skipped", [])
         if targets is not None:
@@ -358,7 +321,6 @@ class MasteryPlanView(MethodView):
         }
 
         results = []
-        added_char_ids = []
         added_plan_ids = []
         # 本次点的那几条（result, (char_id, skill_index)）：轮完统一派发一次，
         # 派发范围收窄到这几条（定案 2）。
@@ -369,7 +331,6 @@ class MasteryPlanView(MethodView):
             if target is not None:
                 pending.append((result, target))
             if is_new:
-                added_char_ids.append(char_id)
                 added_plan_ids.append(result["id"])
 
         items = (
@@ -402,7 +363,22 @@ class MasteryPlanView(MethodView):
                     )
                     continue
                 target_level = item.get("target_level")
-                char_id = name_to_id.get(name)
+                char_id = item["char_id"] if "char_id" in item else name_to_id.get(name)
+                if "char_id" in item and (
+                    not isinstance(char_id, str)
+                    or not char_id.startswith("char_")
+                    or char_table.get(char_id, {}).get("name") != name
+                    or training_operators is not None
+                    and char_id not in training_operators
+                ):
+                    results.append(
+                        {
+                            "key": name,
+                            "status": "error",
+                            "reason": "干员形态无效或与名称不匹配，请刷新后重试",
+                        }
+                    )
+                    continue
                 if char_id is None:
                     results.append(
                         {"key": name, "status": "error", "reason": "operator not found"}
@@ -482,7 +458,7 @@ class MasteryPlanView(MethodView):
             )
         if pending:
             info = _dispatch_new_plans_immediately(
-                chars=added_char_ids, targets=[target for _, target in pending]
+                targets=[target for _, target in pending]
             )
             skipped = {
                 (entry.get("char_id"), entry.get("skill_index")): entry
@@ -517,10 +493,7 @@ class MasteryPlanView(MethodView):
         # （True==1）也不得静默接受。对齐 #97 retry 畸形 id 400 的校验。
         if isinstance(plan_id, bool) or not isinstance(plan_id, int):
             return {"error": f"invalid id: {plan_id}"}, 400
-        try:
-            deleted = delete_plan(plan_id, protect_active=True)
-        except ValueError as exc:
-            return {"error": str(exc)}, 409
+        deleted = delete_plan(plan_id)
         if deleted:
             # #97：删计划清残留队列任务（该 plan_key 的 SKILL_UPGRADE/SWAP/fill），
             # 否则残留任务仍会按 plan_key 派发到已删计划。

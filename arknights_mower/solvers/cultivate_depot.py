@@ -2,6 +2,7 @@ import datetime
 import json
 from threading import Lock
 from time import time
+from urllib.parse import urlencode
 
 from arknights_mower.utils import config
 from arknights_mower.utils.config import atomic_write
@@ -13,6 +14,7 @@ from arknights_mower.utils.skland import (
     get_sign_header,
     header,
     log,
+    player_info_url,
     request_with_retry,
     restore_cached_session,
     skland_cache,
@@ -29,12 +31,12 @@ class cultivate:
         self.sign_token = ""
         self.all_recorded = True
 
-    def start(self):
+    def start(self, *, force_inventory=False):
         # Keep request, local persistence and remote upload in the same order.
         with _refresh_lock:
-            return self._refresh()
+            return self._refresh(force_inventory=force_inventory)
 
-    def _refresh(self):
+    def _refresh(self, *, force_inventory=False):
         self.yituliu_sync_result = None
         if not config.conf.skland_info:
             return False
@@ -78,6 +80,31 @@ class cultivate:
                 if isinstance(resp, dict) and resp.get("code") != 0:
                     raise ValueError(resp.get("message") or "森空岛返回的干员数据无效")
                 parse_roster(resp)
+                from arknights_mower.utils.building_skills import parse_base_conditions
+
+                conditions = parse_base_conditions(resp.get("data", {}).get("building"))
+                if not conditions:
+                    info_url = f"{player_info_url}?{urlencode({'uid': i['uid']})}"
+                    try:
+                        info = request_with_retry(
+                            "get",
+                            info_url,
+                            headers=get_sign_header(
+                                info_url, "get", None, self.sign_token
+                            ),
+                            timeout=10,
+                        ).json()
+                        if isinstance(info, dict) and info.get("code") == 0:
+                            conditions = parse_base_conditions(
+                                info.get("data", {}).get("building")
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "森空岛基建设施读取失败，保留干员同步结果：%s",
+                            type(exc).__name__,
+                        )
+                if conditions:
+                    resp = {**resp, "_mower_base_conditions": conditions}
                 player_fields = ("uid", "nickName", "channelName", "channelMasterId")
                 if all(key in i for key in player_fields):
                     resp = {
@@ -85,6 +112,8 @@ class cultivate:
                         "_mower_player": {key: i[key] for key in player_fields},
                     }
                 items = resp.get("data", {}).get("items")
+                if force_inventory and items is None:
+                    raise ValueError("森空岛未返回库存，无法完成库存同步")
                 if items is not None:
                     if not isinstance(items, list) or any(
                         not isinstance(entry, dict)
@@ -99,7 +128,7 @@ class cultivate:
                 def dump(file):
                     json.dump(resp, file, ensure_ascii=False, indent=4)
 
-                # web 线程（views/mastery.py 刷新）与调度线程共用本写点，原子写防撕裂
+                # Manual refresh and warehouse tasks share this atomic cache write.
                 atomic_write(self.record_path, dump)
                 from arknights_mower.utils.growth import save_statistics
                 from arknights_mower.utils.mastery_recommendation import get_skill_data
@@ -123,6 +152,7 @@ class cultivate:
                         scanned_counts={},
                         cloud_counts=counts,
                         cloud_at=timestamp,
+                        force_cloud=force_inventory,
                     )
                 updated = True
                 from arknights_mower.utils.yituliu_sync import sync_after_cultivate

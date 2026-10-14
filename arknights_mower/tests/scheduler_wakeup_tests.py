@@ -18,6 +18,7 @@ from arknights_mower.utils.furniture_task import (  # noqa: E402
     FurnitureNavigationError,
     FurnitureSafetyError,
 )
+from arknights_mower.utils.operators import Operators  # noqa: E402
 from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes  # noqa: E402
 from arknights_mower.views import task as task_view  # noqa: E402
 
@@ -25,7 +26,7 @@ REAL_FURNITURE_RUN = furniture.FurnitureDismantler.run
 
 
 @pytest.fixture
-def scheduler(monkeypatch):
+def scheduler(monkeypatch, offline_maintenance):
     class Clock(datetime):
         current = datetime(2026, 9, 9, 10)
 
@@ -51,6 +52,9 @@ def scheduler(monkeypatch):
         dorm=[],
         correct_dorm=MagicMock(),
         rescue_mode=False,
+    )
+    solver.op_data.arrangement_group_transitions = (
+        Operators.arrangement_group_transitions.__get__(solver.op_data)
     )
     solver.recog = MagicMock()
     solver._simulator_closed_for_idle = False

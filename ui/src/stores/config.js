@@ -38,10 +38,14 @@ export const useConfigStore = defineStore('config', () => {
   const stage_plan_runner = ref('maa')
   const maa_mall_enable = ref(true)
   const maa_mall_mode = ref('maa')
+  const clue_credit_on_demand = ref(false)
   const maa_path = ref('')
   const maa_mirrorchyan_token = ref('')
   const maa_update_channel = ref('stable')
   const maa_auto_check_update = ref(false)
+  const maa_auto_update = ref(false)
+  const maa_resource_auto_check_update = ref(false)
+  const maa_resource_auto_update = ref(false)
   const automatic_rescue_enable = ref(false)
   const maa_restore_theme_enable = ref(false)
   const maa_restore_theme = ref('')
@@ -146,6 +150,7 @@ export const useConfigStore = defineStore('config', () => {
   const ai_custom_key = ref('')
   const ai_base_url = ref('')
   const ai_model = ref('')
+  const ai_deepseek_model = ref('deepseek-flash')
   const skland_enable = ref(false)
   const skland_info = ref([])
   const recruit_enable = ref(true)
@@ -156,6 +161,10 @@ export const useConfigStore = defineStore('config', () => {
   const product_switching = ref({})
   const check_mail_enable = ref(true)
   const report_enable = ref(true)
+  const trust_rotation_enable = ref(false)
+  const trust_rotation_prefer_low = ref(false)
+  const trust_rotation_threshold = ref(100)
+  const trust_rotation_interval = ref(24)
   const recruit_gap = ref(false)
   const recruit_auto_5 = ref('hand')
   const webview = ref({ scale: 1.0 })
@@ -187,7 +196,6 @@ export const useConfigStore = defineStore('config', () => {
   const resource_update_auto_update = ref(false)
   const notification_level = ref('INFO')
   const waiting_scene = ref({})
-  const expiring_medicine_on_weekend = ref(false)
   const maa_mail = ref(false)
   const maa_recruit = ref(false)
   const maa_orundum = ref(false)
@@ -459,17 +467,12 @@ export const useConfigStore = defineStore('config', () => {
       runtime_platform.value = response.data.runtime_platform || ''
       performance_mode.value = normalizePerformanceMode(
         response.data.performance_mode,
-        response.data.low_frame_rate_mode,
-        runtime_platform.value
+        response.data.low_frame_rate_mode
       )
       performance_effective_mode.value =
         response.data.performance_effective_mode ||
-        (performance_mode.value === 'auto'
-          ? runtime_platform.value === 'android'
-            ? 'medium'
-            : 'xhigh'
-          : performance_mode.value)
-      const fallbackProfile = performanceProfile('auto', runtime_platform.value)
+        (performance_mode.value === 'auto' ? 'xhigh' : performance_mode.value)
+      const fallbackProfile = performanceProfile('auto')
       low_frame_rate_mode.value =
         response.data.low_frame_rate_mode ?? fallbackProfile.lowFrameRateMode
       selection_poll_interval.value =
@@ -496,10 +499,15 @@ export const useConfigStore = defineStore('config', () => {
           ? Boolean(response.data.maa_mall_enable)
           : response.data.maa_enable != 0
       maa_mall_mode.value = response.data.maa_mall_mode === 'mower' ? 'mower' : 'maa'
+      clue_credit_on_demand.value = response.data.clue_credit_on_demand ?? false
       maa_path.value = response.data.maa_path
       maa_mirrorchyan_token.value = response.data.maa_mirrorchyan_token || ''
       maa_update_channel.value = response.data.maa_update_channel === 'beta' ? 'beta' : 'stable'
       maa_auto_check_update.value = response.data.maa_auto_check_update ?? false
+      maa_auto_update.value = response.data.maa_auto_update ?? false
+      maa_resource_auto_check_update.value =
+        response.data.maa_resource_auto_check_update ?? response.data.maa_auto_check_update ?? false
+      maa_resource_auto_update.value = response.data.maa_resource_auto_update ?? false
       automatic_rescue_enable.value = response.data.automatic_rescue_enable ?? false
       maa_restore_theme_enable.value = response.data.maa_restore_theme_enable ?? false
       maa_restore_theme.value = response.data.maa_restore_theme ?? ''
@@ -574,6 +582,7 @@ export const useConfigStore = defineStore('config', () => {
       ai_type.value = response.data.ai_type
       ai_base_url.value = response.data.ai_base_url || ''
       ai_model.value = response.data.ai_model || ''
+      ai_deepseek_model.value = response.data.ai_deepseek_model ?? 'deepseek-flash'
       skland_info.value = response.data.skland_info
       recruit_enable.value = response.data.recruit_enable
       recruitment_permit.value = response.data.recruitment_permit
@@ -597,6 +606,10 @@ export const useConfigStore = defineStore('config', () => {
       }
       check_mail_enable.value = response.data.check_mail_enable
       report_enable.value = response.data.report_enable
+      trust_rotation_enable.value = response.data.trust_rotation_enable ?? false
+      trust_rotation_prefer_low.value = response.data.trust_rotation_prefer_low ?? false
+      trust_rotation_threshold.value = response.data.trust_rotation_threshold ?? 100
+      trust_rotation_interval.value = response.data.trust_rotation_interval ?? 24
       recruit_gap.value = response.data.recruit_gap
       recruit_auto_5.value = response.data.recruit_auto_5
       webview.value = response.data.webview
@@ -639,7 +652,6 @@ export const useConfigStore = defineStore('config', () => {
       resource_update_auto_update.value = response.data.resource_update?.auto_update ?? false
       notification_level.value = response.data.notification_level
       waiting_scene.value = response.data.waiting_scene
-      expiring_medicine_on_weekend.value = response.data.expiring_medicine_on_weekend
       maa_mail.value = response.data.maa_mail
       maa_recruit.value = response.data.maa_recruit
       maa_orundum.value = response.data.maa_orundum
@@ -675,10 +687,14 @@ export const useConfigStore = defineStore('config', () => {
       stage_plan_runner: stage_plan_runner.value,
       maa_mall_enable: maa_mall_enable.value,
       maa_mall_mode: maa_mall_mode.value,
+      clue_credit_on_demand: clue_credit_on_demand.value,
       maa_path: maa_path.value,
       maa_mirrorchyan_token: maa_mirrorchyan_token.value,
       maa_update_channel: maa_update_channel.value,
       maa_auto_check_update: maa_auto_check_update.value,
+      maa_auto_update: maa_auto_update.value,
+      maa_resource_auto_check_update: maa_resource_auto_check_update.value,
+      maa_resource_auto_update: maa_resource_auto_update.value,
       automatic_rescue_enable: automatic_rescue_enable.value,
       maa_restore_theme_enable: maa_restore_theme_enable.value,
       maa_restore_theme: maa_restore_theme.value,
@@ -701,8 +717,7 @@ export const useConfigStore = defineStore('config', () => {
       timezone_offset: timezone_offset.value,
       custom_smtp_server: custom_smtp_server.value,
       run_order_delay: run_order_delay.value,
-      low_frame_rate_mode: performanceProfile(performance_mode.value, runtime_platform.value)
-        .lowFrameRateMode,
+      low_frame_rate_mode: performanceProfile(performance_mode.value).lowFrameRateMode,
       performance_mode: performance_mode.value,
       selection_poll_interval: selection_poll_interval.value,
       selection_transition_timeout: selection_transition_timeout.value,
@@ -760,6 +775,7 @@ export const useConfigStore = defineStore('config', () => {
       ai_custom_key: ai_custom_key.value,
       ai_base_url: ai_base_url.value,
       ai_model: ai_model.value,
+      ai_deepseek_model: ai_deepseek_model.value,
       skland_info: skland_info.value,
       recruit_enable: recruit_enable.value,
       recruitment_permit: recruitment_permit.value,
@@ -769,6 +785,10 @@ export const useConfigStore = defineStore('config', () => {
       product_switching: product_switching.value,
       check_mail_enable: check_mail_enable.value,
       report_enable: report_enable.value,
+      trust_rotation_enable: trust_rotation_enable.value,
+      trust_rotation_prefer_low: trust_rotation_prefer_low.value,
+      trust_rotation_threshold: trust_rotation_threshold.value,
+      trust_rotation_interval: trust_rotation_interval.value,
       recruit_gap: recruit_gap.value,
       recruit_auto_5: recruit_auto_5.value,
       webview: webview.value,
@@ -813,7 +833,6 @@ export const useConfigStore = defineStore('config', () => {
       },
       notification_level: notification_level.value,
       waiting_scene: waiting_scene.value,
-      expiring_medicine_on_weekend: expiring_medicine_on_weekend.value,
       maa_mail: maa_mail.value,
       maa_recruit: maa_recruit.value,
       maa_orundum: maa_orundum.value,
@@ -1012,10 +1031,14 @@ export const useConfigStore = defineStore('config', () => {
     stage_plan_runner,
     maa_mall_enable,
     maa_mall_mode,
+    clue_credit_on_demand,
     maa_path,
     maa_mirrorchyan_token,
     maa_update_channel,
     maa_auto_check_update,
+    maa_auto_update,
+    maa_resource_auto_check_update,
+    maa_resource_auto_update,
     automatic_rescue_enable,
     maa_restore_theme_enable,
     maa_restore_theme,
@@ -1114,11 +1137,16 @@ export const useConfigStore = defineStore('config', () => {
     ai_custom_key,
     ai_base_url,
     ai_model,
+    ai_deepseek_model,
     skland_info,
     run_order_grandet_mode,
     product_switching,
     check_mail_enable,
     report_enable,
+    trust_rotation_enable,
+    trust_rotation_prefer_low,
+    trust_rotation_threshold,
+    trust_rotation_interval,
     recruit_gap,
     recruit_auto_5,
     webview,
@@ -1150,7 +1178,6 @@ export const useConfigStore = defineStore('config', () => {
     resource_update_auto_update,
     notification_level,
     waiting_scene,
-    expiring_medicine_on_weekend,
     maa_mail,
     maa_recruit,
     maa_orundum,

@@ -150,15 +150,33 @@ def test_integrated_strategy_unlocks_do_not_invent_depot_costs(valuation_case):
     assert row["sanity_incomplete"] == []
 
 
-def test_offline_snapshot_has_immutable_source_and_documented_currency_values():
+def test_offline_snapshot_has_ss_pricing_and_documented_currency_values(income_db):
     catalog = price_catalog()
-    assert catalog["_meta"]["commit"] in catalog["_meta"]["values_url"]
+    assert catalog["_meta"]["pricing_mode"] == "ss_activity"
+    assert catalog["_meta"]["pricing_config"]["useActivityAverageStage"] is True
+    assert (
+        catalog["_meta"]["pricing_config"]["useActivityAverageStageAndUnlimitedItem"]
+        is True
+    )
+    assert catalog["items"]["30062"]["value"] == pytest.approx(8.142283)
     values = {iid: row["value"] for iid, row in catalog["items"].items()}
     assert values["4001"] == pytest.approx(36 / 10000)
+    assert values["2003"] == pytest.approx(3.44448)
+    for iid, lmd in [("30073", 500), ("30083", 600), ("30093", 700), ("30103", 800)]:
+        assert values[iid] == pytest.approx(lmd * values["4001"])
+    assert values["30024"] == pytest.approx(61.04984546327338)
+    assert values["30034"] == pytest.approx(60.68984546327338)
+    strategy = catalog["_meta"]["pricing_config"]["workshopStrategy"]
+    assert strategy["eliteMaterialT2toT3"]["causalityValue"] == pytest.approx(
+        0.4920881261849738
+    )
+    assert strategy["eliteMaterialT3toT4"]["byproductItemId"] == "30043"
+    assert strategy["eliteMaterialT3toT4"]["byproductRate"] == 0.18
+    assert strategy["eliteMaterialT4toT5"]["byproductRate"] == 0.2
     assert values["4006"] == pytest.approx(30 * (1 - 12 * values["4001"]) / 21)
     assert values["32001"] == pytest.approx(values["4006"] * 90)
     assert values["mod_unlock_token"] == pytest.approx(values["4006"] * 120)
-    assert "mod_update_token_1" not in values
+    assert values["mod_update_token_1"] == 0
 
 
 def test_compiler_preserves_all_module_levels_and_shared_progression():

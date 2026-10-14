@@ -79,20 +79,31 @@ def get_skill_real_name(char_id: str, skill_index: int):
 
 
 @lru_cache(maxsize=2)
-def _read_cultivate_characters(path, mtime_ns, size):
+def _read_cultivate_data(path, mtime_ns, size):
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return {char["id"]: char for char in parse_roster(data)}
+    return {char["id"]: char for char in parse_roster(data)}, data
 
 
-def get_cultivate_characters():
+def _get_cultivate_data():
     """专精和基建技能共用 BOX 缓存，同步文件变化后自动失效。"""
     path = get_path("@app/tmp/cultivate.json")
     try:
         stat = os.stat(path)
-        return _read_cultivate_characters(str(path), stat.st_mtime_ns, stat.st_size)
+        return _read_cultivate_data(str(path), stat.st_mtime_ns, stat.st_size)
     except Exception:
         return None
+
+
+def get_cultivate_characters():
+    data = _get_cultivate_data()
+    return data[0] if data else None
+
+
+def get_cultivate_snapshot():
+    """Return the validated shared payload without a second file read."""
+    data = _get_cultivate_data()
+    return data[1] if data else None
 
 
 def _get_cultivate_character(char_id):
@@ -113,12 +124,18 @@ def get_current_mastery_level(char_id: str, skill_index: int) -> Optional[int]:
 
 def _mastery_requirement_error(char):
     if char.get("evolvePhase", 2) < 2:
-        return "尚未精二，可规划养成材料；精二且基础技能升至 7 级并同步后才执行专精"
+        return (
+            "尚未精二，可规划养成材料；精二且基础技能升至 7 级后，"
+            "请前往「养成规划」页面手动点击「刷新」后再执行专精"
+        )
     level = char.get("mainSkillLevel")
     if type(level) is not int or level < 1:
-        return "无法确认基础技能等级，请先同步干员数据"
+        return "无法确认基础技能等级，请前往「养成规划」页面手动点击「刷新」"
     if level < 7:
-        return f"基础技能仅 {level} 级，可加入养成计划；升至 7 级并同步干员数据后才执行专精"
+        return (
+            f"基础技能仅 {level} 级，可加入养成计划；升至 7 级后，"
+            "请前往「养成规划」页面手动点击「刷新」后再执行专精"
+        )
     return None
 
 
@@ -128,7 +145,7 @@ def get_mastery_requirement_error(char_id):
     return _mastery_requirement_error(char) if char is not None else None
 
 
-def get_mastery_recommendations():
+def get_mastery_recommendations(*, include_materials=True, char_id=None):
     from arknights_mower.data import workshop_formula
     from arknights_mower.utils.growth import (
         available_modules,
@@ -145,12 +162,14 @@ def get_mastery_recommendations():
         statistics,
         statistics_history,
     )
+    from arknights_mower.utils.growth_value import price_catalog
     from arknights_mower.utils.mastery_materials import MaterialBudget
     from arknights_mower.utils.operator_statistics import personal_statistics
     from arknights_mower.utils.workshop_material_policy import (
         protected_workshop_materials,
     )
 
+    summarize = calculate_growth_materials if include_materials else lambda *_: None
     result = {"operators": [], "has_data": False, "error": None}
     try:
         with open(get_path("@app/tmp/cultivate.json"), encoding="utf-8") as stream:
@@ -166,8 +185,11 @@ def get_mastery_recommendations():
             blocked_materials=protected_workshop_materials(),
         )
         result["goals"] = load_goals()
-        result["statistics"] = statistics(box["characters"], skills)
-        result["personal_statistics"] = personal_statistics(box["characters"], skills)
+        catalog = price_catalog()
+        result["statistics"] = statistics(box["characters"], skills, catalog)
+        result["personal_statistics"] = personal_statistics(
+            box["characters"], skills, catalog
+        )
         result["history"] = statistics_history()
     except (OSError, ValueError, KeyError) as exc:
         result["error"] = f"请从森空岛同步干员数据：{exc}"
@@ -175,6 +197,8 @@ def get_mastery_recommendations():
 
     for char in box["characters"]:
         cid = char["id"]
+        if char_id is not None and cid != char_id:
+            continue
         definition = skills.get("characters", {}).get(cid, {})
         growth_def = growth.get("characters", {}).get(cid, {})
         modules = available_modules(cid, char, growth)
@@ -194,7 +218,7 @@ def get_mastery_recommendations():
                 basic = basic_skill_materials(char, growth_def)
                 prerequisite += basic
                 if basic:
-                    basic_summary = calculate_growth_materials(budget, basic)
+                    basic_summary = summarize(budget, basic)
             except ValueError as exc:
                 material_error = str(exc)
         if definition:
@@ -236,7 +260,7 @@ def get_mastery_recommendations():
                 summary = (
                     None
                     if material_error
-                    else calculate_growth_materials(budget, prerequisite + materials)
+                    else summarize(budget, prerequisite + materials)
                 )
                 targets[str(target)] = {
                     "target_level": target,
@@ -244,9 +268,7 @@ def get_mastery_recommendations():
                     "total_time": sum(s["lvl_up_time"] for s in selected),
                     "chain_needed_materials": materials,
                     "material_summary": summary,
-                    "skill_material_summary": calculate_growth_materials(
-                        budget, materials
-                    ),
+                    "skill_material_summary": summarize(budget, materials),
                     "full_chain_achievable": bool(summary and summary["available"]),
                 }
             recommendations.append(
@@ -276,10 +298,8 @@ def get_mastery_recommendations():
                         else []
                     )
                     module["targets"][str(target_level)] = {
-                        "opening_summary": calculate_growth_materials(budget, costs),
-                        "material_summary": calculate_growth_materials(
-                            budget, materials
-                        ),
+                        "opening_summary": summarize(budget, costs),
+                        "material_summary": summarize(budget, materials),
                     }
                 module.update(module["targets"][str(module["max_level"])])
             except ValueError as exc:
@@ -300,7 +320,7 @@ def get_mastery_recommendations():
                     "elite": elite,
                     "level": level,
                     "label": f"{phase_label} {level} 级",
-                    "summary": calculate_growth_materials(
+                    "summary": summarize(
                         budget, promotion_materials(char, growth_def, growth, target)
                     )
                     if (char.get("evolvePhase", 0), char.get("level", 1)) < target
@@ -315,19 +335,19 @@ def get_mastery_recommendations():
             and module_level
             and (char.get("evolvePhase", 0), char.get("level", 1)) < (2, module_level)
         ):
-            module_level_summary = calculate_growth_materials(
+            module_level_summary = summarize(
                 budget, promotion_materials(char, growth_def, growth, (2, module_level))
             )
         if max_level and (char.get("evolvePhase", 0), char.get("level", 1)) < (
             max_phase,
             max_level,
         ):
-            max_level_summary = calculate_growth_materials(
+            max_level_summary = summarize(
                 budget,
                 promotion_materials(char, growth_def, growth, (max_phase, max_level)),
             )
         if char.get("evolvePhase", 0) < max_phase:
-            promotion = calculate_growth_materials(
+            promotion = summarize(
                 budget, promotion_materials(char, growth_def, growth, (max_phase, 1))
             )
         result["operators"].append(
@@ -363,22 +383,39 @@ def get_mastery_recommendations():
                 "basic_skill_prerequisite": basic_prerequisite,
             }
         )
+    if not include_materials:
+        for operator in result["operators"]:
+            operator["recommendations"] = [
+                {
+                    key: rec[key]
+                    for key in (
+                        "skill_index",
+                        "skill_name",
+                        "skill_icon_id",
+                        "current_level",
+                    )
+                }
+                for rec in operator["recommendations"]
+            ]
+            operator["modules"] = [
+                {
+                    key: module[key]
+                    for key in (
+                        "id",
+                        "name",
+                        "type",
+                        "current_level",
+                        "max_level",
+                        "elite",
+                        "level",
+                    )
+                    if key in module
+                }
+                for module in operator["modules"]
+            ]
     result["operators"].sort(key=lambda op: (-op["rarity"], op["name"]))
     result["has_data"] = True
     return result
-
-
-def _workshop_lookahead_active(plan):
-    """Only a confirmed, unexpired training countdown unlocks one-skill lookahead."""
-    from datetime import datetime
-
-    if plan.get("status") != "training" or not plan.get("expires_at"):
-        return False
-    try:
-        deadline = datetime.fromisoformat(plan["expires_at"])
-        return deadline > datetime.now(tz=deadline.tzinfo)
-    except (TypeError, ValueError):
-        return False
 
 
 def _remaining_mastery_materials(plan, recommendation):
@@ -400,351 +437,8 @@ def _remaining_mastery_materials(plan, recommendation):
     ]
 
 
-def _workshop_training_reserve(plan, recommendation):
-    from collections import defaultdict
-
-    reserved = defaultdict(int)
-    for material in _remaining_mastery_materials(plan, recommendation):
-        reserved[material["name"]] += material["count"]
-    return reserved
-
-
-def compute_workshop_config(
-    fodder_operators=None,
-    t5_operators=None,
-    book_operators=None,
-    *,
-    plans=None,
-    recommendations=None,
-):
-    """按计划顺序准备首个可满足技能，确认开训后缺料时只等待当前计划。"""
-    if fodder_operators is None:
-        fodder_operators = ["九色鹿"]
-    if t5_operators is None:
-        t5_operators = ["年"]
-    if book_operators is None:
-        book_operators = ["司霆惊蛰"]
-    from collections import defaultdict
-
-    from arknights_mower.data import workshop_formula
-
-    # 计划直接读 DB（get_all_plans 非终态）。matery_plan.json 是全仓库无写入者
-    # 的孤儿文件（@app/tmp 上的 stale key），UI/API/agent 新增计划不在里面；completed/
-    # failed 计划不核算材料（不消耗；failed 已由扫描钩子 retry_failed_plans 先重置 idle）。
-    from arknights_mower.utils.mastery_db import (
-        get_all_plans,
-        get_material_waiting_plan,
-    )
-
-    if plans is None:
-        plans = get_all_plans()
-
-    if plans:
-        try:
-            cultivate_path = get_path("@app/tmp/cultivate.json")
-            if os.path.exists(cultivate_path):
-                with open(cultivate_path, "r", encoding="utf-8") as f:
-                    cdata = json.load(f)
-                m3 = set()
-                for char in cdata.get("data", {}).get("characters", []):
-                    for idx, s in enumerate(char.get("skills", [])):
-                        if s.get("level", 0) >= 3:
-                            m3.add(f"{char.get('id')}_{idx}")
-                plans = [
-                    p for p in plans if f"{p['char_id']}_{p['skill_index']}" not in m3
-                ]
-        except Exception:
-            pass
-
-    # Starting/collecting a skill is not confirmation that training is underway.
-    current = next(
-        (
-            p
-            for p in plans
-            if p.get("status") in {"arranging", "training", "waiting_collect"}
-        ),
-        None,
-    )
-    current = current or get_material_waiting_plan(plans)
-    lookahead = current is not None and _workshop_lookahead_active(current)
-    candidates = (
-        [current]
-        if current is not None and not lookahead
-        else [p for p in plans if p.get("status", "idle") == "idle"]
-    )
-    if not candidates:
-        return []
-
-    skill_data_path = _find_skill_data()
-    with open(skill_data_path, "r", encoding="utf-8") as f:
-        skill_data = json.load(f)
-    items = skill_data.get("items", {})
-
-    from arknights_mower.utils.workshop_fodder import deer_fodder_items
-
-    fodder_items = deer_fodder_items()
-
-    t4_names = {
-        n: e
-        for n, e in workshop_formula.items()
-        if e.get("tab") == "精英材料" and e.get("apCost") == 4.0
-    }
-    t5_names = {
-        n: e
-        for n, e in workshop_formula.items()
-        if e.get("tab") == "精英材料" and e.get("apCost") == 8.0
-    }
-
-    rec_result = (
-        recommendations
-        if recommendations is not None
-        else get_mastery_recommendations()
-    )
-    operators = rec_result.get("operators", [])
-
-    recommendations = {
-        (op["char_id"], r["skill_index"]): r
-        for op in operators
-        if not op.get("mastery_error")
-        for r in op.get("recommendations", [])
-    }
-    reserved = {}
-    if lookahead:
-        current_rec = recommendations.get((current["char_id"], current["skill_index"]))
-        if current_rec is None:
-            return []  # Cannot safely spend stock without the active skill's costs.
-        reserved = _workshop_training_reserve(current, current_rec)
-
-    cultivate_path = get_path("@app/tmp/cultivate.json")
-    inventory = defaultdict(int)
-    if os.path.exists(cultivate_path):
-        with open(cultivate_path, "r", encoding="utf-8") as f:
-            cdata = json.load(f)
-        for item in cdata.get("data", {}).get("items", []):
-            cnt = int(item.get("count", 0))
-            if cnt > 0:
-                inventory[item.get("id", "")] = cnt
-
-    id_by_name = {}
-    for iid, info in items.items():
-        id_by_name[info.get("name", "")] = iid
-
-    def inv_of(name):
-        return max(
-            0, inventory.get(id_by_name.get(name, ""), 0) - reserved.get(name, 0)
-        )
-
-    from arknights_mower.utils.mastery_materials import MaterialBudget
-    from arknights_mower.utils.workshop_material_policy import (
-        protected_workshop_materials,
-    )
-
-    budget = MaterialBudget(
-        skill_data,
-        inventory,
-        workshop_formula,
-        blocked_materials=protected_workshop_materials(),
-    )
-    for candidate in candidates:
-        selected_rec = recommendations.get(
-            (candidate["char_id"], candidate["skill_index"])
-        )
-        if selected_rec is None:
-            continue
-        raw_demand = defaultdict(int)
-        for mat in _remaining_mastery_materials(candidate, selected_rec):
-            raw_demand[mat["name"]] += mat["count"]
-        summary = budget.calculate(
-            [
-                {
-                    "id": id_by_name.get(name, name),
-                    "count": raw_demand.get(name, 0) + reserved.get(name, 0),
-                }
-                for name in raw_demand.keys() | reserved.keys()
-            ]
-        )
-        if summary["craftable"]:
-            break
-        from arknights_mower.utils.log import logger
-
-        logger.debug(
-            f"专精计划 {candidate['char_id']} 技能{candidate['skill_index'] + 1} "
-            "材料不足，本轮跳过，等待后续仓库扫描"
-        )
-    else:
-        return []
-
-    demand_t5_raw = {n: c for n, c in raw_demand.items() if n in t5_names}
-    demand_t4_raw = {n: c for n, c in raw_demand.items() if n in t4_names}
-    demand_t3_plus = {
-        n: c for n, c in raw_demand.items() if n not in t4_names and n not in t5_names
-    }
-
-    t4_indirect = defaultdict(int)
-    for t5_name, t5_demand in demand_t5_raw.items():
-        t5_missing = max(0, t5_demand - inv_of(t5_name))
-        formula = t5_names.get(t5_name, {})
-        for child in formula.get("items", []):
-            if child in t4_names:
-                t4_indirect[child] += t5_missing
-
-    t4_total = defaultdict(int)
-    for name in set(list(demand_t4_raw.keys()) + list(t4_indirect.keys())):
-        t4_total[name] = demand_t4_raw.get(name, 0) + t4_indirect.get(name, 0)
-
-    # Low-tier specialists also need actual tasks (e.g. Foldbranch's 异铁组).
-    # Prefer game recipe quantities; legacy resources may only contain composite.
-    specialty_demand = defaultdict(int)
-    for name, count in demand_t3_plus.items():
-        formula = workshop_formula.get(name, {})
-        if formula.get("tab") == "精英材料" and 0 < formula.get("apCost", 0) < 4:
-            specialty_demand[name] += count
-    for name, demand in t4_total.items():
-        missing = max(0, demand - inv_of(name))
-        parent_id = id_by_name.get(name)
-        ingredients = (
-            skill_data.get("workshop", {}).get("recipe_ingredients", {}).get(parent_id)
-        )
-        if ingredients is None:
-            composite = skill_data.get("composite", {}).get(parent_id, {})
-            ingredients = {
-                child["id"]: child["count"] for child in composite.get("pathway", [])
-            }
-        for child_id, count in ingredients.items():
-            child_name = items.get(child_id, {}).get("name")
-            formula = workshop_formula.get(child_name, {})
-            if formula.get("tab") == "精英材料" and 0 < formula.get("apCost", 0) < 4:
-                specialty_demand[child_name] += missing * count
-    specialist_items = [
-        {"item_names": [name], "children_lower_limit": 0, "self_upper_limit": demand}
-        for name, demand in sorted(specialty_demand.items())
-        if demand > 0
-    ]
-
-    t4_items = []
-    for name, demand in sorted(t4_total.items()):
-        if demand > 0:
-            t4_items.append(
-                {
-                    "item_names": [name],
-                    "children_lower_limit": 0,
-                    "self_upper_limit": demand,
-                }
-            )
-
-    t5_items = []
-    for name, demand in sorted(demand_t5_raw.items()):
-        if demand > 0:
-            t5_items.append(
-                {
-                    "item_names": [name],
-                    "children_lower_limit": 0,
-                    "self_upper_limit": demand,
-                }
-            )
-
-    book_count = demand_t3_plus.get("技巧概要·卷3", 0)
-    book_items = (
-        [
-            {
-                "item_names": ["技巧概要·卷3"],
-                "children_lower_limit": 0,
-                "self_upper_limit": book_count,
-            }
-        ]
-        if book_count > 0
-        else []
-    )
-
-    from arknights_mower.utils.workshop_recommendation import allocate_workshop_items
-
-    def protect_active_materials(tasks):
-        # The existing executor uses batch crafting, so a start-only lower limit
-        # cannot protect stock. Defer recipes consuming any reserved ingredient.
-        return [
-            {
-                **task,
-                "self_upper_limit": task["self_upper_limit"]
-                + reserved.get(task["item_names"][0], 0),
-            }
-            for task in tasks
-            if not any(
-                reserved.get(child, 0) > 0
-                for child in workshop_formula[task["item_names"][0]]["items"]
-            )
-        ]
-
-    return allocate_workshop_items(
-        [
-            ("fodder_operators", fodder_operators, protect_active_materials(t4_items)),
-            ("t5_operators", t5_operators, protect_active_materials(t5_items)),
-            ("book_operators", book_operators, protect_active_materials(book_items)),
-        ],
-        fodder_items=fodder_items,
-        specialist_items=protect_active_materials(specialist_items),
-    )
-
-
-def compute_default_workshop_config(
-    fodder_operators=None, t5_operators=None, book_operators=None
-):
-    """默认 T4+T5+技巧概要配置，另为已解锁专属干员补入对应低阶配方。"""
-    if fodder_operators is None:
-        fodder_operators = ["九色鹿"]
-    if t5_operators is None:
-        t5_operators = ["年"]
-    if book_operators is None:
-        book_operators = ["司霆惊蛰"]
-    from arknights_mower.data import workshop_formula
-
-    t4_names = {
-        n
-        for n, e in workshop_formula.items()
-        if e.get("tab") == "精英材料" and e.get("apCost") == 4.0
-    }
-    t5_names = {
-        n
-        for n, e in workshop_formula.items()
-        if e.get("tab") == "精英材料" and e.get("apCost") == 8.0
-    }
-    from arknights_mower.utils.workshop_fodder import deer_fodder_items
-
-    fodder_items = deer_fodder_items()
-    default_t4 = [
-        {"item_names": [n], "children_lower_limit": 20, "self_upper_limit": 20}
-        for n in sorted(t4_names)
-    ]
-    default_t5 = [
-        {"item_names": [n], "children_lower_limit": 20, "self_upper_limit": 20}
-        for n in sorted(t5_names)
-    ]
-    default_book = [
-        {
-            "item_names": ["技巧概要·卷3"],
-            "children_lower_limit": 20,
-            "self_upper_limit": 20,
-        }
-    ]
-    specialist_items = [
-        {"item_names": [name], "children_lower_limit": 20, "self_upper_limit": 20}
-        for name, recipe in sorted(workshop_formula.items())
-        if recipe.get("tab") == "精英材料" and 0 < recipe.get("apCost", 0) < 4
-    ]
-    from arknights_mower.utils.workshop_recommendation import allocate_workshop_items
-
-    return allocate_workshop_items(
-        [
-            ("fodder_operators", fodder_operators, default_t4),
-            ("t5_operators", t5_operators, default_t5),
-            ("book_operators", book_operators, default_book),
-        ],
-        fodder_items=fodder_items,
-        specialist_items=specialist_items,
-    )
-
-
-def auto_schedule_mastery_tasks():
-    """仓库扫描后：检测计划内未满M3的技能，直接需求全部满足则返回待安排列表"""
+def auto_schedule_mastery_tasks(*, inventory=None):
+    """Return material-ready plans using supplied counts or shared local inventory."""
     result = {"scheduled": [], "skipped": []}
 
     # 计划直接读 DB（get_all_plans 非终态）——matery_plan.json 是全仓库无写入者
@@ -755,9 +449,6 @@ def auto_schedule_mastery_tasks():
     )
 
     plans = get_all_plans()
-    waiting = get_material_waiting_plan(plans)
-    if waiting is not None:
-        plans = [waiting]
     plan_set = {(p["char_id"], p["skill_index"]): p for p in plans}
     if not plan_set:
         return result
@@ -767,31 +458,70 @@ def auto_schedule_mastery_tasks():
         return result
 
     operators = rec_result.get("operators", [])
+    from .mastery_db import normalize_mastery_queue
+    from .mastery_order import mastery_groups
+
+    recommendations = {
+        (op["char_id"], rec["skill_index"]): rec
+        for op in operators
+        if not op.get("mastery_error")
+        for rec in op.get("recommendations", [])
+    }
+    levels = {key: rec.get("current_level", 0) for key, rec in recommendations.items()}
+    plans = normalize_mastery_queue(levels)
+    groups = mastery_groups(plans, levels)
+    group_heads = {
+        cid: next((p["id"] for p in group if p.get("status") == "idle"), None)
+        for cid, group in groups.items()
+    }
+    waiting = get_material_waiting_plan(plans)
+    if waiting is not None:
+        plan_set = {(waiting["char_id"], waiting["skill_index"]): waiting}
     from arknights_mower.utils.mastery_support_data import trainee_schedule_conflict
 
-    cultivate_path = get_path("@app/tmp/cultivate.json")
-    inventory = {}
-    if os.path.exists(cultivate_path):
-        try:
-            with open(cultivate_path, "r", encoding="utf-8") as f:
-                cdata = json.load(f)
-            for item in cdata.get("data", {}).get("items", []):
-                cnt = int(item.get("count", 0))
-                if cnt > 0:
-                    inventory[item.get("id", "")] = cnt
-        except Exception:
-            pass
+    if inventory is None:
+        from arknights_mower.solvers.record import get_inventory_counts
+
+        inventory = get_inventory_counts()
 
     skill_data_path = _find_skill_data()
     name_to_id = {}
+    skill_data = {}
     if os.path.exists(skill_data_path):
         try:
             with open(skill_data_path, "r", encoding="utf-8") as f:
-                items_table = json.load(f).get("items", {})
+                skill_data = json.load(f)
+                items_table = skill_data.get("items", {})
             for iid, info in items_table.items():
                 name_to_id[info.get("name", "")] = iid
         except Exception:
             pass
+
+    from arknights_mower.data import workshop_formula
+
+    from .mastery_materials import MaterialBudget
+    from .workshop_material_policy import protected_workshop_materials
+
+    budget = MaterialBudget(
+        skill_data,
+        {name_to_id.get(name, name): count for name, count in inventory.items()},
+        workshop_formula,
+        blocked_materials=protected_workshop_materials(),
+    )
+    group_craftable = {}
+    for cid, group in groups.items():
+        materials = []
+        for member in group:
+            member_rec = recommendations.get((cid, member["skill_index"]))
+            if member_rec is None:
+                group_craftable[cid] = False
+                break
+            materials.extend(
+                {"id": name_to_id.get(mat["name"], mat["name"]), "count": mat["count"]}
+                for mat in _remaining_mastery_materials(member, member_rec)
+            )
+        else:
+            group_craftable[cid] = budget.calculate(materials)["craftable"]
 
     for op in operators:
         if op.get("mastery_error"):
@@ -811,8 +541,7 @@ def auto_schedule_mastery_tasks():
                 needed[mat["name"]] += mat["count"]
             all_materials_sufficient = True
             for name, count in needed.items():
-                mat_id = name_to_id.get(name, "")
-                owned = inventory.get(mat_id, 0)
+                owned = inventory.get(name, 0)
                 if owned < count:
                     all_materials_sufficient = False
                     break
@@ -830,11 +559,29 @@ def auto_schedule_mastery_tasks():
                 entry["achievable"] = False
                 entry["reason"] = schedule_conflict
                 result["skipped"].append(entry)
+            elif not group_craftable.get(op["char_id"], True):
+                entry["achievable"] = False
+                entry["reason"] = "同干员相邻技能的联合材料需求尚不可合成"
+                result["skipped"].append(entry)
+            elif (
+                plan.get("status") == "idle"
+                and op["char_id"] in group_heads
+                and plan["id"] != group_heads[op["char_id"]]
+            ):
+                entry["achievable"] = False
+                entry["reason"] = "等待同干员前序技能，当前仅筹备一个技能的材料"
+                result["skipped"].append(entry)
             elif all_materials_sufficient:
                 result["scheduled"].append(entry)
             else:
                 result["skipped"].append(entry)
 
+    ranks = {(p["char_id"], p["skill_index"]): i for i, p in enumerate(plans)}
+    result["scheduled"].sort(
+        key=lambda entry: ranks.get(
+            (entry["char_id"], entry["skill_index"]), len(ranks)
+        )
+    )
     return result
 
 

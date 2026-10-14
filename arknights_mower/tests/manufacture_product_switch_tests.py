@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import cv2
+import numpy as np
 import pytest
 
 sys.modules.setdefault("arknights_mower.utils.skland", MagicMock())
@@ -92,6 +93,43 @@ def test_disabled_product_switching_skips_facility_reads(
     solver._read_trade_product_card.assert_not_called()
     solver._cache_facility_state.assert_not_called()
     assert config.conf.run_order_grandet_mode.enable is True
+
+
+@pytest.mark.parametrize("facility", ["manufacture", "trade", "power", "factory"])
+def test_facility_state_refresh_uses_title_over_conflicting_icon(facility):
+    titles = Path(__file__).parent / "fixtures/room_titles"
+    filename = (
+        "factory_entry_20261013.png"
+        if facility == "factory"
+        else f"{facility}_20261013.png"
+    )
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    frame[18:95, 568:957] = cv2.cvtColor(
+        cv2.imread(str(titles / filename)), cv2.COLOR_BGR2RGB
+    )
+    frame[20:92, 570:642] = cv2.cvtColor(
+        np.full((72, 72, 3), (25, 230, 220), dtype=np.uint8), cv2.COLOR_HSV2RGB
+    )
+    solver = object.__new__(base.BaseSchedulerSolver)
+    solver.recog = SimpleNamespace(img=frame)
+    solver.op_data = MagicMock()
+    solver._wait_drone_interface = MagicMock()
+    solver._cache_facility_state_from_current_page = MagicMock()
+    solver.scene_graph_navigation = MagicMock()
+    solver.refresh_facility_state("room_1_3")
+    if facility == "factory":
+        solver.op_data.update_facility_state.assert_not_called()
+        solver._wait_drone_interface.assert_not_called()
+    else:
+        solver.op_data.update_facility_state.assert_called_once_with(
+            "room_1_3", facility
+        )
+        if facility == "power":
+            solver._wait_drone_interface.assert_not_called()
+        else:
+            solver._cache_facility_state_from_current_page.assert_called_once_with(
+                "room_1_3", facility
+            )
 
 
 def test_product_switching_defaults_off_and_preserves_explicit_configuration():
@@ -725,6 +763,8 @@ def test_manufacture_product_change_handles_both_confirms_and_fills_queue():
         side_effect=lambda resource: resource == "manufacture_product_change_confirm"
     )
 
+    solver._read_manufacture_queue_count = MagicMock(return_value=99)
+    solver.recog = SimpleNamespace(update=MagicMock())
     solver._select_manufacture_product("exp3")
 
     assert [item.args for item in solver._tap_product_point.call_args_list] == [
@@ -754,6 +794,8 @@ def test_unified_product_change_waits_on_second_confirmation():
     sequence.attach_mock(solver.sleep, "sleep")
     sequence.attach_mock(solver._tap_product_point, "tap")
 
+    solver._read_manufacture_queue_count = MagicMock(return_value=99)
+    solver.recog = SimpleNamespace(update=MagicMock())
     solver._select_manufacture_product("exp3", datetime.now() + timedelta(seconds=3))
 
     names = [call[0] for call in sequence.mock_calls]
@@ -1008,16 +1050,18 @@ def test_reserved_product_bed_accepts_only_temporary_low_priority(monkeypatch):
     operators.is_effective_free_slot = MagicMock(return_value=True)
     operators.reserved_product_beds = {("dormitory_1", 0): "鸿雪"}
     operators.operators = {}
-    monkeypatch.setattr(
-        "arknights_mower.utils.operators.resting_tier",
-        lambda data, name: {
+
+    def tier(data, name):
+        return {
             "鸿雪": RestingTier.MAIN,
             "陈": RestingTier.MAIN,
             "红": RestingTier.STANDBY,
             "Lancet-2": RestingTier.REPLACEMENT,
             "城墙": RestingTier.IDLE,
-        }[name],
-    )
+        }[name]
+
+    for module in ("operators", "resting_priority"):
+        monkeypatch.setattr(f"arknights_mower.utils.{module}.resting_tier", tier)
     bed = SimpleNamespace(position=("dormitory_1", 0), name="")
 
     assert operators._slot_takable(bed, requester="鸿雪")
@@ -1075,6 +1119,8 @@ def test_manufacture_product_change_accepts_return_to_factory_list():
     solver._wait_product_resource = MagicMock()
     solver.find = MagicMock(side_effect=lambda resource: resource == "factory_collect")
 
+    solver._read_manufacture_queue_count = MagicMock(return_value=99)
+    solver.recog = SimpleNamespace(update=MagicMock())
     solver._select_manufacture_product("exp3")
 
     taps = [item.args[0] for item in solver._tap_product_point.call_args_list]
@@ -1096,7 +1142,11 @@ def test_manufacture_product_change_fails_when_neither_result_appears():
     solver.find = MagicMock(return_value=None)
     solver.sleep = MagicMock()
 
-    with pytest.raises(base.RecognizeError, match="补满队列确认或返回设施列表超时"):
+    solver._read_manufacture_queue_count = MagicMock(
+        side_effect=base.RecognizeError("无法识别制造站生产份数")
+    )
+    solver.recog = SimpleNamespace(update=MagicMock())
+    with pytest.raises(base.RecognizeError, match="制造站生产份数验证失败"):
         solver._select_manufacture_product("exp3")
 
 
@@ -1110,6 +1160,8 @@ def test_manufacture_product_change_selects_each_orundum_recipe(product_id, reci
     solver._wait_product_resource = MagicMock()
     solver.find = MagicMock(return_value="confirmed")
 
+    solver._read_manufacture_queue_count = MagicMock(return_value=99)
+    solver.recog = SimpleNamespace(update=MagicMock())
     solver._select_manufacture_product(product_id)
 
     taps = [item.args[0] for item in solver._tap_product_point.call_args_list]
@@ -2445,7 +2497,11 @@ def test_locked_trade_survey_only_caches_fixed_lmd_order():
     solver._tap_product_point.assert_not_called()
 
 
-def test_locked_trade_with_incompatible_target_defers_without_switching():
+@pytest.mark.parametrize("before_arrangement", [False, True])
+def test_locked_trade_with_incompatible_target_stops_without_rescheduling(
+    monkeypatch,
+    before_arrangement,
+):
     task = SchedulerTask(
         task_type=TaskTypes.SWITCH_PRODUCT,
         meta_data=product_task_meta("room_1_1", "orundum"),
@@ -2464,16 +2520,21 @@ def test_locked_trade_with_incompatible_target_defers_without_switching():
         }
     )
     solver._change_trade_product = MagicMock()
+    report = MagicMock()
+    monkeypatch.setattr(base.logger, "error", report)
 
-    started_at = datetime.now()
-    solver.switch_base_products([task])
+    original_time = task.time
+    with pytest.raises(base.ProductSwitchFailed, match="3级.*排班表"):
+        solver.switch_base_products([task], before_arrangement=before_arrangement)
 
     solver._change_trade_product.assert_not_called()
     assert solver.tasks == [task]
-    assert task.time >= started_at + timedelta(minutes=59)
+    assert task.time == original_time
+    report.assert_called_once()
+    assert "排班表" in report.call_args.args[0]
 
 
-def test_locked_trade_does_not_block_other_product_switches(monkeypatch):
+def test_locked_trade_reports_error_before_any_batch_changes(monkeypatch):
     locked_task = SchedulerTask(
         task_type=TaskTypes.SWITCH_PRODUCT,
         meta_data=product_task_meta("room_1_1", "orundum"),
@@ -2526,16 +2587,30 @@ def test_locked_trade_does_not_block_other_product_switches(monkeypatch):
     monkeypatch.setattr(config, "conf", config.Conf(product_switching={"enable": True}))
     config.conf.product_switching.grandet_mode = False
 
-    started_at = datetime.now()
-    solver.switch_base_products([locked_task, trade_task, manufacture_task])
+    original_times = [task.time for task in solver.tasks]
+    with pytest.raises(base.ProductSwitchFailed, match="3级.*排班表"):
+        solver.switch_base_products([locked_task, trade_task, manufacture_task])
 
-    solver._change_trade_product.assert_called_once_with(trade_observation)
-    solver._execute_manufacture_acceleration.assert_called_once_with(
-        manufacture_observation
-    )
-    solver._change_manufacture_product.assert_called_once_with(manufacture_observation)
-    assert solver.tasks == [locked_task]
-    assert locked_task.time >= started_at + timedelta(minutes=59)
+    solver._change_trade_product.assert_not_called()
+    solver._execute_manufacture_acceleration.assert_not_called()
+    solver._change_manufacture_product.assert_not_called()
+    assert solver.tasks == [locked_task, trade_task, manufacture_task]
+    assert [task.time for task in solver.tasks] == original_times
+
+
+def test_trade_lock_observed_at_execution_stops_before_selector_input(monkeypatch):
+    solver = object.__new__(base.BaseSchedulerSolver)
+    solver._open_trade_product_detail = MagicMock()
+    solver._read_trade_product_card = MagicMock(return_value=("lmd", False))
+    solver._cache_facility_state = MagicMock()
+    solver._tap_product_point = MagicMock()
+    solver.translate_room = MagicMock(return_value="B101")
+    report = MagicMock()
+    monkeypatch.setattr(base.logger, "error", report)
+    with pytest.raises(base.ProductSwitchFailed, match="3级.*排班表"):
+        solver._change_trade_product({"room": "room_1_1", "target_product": "orundum"})
+    solver._tap_product_point.assert_not_called()
+    report.assert_called_once()
 
 
 def test_trade_switch_opens_selector_only_when_needed_and_verifies_card():
@@ -2594,3 +2669,117 @@ def test_stable_shift_never_projects_or_switches_products():
 
     solver._products_after_arrangement.assert_not_called()
     solver.switch_base_products.assert_not_called()
+
+
+@pytest.mark.parametrize("text, expected", [("01", 1), ("99", 99), ("54", 54)])
+def test_read_manufacture_queue_count(text, expected):
+    solver = object.__new__(base.BaseSchedulerSolver)
+    solver.recog = SimpleNamespace(w=1920, h=1080)
+    solver._product_ocr_text = MagicMock(return_value=text)
+    assert solver._read_manufacture_queue_count() == expected
+    solver._product_ocr_text.assert_called_once_with(((1280, 450), (1415, 530)))
+
+
+@pytest.mark.parametrize("text", ["", "00", "100", "9x", "生产份数99"])
+def test_read_manufacture_queue_count_rejects_unknown(text):
+    solver = object.__new__(base.BaseSchedulerSolver)
+    solver.recog = SimpleNamespace(w=1920, h=1080)
+    solver._product_ocr_text = MagicMock(return_value=text)
+    with pytest.raises(base.RecognizeError, match="生产份数"):
+        solver._read_manufacture_queue_count()
+
+
+@pytest.mark.parametrize("failure", ["missed_max", "unreadable", "uncommitted"])
+def test_manufacture_product_change_retries_unverified_queue(failure):
+    solver = object.__new__(base.BaseSchedulerSolver)
+    solver.recog = SimpleNamespace(update=MagicMock())
+    solver.sleep = MagicMock()
+    solver._tap_product_point = MagicMock()
+    solver._wait_product_resource = MagicMock()
+    solver.find = MagicMock(return_value=True)
+    readings = {
+        "missed_max": [1, 1, 1, 99, 99],
+        "unreadable": [base.RecognizeError("未知份数"), 1, 99, 99],
+        "uncommitted": [1, 99, 1, 1, 99, 99],
+    }
+    solver._read_manufacture_queue_count = MagicMock(side_effect=readings[failure])
+
+    solver._select_manufacture_product("gold")
+
+    max_clicks = [
+        c for c in solver._tap_product_point.call_args_list if c.args == ((1450, 305),)
+    ]
+    assert len(max_clicks) == (1 if failure == "unreadable" else 2)
+    assert solver._read_manufacture_queue_count.call_count == len(readings[failure])
+
+
+def test_manufacture_product_change_never_accepts_one_unit_on_factory_page():
+    solver = object.__new__(base.BaseSchedulerSolver)
+    solver.recog = SimpleNamespace(update=MagicMock())
+    solver.sleep = MagicMock()
+    solver._tap_product_point = MagicMock()
+    solver._wait_product_resource = MagicMock()
+    solver.find = MagicMock(side_effect=lambda resource: resource == "factory_collect")
+    solver._read_manufacture_queue_count = MagicMock(return_value=1)
+
+    with pytest.raises(base.RecognizeError, match="制造站生产份数验证失败"):
+        solver._select_manufacture_product("exp3")
+
+    taps = [c.args[0] for c in solver._tap_product_point.call_args_list]
+    assert taps.count((1450, 305)) == 3
+    # Only the recipe confirmation is submitted; a one-unit quantity is never accepted.
+    assert taps.count((1425, 895)) == 1
+
+
+@pytest.mark.parametrize("verified", [False, True])
+def test_product_switch_retry_verifies_queue_when_recipe_already_matches(verified):
+    solver = object.__new__(base.BaseSchedulerSolver)
+    task = SchedulerTask(
+        task_type=TaskTypes.SWITCH_PRODUCT,
+        meta_data=product_task_meta("room_3_1", "gold"),
+    )
+    solver.tasks = [task]
+    solver.op_data = SimpleNamespace()
+    solver.recog = SimpleNamespace(update=MagicMock())
+    solver._open_manufacture_product_detail = MagicMock()
+    solver.read_manufacture_product = MagicMock(return_value="gold")
+    solver._cache_facility_state = MagicMock()
+    solver._select_manufacture_product = MagicMock()
+    solver.sleep = MagicMock()
+    solver.find = MagicMock(return_value=False)
+    solver._tap_product_point = MagicMock()
+    solver._read_manufacture_queue_count = MagicMock(return_value=99 if verified else 1)
+
+    if verified:
+        solver.switch_base_products([task])
+        assert solver.tasks == []
+    else:
+        with pytest.raises(base.RecognizeError, match="制造站生产份数验证失败"):
+            solver.switch_base_products([task])
+        assert solver.tasks == [task]
+    solver._select_manufacture_product.assert_not_called()
+    assert solver._read_manufacture_queue_count.called
+
+
+@pytest.fixture(scope="module")
+def queue_ocr_engine():
+    from rapidocr_onnxruntime import RapidOCR
+
+    return RapidOCR(text_score=0.3)
+
+
+@pytest.mark.parametrize("name, expected", [("queue_one", 1), ("queue_max", 99)])
+def test_read_manufacture_queue_count_from_capture(
+    monkeypatch, queue_ocr_engine, name, expected
+):
+    # yunxi B301, 2026-10-13 10:19:11 / 10:19:13; only quantity pixels are retained.
+    crop = cv2.imread(
+        str(Path(__file__).parent / "fixtures" / "manufacture" / f"{name}.png")
+    )
+    assert crop is not None
+    frame = cv2.copyMakeBorder(crop, 450, 550, 1280, 505, cv2.BORDER_CONSTANT)
+    solver = object.__new__(base.BaseSchedulerSolver)
+    solver.recog = SimpleNamespace(w=1920, h=1080, img=frame)
+    monkeypatch.setattr(base.rapidocr, "engine", queue_ocr_engine)
+
+    assert solver._read_manufacture_queue_count() == expected

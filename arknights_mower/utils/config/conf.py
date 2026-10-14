@@ -3,9 +3,16 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
-from arknights_mower import __rootdir__, __system__
+from arknights_mower import __rootdir__
 from arknights_mower.utils.config.device_profile import (
     LEGACY_NAMES,
     DeviceProfile,
@@ -19,7 +26,6 @@ from arknights_mower.utils.performance import (
     PERFORMANCE_PRESETS,
     default_performance_mode,
     default_performance_profile,
-    is_android_runtime,
 )
 
 DEFAULT_LAUNCH_COMMAND = (
@@ -78,6 +84,8 @@ class CluePart(ConfModel):
     "信用商店购物开关"
     maa_mall_mode: Literal["maa", "mower"] = "maa"
     "信用商店购物处理方式：maa / mower"
+    clue_credit_on_demand: bool = False
+    "仅在 Mower 访友及购物均启用时按需领取信息板信用"
     maa_mall_blacklist: str = "加急许可,碳,碳素,家具零件"
     "黑名单"
     maa_mall_buy: str = "招聘许可,技巧概要·卷2"
@@ -294,7 +302,36 @@ class MaaPart(ConfModel):
     maa_update_channel: str = "stable"
     "MAA 版本通道：stable 正式版，beta 公测版"
     maa_auto_check_update: bool = False
-    "进入 MAA 设置页后自动检查 MAA 本体及资源更新"
+    "进入 MAA 设置页后自动检查 MAA 本体更新"
+    maa_auto_update: bool = False
+    "检查发现 MAA 本体新版本时自动更新"
+    maa_resource_auto_check_update: bool = False
+    "进入 MAA 设置页后自动检查 MAA 资源更新"
+    maa_resource_auto_update: bool = False
+    "检查发现 MAA 资源新版本时自动更新"
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_maa_update_policy(cls, values):
+        if (
+            isinstance(values, dict)
+            and "maa_auto_check_update" in values
+            and "maa_resource_auto_check_update" not in values
+        ):
+            values = dict(values)
+            values["maa_resource_auto_check_update"] = values.get(
+                "maa_auto_check_update", False
+            )
+        return values
+
+    @model_validator(mode="after")
+    def maa_install_requires_check(self):
+        if self.maa_auto_update:
+            self.maa_auto_check_update = True
+        if self.maa_resource_auto_update:
+            self.maa_resource_auto_check_update = True
+        return self
+
     maa_conn_preset: str = Field(
         default_factory=lambda: "CompatMac" if sys.platform == "darwin" else "General"
     )
@@ -365,8 +402,6 @@ class RegularTaskPart(ConfModel):
     "日常任务间隔"
     medicine_expire_days: int = 0
     "自动使用将要过期的理智药（剩余天数，0 表示不使用）"
-    expiring_medicine_on_weekend: bool = False
-    "仅在周末使用将要过期的理智药"
     ap_fallback: int = 0
     "关卡体力消耗默认值（数据中找不到关卡时的兜底，0 表示不启用）"
     maa_eat_stone: bool = False
@@ -407,6 +442,14 @@ class RegularTaskPart(ConfModel):
     "访问好友处理方式：mower 原生 / maa 交 MAA"
     report_enable: bool = True
     "读取基报"
+    trust_rotation_enable: bool = False
+    "日常窗口检查基建副手与活动室信赖"
+    trust_rotation_prefer_low: bool = False
+    "优先选择低于信赖阈值的干员"
+    trust_rotation_threshold: int = Field(default=100, ge=1, le=200)
+    "优先信赖阈值（百分比）"
+    trust_rotation_interval: float = Field(default=24, ge=1, le=168)
+    "信赖检查间隔（小时）"
 
 
 class WorkShopItem(ConfModel):
@@ -498,11 +541,7 @@ class RIICPart(ConfModel):
     "选人界面稳定帧采样间隔（秒）"
     selection_transition_timeout: float = Field(default=2.5, ge=1, le=20)
     "选人界面操作反馈超时（秒）"
-    low_frame_rate_mode: bool = Field(
-        default_factory=lambda: (
-            os.environ.get("MOWER_ANDROID") == "1" or __system__ == "android"
-        )
-    )
+    low_frame_rate_mode: bool = False
     "旧版低帧率适配兼容字段；档位决定实际选人策略"
     drone_count_limit: int = 100
     "无人机使用阈值"
@@ -543,13 +582,8 @@ class RIICPart(ConfModel):
             else:
                 data["performance_mode"] = default_performance_mode()
         mode = data.get("performance_mode")
-        if mode in ("xhigh", "high") and is_android_runtime():
-            mode = data["performance_mode"] = "medium"
         if mode in PERFORMANCE_PRESETS:
             data["low_frame_rate_mode"] = PERFORMANCE_PRESETS[mode].low_frame_rate
-        elif is_android_runtime() and "low_frame_rate_mode" in data:
-            # 自动档在 Android 从中档开始；旧布尔值不能覆盖这一平台基线。
-            data["low_frame_rate_mode"] = True
         return data
 
     product_switching: ProductSwitchingConf = Field(
@@ -760,6 +794,12 @@ class SKLandPart(ConfModel):
 
 
 class AIAgentPart(ConfModel):
+    ai_assistant_enabled: StrictBool | None = None
+    "多开管理器保存的助手授权；未设置时采用启动模式默认值"
+
+    def assistant_enabled_for_launch(self, *, managed: bool) -> bool:
+        return not managed or self.ai_assistant_enabled is True
+
     ai_type: str = ""
     "名称"
     ai_key: str = ""
@@ -770,6 +810,26 @@ class AIAgentPart(ConfModel):
     "自定义 OpenAI 兼容接口地址"
     ai_model: str = ""
     "自定义模型名称"
+    ai_deepseek_model: str = "deepseek-flash"
+    "DeepSeek 模型 ID"
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_deepseek_selection(cls, data):
+        if isinstance(data, dict) and data.get("ai_type") in (
+            "deepseek-v4-flash",
+            "deepseek-flash",
+            "deepseek-v4-pro",
+        ):
+            model = data["ai_type"]
+            data = {
+                **data,
+                "ai_type": "deepseek",
+                "ai_deepseek_model": (
+                    "deepseek-flash" if model == "deepseek-v4-flash" else model
+                ),
+            }
+        return data
 
     @property
     def resolved_ai_key(self) -> str:
@@ -797,11 +857,8 @@ class MaaRewardPart(ConfModel):
     "领取五周年赠送月卡奖励"
 
 
-# 已退役的旧字段名 → 现在的字段名。旧键名拼写有误（exipring），已换名；旧配置文件或旧前端
-# 提交时仍会用旧键名，须在构造 Conf 时统一把它搬到新键名下——只在旧键名确实出现时搬运
-# （没配过就不写新键、不注入默认值），新旧并存时以新键为准（不覆盖）。
+# 旧配置文件及旧前端提交的字段在校验层统一迁移；新旧并存时以新键为准。
 _LEGACY_KEY_MIGRATIONS = {
-    "exipring_medicine_on_weekend": "expiring_medicine_on_weekend",
     "hot_update": "resource_update",
 }
 
@@ -1042,6 +1099,15 @@ class Conf(
     @property
     def should_run_mower_mall(self) -> bool:
         return bool(self.maa_mall_enable and self.maa_mall_mode == "mower")
+
+    @property
+    def should_defer_clue_credit(self) -> bool:
+        return bool(
+            self.clue_credit_on_demand
+            and self.should_run_mower_mall
+            and self.visit_friend_enable
+            and self.visit_friend_mode == "mower"
+        )
 
     @property
     def should_run_maa_visit_friend(self) -> bool:

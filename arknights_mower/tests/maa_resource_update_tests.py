@@ -47,6 +47,35 @@ class _JsonResponse:
 
 
 class TestMaaResourceVersion(unittest.TestCase):
+    def test_read_denied_version_exposes_path_and_guidance(self):
+        with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+            info = mru.read_maa_resource_info("/test/MAA")
+        self.assertEqual(info["version"], "")
+        self.assertIn("/test/MAA/resource/version.json", info["error"])
+        self.assertIn("访问被拒绝", info["error"])
+
+    def test_resource_merge_updates_readonly_staged_files_without_changing_original(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = root / "resource"
+            original.mkdir()
+            config = original / "config.json"
+            config.write_text("old", encoding="utf-8")
+            config.chmod(0o444)
+            previous_mode = config.stat().st_mode
+            archive = root / "resource.zip"
+            version = "2026-10-09 23:31:13.000"
+            _write_resource_zip(archive, version, files={"config.json": b"new"})
+            staged = root / "staged"
+            self.assertEqual(
+                mru.merge_resource_archive(archive, original, staged), version
+            )
+            self.assertEqual((staged / "config.json").read_text(), "new")
+            self.assertEqual(config.read_text(), "old")
+            self.assertEqual(config.stat().st_mode, previous_mode)
+
     def test_reads_local_resource_version(self):
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp)
@@ -138,6 +167,28 @@ class TestMaaResourceVersion(unittest.TestCase):
         self.assertEqual(params["current_version"], "2026-09-03 01:00:00.000")
         self.assertTrue(release.available)
         self.assertEqual(release.size, 123)
+
+    def test_android_uses_the_same_maa_resource_service(self):
+        session = Mock()
+        session.get.return_value = _JsonResponse(
+            {
+                "code": 0,
+                "data": {
+                    "version_name": "2026-09-04 01:07:54.000",
+                    "url": "https://example.test/resource.zip",
+                },
+            }
+        )
+        with patch.dict("os.environ", {"MOWER_ANDROID": "1"}):
+            release = mru.get_mirrorchyan_resource_release(
+                "fixture-token",
+                current_version="2026-09-03 01:00:00.000",
+                session=session,
+            )
+        self.assertTrue(release.available)
+        self.assertEqual(session.get.call_args.args[0], mru.MIRRORCHYAN_RESOURCE_API)
+        self.assertEqual(session.get.call_args.kwargs["params"]["cdk"], "fixture-token")
+        self.assertNotIn("os", session.get.call_args.kwargs["params"])
 
     def test_mirrorchyan_error_does_not_echo_token(self):
         token = "fixture-sensitive-token"
@@ -434,3 +485,81 @@ class TestInstallMaaResource(unittest.TestCase):
         self.assertEqual((self.resource / "old.txt").read_text(), "current")
         self.assertFalse((self.resource / "new.txt").exists())
         self.assertEqual((backup / "older.txt").read_text(), "older")
+
+
+class TestAndroidNavigationCompatibility(unittest.TestCase):
+    def setUp(self):
+        from types import SimpleNamespace
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.component = self.root / "component.zip"
+        self.tasks = {"YW-8": {"algorithm": "JustReturn"}}
+        self.bridge = Mock()
+        self.pack = Mock(side_effect=lambda target: self.package(self.tasks))
+        modules = {
+            "mower_android.bridge": SimpleNamespace(Bridge=lambda: self.bridge),
+            "mower_android.managed": SimpleNamespace(
+                COMPONENT=self.component, pack_component=self.pack
+            ),
+        }
+        self.enterContext(patch.dict("sys.modules", modules))
+
+    def package(self, tasks):
+        with ZipFile(self.component, "w") as archive:
+            archive.writestr("cache/resource/tasks.json", json.dumps(tasks))
+        self.component.with_suffix(".sha256").write_text("a" * 64)
+
+    def old_host(self, loaded):
+        def call(method, **params):
+            if method == "maa_navigation":
+                raise RuntimeError("Unknown MAA operation")
+            self.assertEqual(method, "maa_status")
+            return {"component_hash": loaded}
+
+        self.bridge.call.side_effect = call
+
+    def test_new_host_loads_without_repacking(self):
+        self.bridge.call.return_value = True
+        self.assertTrue(mru.load_android_maa_navigation(self.root, self.tasks))
+        self.pack.assert_not_called()
+        self.bridge.call.assert_called_once_with("maa_navigation", tasks=self.tasks)
+
+    def test_old_host_can_use_already_loaded_packaged_navigation(self):
+        self.package(self.tasks)
+        self.old_host("a" * 64)
+        self.assertTrue(mru.load_android_maa_navigation(self.root, self.tasks))
+        self.pack.assert_not_called()
+
+    def test_old_host_stages_changed_navigation_for_service_restart(self):
+        from arknights_mower.utils.maa_backup import MaaCallError
+
+        self.package({"OLD": {}})
+        self.old_host("b" * 64)
+        with self.assertRaises(MaaCallError) as raised:
+            mru.load_android_maa_navigation(self.root, self.tasks)
+        self.assertIn("重新启动手机服务", str(raised.exception))
+        self.assertIn("更新 APK 后可直接热加载导航", str(raised.exception))
+        self.pack.assert_called_once_with(self.root)
+        with ZipFile(self.component) as archive:
+            self.assertEqual(
+                json.loads(archive.read("cache/resource/tasks.json")), self.tasks
+            )
+
+    def test_old_host_pending_component_never_reports_loaded(self):
+        from arknights_mower.utils.maa_backup import MaaCallError
+
+        self.package(self.tasks)
+        self.old_host("b" * 64)
+        with self.assertRaises(MaaCallError):
+            mru.load_android_maa_navigation(self.root, self.tasks)
+        self.pack.assert_not_called()
+
+    def test_other_host_errors_never_trigger_repacking(self):
+        error = RuntimeError("navigation native load failed")
+        self.bridge.call.side_effect = error
+        with self.assertRaises(RuntimeError) as raised:
+            mru.load_android_maa_navigation(self.root, self.tasks)
+        self.assertIs(raised.exception, error)
+        self.pack.assert_not_called()

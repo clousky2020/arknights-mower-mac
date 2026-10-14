@@ -154,7 +154,11 @@ def test_additional_replacement_cannot_start_training(monkeypatch, backup):
 
 @pytest.mark.parametrize("backup", [False, True])
 @pytest.mark.parametrize("active", [False, True])
-def test_manual_training_stop_uses_additional_replacements(monkeypatch, backup, active):
+@pytest.mark.parametrize("mastery_enabled", [False, True])
+def test_manual_training_stop_uses_additional_replacements(
+    monkeypatch, backup, active, mastery_enabled
+):
+    monkeypatch.setattr(config.conf, "enable_mastery", mastery_enabled)
     monkeypatch.setattr(
         config, "plan", PlanModel(**schedule("meeting", "异客", backup))
     )
@@ -169,14 +173,14 @@ def test_manual_training_stop_uses_additional_replacements(monkeypatch, backup, 
         panel=SimpleNamespace(countdown_state="active" if active else "unknown"),
     )
     solver = MagicMock()
-    if active:
+    if active and not mastery_enabled:
         with pytest.raises(base_schedule.MowerExit):
             base_schedule._stop_if_scheduled_trainee(solver, "异客", room)
         save.assert_called_once()
     else:
         base_schedule._stop_if_scheduled_trainee(solver, "异客", room)
         save.assert_not_called()
-    assert stop.is_set() is active
+    assert stop.is_set() is (active and not mastery_enabled)
 
 
 @pytest.mark.parametrize("backup", [False, True])
@@ -201,7 +205,12 @@ def test_ownership_validation_includes_additional_bindings(
     refresh = MagicMock(return_value=True)
     monkeypatch.setattr(schedule_roster, "_refresh_roster", refresh)
     result = schedule_roster.validate_owned_operators(plan)
-    assert result == (None if owned_extra else "森空岛中未持有以下排班干员：黑角")
+    if owned_extra:
+        assert result is None
+    else:
+        assert result.startswith("森空岛中未持有以下排班干员：黑角")
+        assert "获取干员后" in result
+        assert "「养成规划」页面手动点击「刷新」" in result
     assert refresh.call_count == (0 if owned_extra else 1)
 
 

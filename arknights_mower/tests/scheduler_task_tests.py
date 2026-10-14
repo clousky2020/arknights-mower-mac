@@ -9,6 +9,7 @@ from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
     _merge_deferred_dorm_schedules,
+    adjust_run_order_for_maintenance,
     find_next_task,
     plan_metadata,
     rebalance_plan_swap_dorms,
@@ -19,6 +20,151 @@ from arknights_mower.utils.scheduler_task import (
 
 with patch.dict("sys.modules", {"save_action_to_sqlite_decorator": MagicMock()}):
     pass
+
+
+class TestRunOrderRestorationScheduling(unittest.TestCase):
+    def setUp(self):
+        from arknights_mower.utils import config
+
+        self.now = datetime(2026, 10, 8, 18)
+        conf = config.Conf()
+        conf.enable_mastery = False
+        conf.run_order_grandet_mode.enable = True
+        for replacement in (
+            patch.object(config, "conf", conf),
+            patch(
+                "arknights_mower.utils.scheduler_task.NewsChecker.get_update_time",
+                return_value=(None, None),
+            ),
+            patch(
+                "arknights_mower.utils.scheduler_task.NewsChecker.get_maintenance",
+                return_value=None,
+            ),
+            patch(
+                "arknights_mower.utils.scheduler_task.estimate_dorm_minutes",
+                return_value=1,
+            ),
+        ):
+            replacement.start()
+            self.addCleanup(replacement.stop)
+
+    def make_restore(self, seconds=0):
+        task = SchedulerTask(
+            time=self.now + timedelta(seconds=seconds),
+            task_plan={"room_1_1": ["图耶"]},
+            task_type=TaskTypes.RUN_ORDER,
+        )
+        task.run_order_original_roster = copy.deepcopy(task.plan)
+        task.run_order_restore_pending = True
+        return task
+
+    def test_restoration_between_orders_does_not_become_drone_adjustment_target(self):
+        first = SchedulerTask(
+            time=self.now + timedelta(minutes=1),
+            task_plan={"room_2_1": ["但书"]},
+            task_type=TaskTypes.RUN_ORDER,
+            meta_data="room_2_1",
+        )
+        restore = self.make_restore(seconds=120)
+        second = SchedulerTask(
+            time=self.now + timedelta(minutes=3),
+            task_plan={"room_3_1": ["但书"]},
+            task_type=TaskTypes.RUN_ORDER,
+            meta_data="room_3_1",
+        )
+        tasks = [first, restore, second]
+
+        self.assertIsNone(scheduling(tasks, time_now=self.now))
+
+        self.assertIn(restore, tasks)
+        self.assertEqual(first.time, self.now + timedelta(minutes=1))
+        self.assertEqual(restore.time, self.now + timedelta(minutes=2))
+        self.assertEqual(second.time, self.now + timedelta(minutes=3))
+        self.assertFalse(first.adjusted)
+        self.assertFalse(restore.adjusted)
+        self.assertFalse(second.adjusted)
+
+    def test_restoration_retains_unified_priority_over_due_ordinary_work(
+        self,
+    ):
+        restore = self.make_restore()
+        ordinary = SchedulerTask(
+            time=self.now - timedelta(minutes=1),
+            task_plan={"central": ["阿米娅"]},
+            task_type=TaskTypes.SELF_CORRECTION,
+        )
+        tasks = [ordinary, restore]
+
+        self.assertIsNone(scheduling(tasks, time_now=self.now))
+
+        self.assertIs(tasks[0], restore)
+        self.assertEqual(restore.time, self.now)
+        self.assertEqual(ordinary.time, self.now + timedelta(seconds=1))
+
+    def test_restoration_budget_excludes_grandet_wait_before_mastery_handoff(self):
+        from arknights_mower.utils import config
+
+        config.conf.enable_mastery = True
+        restore = self.make_restore()
+        ordinary = SchedulerTask(
+            time=self.now + timedelta(minutes=1),
+            task_plan={"central": ["阿米娅"]},
+            task_type=TaskTypes.SELF_CORRECTION,
+        )
+        handoff = SchedulerTask(
+            time=self.now + timedelta(minutes=3),
+            task_plan={"train": ["逻各斯"]},
+            task_type=TaskTypes.SWAP_SUPPORT,
+        )
+        tasks = [restore, ordinary, handoff]
+
+        self.assertIsNone(scheduling(tasks, execution_time=0.75, time_now=self.now))
+
+        self.assertIs(tasks[0], restore)
+        self.assertEqual(ordinary.time, self.now + timedelta(minutes=1))
+        self.assertEqual(handoff.time, self.now + timedelta(minutes=3))
+
+    def test_restoration_still_protects_strict_release_operation_window(self):
+        restore = self.make_restore(seconds=120)
+        release = SchedulerTask(
+            time=self.now + timedelta(minutes=5),
+            task_plan={"dormitory_1": ["Free"]},
+            task_type=TaskTypes.RELEASE_DORM,
+            meta_data="红",
+            strict_mood_limit=True,
+        )
+        tasks = [restore, release]
+
+        self.assertIsNone(scheduling(tasks, time_now=self.now))
+
+        self.assertLess(release.time + timedelta(minutes=1), restore.time)
+        self.assertEqual(restore.time, self.now + timedelta(minutes=2))
+        self.assertEqual(release.mood_limit_deadline, self.now + timedelta(minutes=5))
+
+    def test_maintenance_excludes_only_marked_restoration(self):
+        restore = self.make_restore(seconds=120)
+        saved_insertion = self.make_restore(seconds=180)
+        saved_insertion.meta_data = "room_1_1"
+        legacy = SchedulerTask(
+            time=self.now + timedelta(minutes=4),
+            task_plan={"room_2_1": ["鸿雪"]},
+            task_type=TaskTypes.RUN_ORDER,
+        )
+        start = self.now + timedelta(minutes=5)
+        with patch(
+            "arknights_mower.utils.scheduler_task.NewsChecker.get_update_time",
+            return_value=(start, start + timedelta(hours=6)),
+        ):
+            adjusted = adjust_run_order_for_maintenance(
+                [restore, saved_insertion, legacy]
+            )
+
+        self.assertEqual(adjusted, [legacy])
+        self.assertEqual(restore.time, self.now + timedelta(minutes=2))
+        self.assertEqual(saved_insertion.time, self.now + timedelta(minutes=3))
+        self.assertFalse(restore.adjusted)
+        self.assertFalse(saved_insertion.adjusted)
+        self.assertTrue(legacy.adjusted)
 
 
 class TestScheduling(unittest.TestCase):
@@ -478,8 +624,8 @@ class TestScheduling(unittest.TestCase):
         op_data.dorm[2].name = "夕"
         plan = try_reorder(op_data, {})
         self.assertEqual(plan["dormitory_1"][2:], ["夕", "Free", "Free"])
-        self.assertEqual(plan["dormitory_2"][2], "凯尔希")
-        self.assertEqual(plan["dormitory_3"][3], "麒麟R夜刀")
+        self.assertEqual(plan["dormitory_2"][2], "麒麟R夜刀")
+        self.assertEqual(plan["dormitory_3"][3], "凯尔希")
         projected = op_data.project_arrangements([plan])
         self.assertEqual(
             {bed.name for bed in projected.dorm if bed.name},
@@ -498,7 +644,7 @@ class TestScheduling(unittest.TestCase):
 
         plan = try_reorder(op_data, {})
         self.assertEqual(len(plan), 3)
-        self.assertEqual(plan["dormitory_1"][2:], ["夕", "凯尔希", "麒麟R夜刀"])
+        self.assertEqual(plan["dormitory_1"][2:], ["夕", "麒麟R夜刀", "凯尔希"])
         self.assertEqual(plan["dormitory_2"][2:4], ["森蚺", "Free"])
         self.assertEqual(plan["dormitory_3"][3], "见行者")
 
@@ -515,8 +661,8 @@ class TestScheduling(unittest.TestCase):
         first = try_reorder(op_data, {})
         second = try_reorder(op_data, {})
         self.assertEqual(first, second)
-        self.assertEqual(first["dormitory_1"][2:], ["夕", "玛恩纳", "Free"])
-        self.assertEqual(first["dormitory_2"][2:4], ["焰尾", "见行者"])
+        self.assertEqual(first["dormitory_1"][2:], ["夕", "见行者", "玛恩纳"])
+        self.assertEqual(first["dormitory_2"][2:4], ["焰尾", "Free"])
         self.assertEqual(first["dormitory_3"][3], "森蚺")
         projected = op_data.project_arrangements([first])
         self.assertCountEqual(
@@ -716,8 +862,8 @@ class TestScheduling(unittest.TestCase):
         self.assertIsNone(op_data.swap_plan([False], refresh=True))
         restored_tasks = []
         try_add_release_dorm({}, None, op_data, restored_tasks)
-        # 重新开放不抢占仍在位的单回目标，普通补位仍在其余空床进行。
-        self.assertFalse(self.task_writes_slot(restored_tasks, "dormitory_1", 2))
+        # 恢复为 Free 后，满心情占位者让出靠前恢复位给未恢复候选。
+        self.assertTrue(self.task_writes_slot(restored_tasks, "dormitory_1", 2))
         self.assertTrue(
             op_data.is_effective_free_slot(
                 next(bed for bed in op_data.dorm if bed.position == ("dormitory_1", 2))

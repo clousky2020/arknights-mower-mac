@@ -21,6 +21,7 @@ from arknights_mower.utils.logic_expression import LogicExpression
 from arknights_mower.utils.operation_timing import estimate_dorm_minutes
 from arknights_mower.utils.operators import Operator, build_global_plan
 from arknights_mower.utils.plan import Plan, PlanConfig
+from arknights_mower.utils.scene import Scene
 from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
@@ -164,7 +165,9 @@ def test_emergency_nonreading_tick_keeps_personal_limit_deadline(emergency_solve
     assert len(releases) == 1
     deadline = ling_xi_rest_limit_tests.NOW + timedelta(minutes=10)
     assert releases[0].mood_limit_deadline == deadline
-    assert releases[0].time == deadline - timedelta(minutes=estimate_dorm_minutes(ROOM))
+    assert releases[0].time == deadline - timedelta(
+        minutes=estimate_dorm_minutes(ROOM, 1.5)
+    )
     assert releases[0].release_dorm_targets() == {"银灰": (ROOM, 3)}
     assert solver.emergency_state["phase"] == "staffing"
     assert staffing in solver.tasks
@@ -191,7 +194,7 @@ def test_emergency_reading_tick_replans_limit_after_new_observation(emergency_so
     release = next(task for task in solver.tasks if task.strict_mood_limit)
     assert release.mood_limit_deadline == ling_xi_rest_limit_tests.NOW
     assert release.time == ling_xi_rest_limit_tests.NOW - timedelta(
-        minutes=estimate_dorm_minutes(ROOM)
+        minutes=estimate_dorm_minutes(ROOM, 1.5)
     )
     assert release.release_dorm_targets() == {"银灰": (ROOM, 3)}
     assert state["phase"] == "returning"
@@ -330,6 +333,11 @@ def test_emergency_fixed_manager_keeps_personal_limit_and_completed_cycle_identi
 def predicted_emergency_solver(emergency_solver):
     solver = emergency_solver
     data = solver.op_data
+    choices = [*data.plan["central"][0].replacement, "夜刀"]
+    data.plan["central"][0].replacement = choices
+    data.operators[data.plan["central"][0].agent].replacement = choices.copy()
+    data.add(Operator("夜刀", "", time_stamp=ling_xi_rest_limit_tests.NOW))
+    data.config.free_blacklist.append("夜刀")
     # 无替班可接手时，离宿实测必须达到目标；可交接提前退出另有覆盖。
     for name in data.plan["central"][0].replacement:
         op = data.operators[name]
@@ -471,6 +479,7 @@ def test_real_strict_release_arrangement_reads_departure_before_selection(
             True if resource == "confirm_blue" else find(resource, scope)
         )
     )
+    solver.scene = MagicMock(return_value=Scene.INFRA_ARRANGE_ORDER)
 
     at_selection = []
 

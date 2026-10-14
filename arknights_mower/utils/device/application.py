@@ -20,6 +20,7 @@ from arknights_mower.utils.device.adb_client.server import SharedADBError
 from arknights_mower.utils.device.discovery import DiscoveryResult, DiscoveryService
 from arknights_mower.utils.device.endpoint_identity import (
     AVD_PRESETS,
+    CONFIRMED_START_PRESETS,
     InstanceBindingError,
 )
 from arknights_mower.utils.device.genymotion import genymotion_repair
@@ -231,6 +232,7 @@ class DeviceResult(Generic[T]):
     value: T | None = None
     error: DeviceError | None = None
     readiness: ReadinessResult | None = None
+    helpers_rebuilt: bool = False
 
     def unwrap(self) -> T:
         """Compatibility boundary for callers using the existing exceptions."""
@@ -272,6 +274,7 @@ class DeviceControl(Generic[D]):
         self._genymotion = genymotion
         self._run_authorization: str | None = None
         self._run_active = False
+        self._defer_cancel_close = False
         self._session_error: Exception | None = None
         self._dispatch_pause: TouchFailure | None = None
         self._last_error: dict | None = None
@@ -815,6 +818,8 @@ class DeviceControl(Generic[D]):
 
     def stop_bound_simulator(self) -> bool:
         """Apply idle shutdown through the selected simulator's verified adapter."""
+        from arknights_mower.utils.device.session_io import MANAGED_INSTANCE_PRESETS
+
         if self._shutdown.is_set() or self._pending_close.is_set():
             return False
         with self._configuration():
@@ -822,22 +827,45 @@ class DeviceControl(Generic[D]):
             if (
                 not conf.close_simulator_when_idle
                 or is_android_runtime()
-                or conf.device.preset_id == "manual.physical"
+                or conf.device.preset_id
+                not in MANAGED_INSTANCE_PRESETS | CONFIRMED_START_PRESETS
                 or self._shutdown.is_set()
                 or self._pending_close.is_set()
             ):
                 return False
             try:
-                if conf.device.preset_id in AVD_PRESETS:
-                    return self.stop_owned_avd()
-                if self._session is None or (
+                is_avd = conf.device.preset_id in AVD_PRESETS
+                if is_avd:
+                    if self._avd is None:
+                        return False
+                elif self._session is None or (
                     conf.device.preset_id == "macos.mumu_pro"
                     and not conf.device.topology_fingerprint
                 ):
                     return False
-                return self._session.simulator.stop(conf.device, 10)
+                had_device = self._device is not None
+                dispatch_pause = self._dispatch_pause
+                try:
+                    # Remote helper identity checks require the live transport.
+                    self._close_resources().unwrap()
+                finally:
+                    self._dispatch_pause = dispatch_pause
+                if self._shutdown.is_set() or self._pending_close.is_set():
+                    return False
+                stopped = (
+                    self.stop_owned_avd()
+                    if is_avd
+                    else self._session.simulator.stop(conf.device, 10)
+                )
+                if not stopped and had_device:
+                    # A failed stop leaves scheduling active after its wait.
+                    self.recover().unwrap()
+                return stopped
             except InstanceBindingError as exc:
                 raise PreflightRejected(str(exc), exc.code) from exc
+            except (TimeoutError, subprocess.TimeoutExpired) as exc:
+                logger.warning(f"关闭已绑定模拟器超时，未确认关闭：{exc}")
+                return False
 
     def stop_owned_avd(self) -> bool:
         """Explicit task-end policy, separate from ordinary application close."""
@@ -859,8 +887,13 @@ class DeviceControl(Generic[D]):
         return self._device.device_id if self._device is not None else self._serial
 
     @contextmanager
-    def run(self, *, preparation_serial: str | None = None):
-        """Own authorization and cleanup for one whole scheduling run."""
+    def run(
+        self,
+        *,
+        preparation_serial: str | None = None,
+        defer_cancel_close: bool = False,
+    ):
+        """Own a run; optional bounded compensation precedes cancellation close."""
         if self._shutdown.is_set() or self._pending_close.is_set():
             self._closing_failure().unwrap()
         if self.active:
@@ -870,12 +903,14 @@ class DeviceControl(Generic[D]):
             # rather than treating its cached result as a permanent failure.
             self.close()
         self._run_active = True
+        self._defer_cancel_close = defer_cancel_close
         self._run_authorization = preparation_serial
         try:
             yield
         finally:
             self._run_authorization = None
             self._run_active = False
+            self._defer_cancel_close = False
             if not self.shutdown_requested:
                 self.close()
 
@@ -897,6 +932,7 @@ class DeviceControl(Generic[D]):
         connection_retries: int,
         preparation_serial: str | None = None,
         recovering: bool = False,
+        deadline: float | None = None,
     ) -> DeviceResult[D]:
         if (
             self._shutdown.is_set()
@@ -942,7 +978,8 @@ class DeviceControl(Generic[D]):
                         getattr(configuration, "simulator", None), "wait_time", 30
                     ),
                 )
-                deadline = self._session.begin_budget()
+                if deadline is None:
+                    deadline = self._session.begin_budget()
                 if self._adb_recovery is not None:
                     self._recover_adb_server(deadline)
             if self._preparation is not None:
@@ -1031,7 +1068,12 @@ class DeviceControl(Generic[D]):
         if self._dispatch_pause is not None:
             self._last_error = self._dispatch_pause.to_dict()
         return DeviceResult(
-            True, self._state, self.serial, self._device, readiness=self._readiness
+            True,
+            self._state,
+            self.serial,
+            self._device,
+            readiness=self._readiness,
+            helpers_rebuilt=True,
         )
 
     def _check_profile(self, profile):
@@ -1136,6 +1178,26 @@ class DeviceControl(Generic[D]):
         with self._configuration():
             return self._execute(operation)
 
+    def capture_once(self) -> np.ndarray:
+        """Read the effective backend once within the caller's input budget."""
+        # The enclosing input operation drains deferred cleanup after release.
+        with self.configuration_lock:
+            if (
+                self._shutdown.is_set()
+                or self._pending_close.is_set()
+                or self._closing_count
+            ):
+                raise MowerExit("设备会话正在关闭")
+            if self._helper_cleanup_error is not None:
+                raise self._helper_cleanup_error
+            if self._session_error is not None:
+                raise self._session_error
+            if self._device is None:
+                raise DeviceRecoveryError("设备会话尚未建立")
+            if self._screenshot is not None and self._screenshot.degraded:
+                return validate_frame(self._device.standard_frame())
+            return validate_frame(self._device.capture_frame())
+
     def capture(self) -> DeviceResult[np.ndarray]:
         """Capture may be repeated, but only within the selected backend budget."""
         if self._shutdown.is_set() or self._pending_close.is_set():
@@ -1161,15 +1223,15 @@ class DeviceControl(Generic[D]):
             def recover():
                 nonlocal recovering_capture
                 if self._session is not None:
-                    serial = self.serial
                     frame_probe = (
                         self._session.adb.standard_frame_size
                         if self._screenshot.backend == "droidcast"
                         else None
                     )
-                    self.recover(frame_probe=frame_probe).unwrap()
+                    recovered = self.recover(frame_probe=frame_probe)
+                    recovered.unwrap()
                     recovering_capture = True
-                    return bool(self._session.actions or self.serial != serial)
+                    return recovered.helpers_rebuilt
                 return False
 
             def capture():
@@ -1182,6 +1244,7 @@ class DeviceControl(Generic[D]):
                 with self._io_budget():
                     return self._standard_adb_ready()
 
+            was_degraded = self._screenshot.degraded
             result = self._execute(
                 lambda device: self._screenshot.capture(
                     capture, rebuild, recover, standard_adb
@@ -1190,6 +1253,10 @@ class DeviceControl(Generic[D]):
             )
             if result.ok and self._screenshot.failure is not None:
                 self._last_error = self._screenshot.failure.to_dict()
+                if not was_degraded and self._screenshot.degraded:
+                    logger.warning(
+                        f"截图已降级到同一设备的标准 ADB 后端：{self._screenshot.failure}"
+                    )
             return result
 
     def _standard_adb_ready(self) -> np.ndarray:
@@ -1261,7 +1328,7 @@ class DeviceControl(Generic[D]):
                     self._close_failure(exc, "device_cleanup_failed")
                 return self._failure("recovery_failed", exc)
             if isinstance(exc, MowerExit):
-                if not self.shutdown_requested:
+                if not self.shutdown_requested and not self._defer_cancel_close:
                     self.close()
                 return self._failure("operation_failed", exc)
             if self._session is not None and not isinstance(exc, MowerExit):
@@ -1287,17 +1354,53 @@ class DeviceControl(Generic[D]):
                 or self._closing_count
             ):
                 return self._closing_failure()
+            deadline = None
             if self._helper_cleanup_error is not None:
                 if self._cleanup_device is None:
                     return self._failure("close_failed", self._helper_cleanup_error)
                 dispatch_pause = self._dispatch_pause
-                closed = self._close_resources()
-                self._dispatch_pause = dispatch_pause
+                if self._session is not None:
+                    deadline = self._session.begin_budget()
+                try:
+                    with self._io_budget():
+                        closed = self._close_resources()
+                finally:
+                    self._dispatch_pause = dispatch_pause
+                if not closed.ok and self._session is not None:
+                    try:
+                        # Recover the original binding without opening helpers.
+                        # Cleanup must succeed before any replacement is built.
+                        if self._adb_recovery is not None:
+                            self._recover_adb_server(deadline)
+                        self._session.ensure_ready(
+                            deadline=deadline,
+                            frame_probe=getattr(
+                                self._session.adb, "standard_frame_size", None
+                            ),
+                        )
+                        if self._shutdown.is_set() or self._pending_close.is_set():
+                            raise MowerExit("设备会话正在关闭")
+                        with self._io_budget():
+                            closed = self._close_resources()
+                    except Exception as exc:
+                        self._state = (
+                            "cancelled"
+                            if isinstance(exc, MowerExit)
+                            and not isinstance(
+                                exc, (PreflightRejected, PreparationError)
+                            )
+                            else "failed"
+                        )
+                        return self._failure("recovery_failed", exc)
+                    finally:
+                        self._dispatch_pause = dispatch_pause
                 if not closed.ok:
                     return closed
             previous_error, self._session_error = self._session_error, None
             if self._device is None:
-                return self._start(connection_retries=1, recovering=True)
+                return self._start(
+                    connection_retries=1, recovering=True, deadline=deadline
+                )
             if self._session is None:
                 try:
                     reconnect = getattr(self._device, "reconnect", None)
@@ -1326,6 +1429,7 @@ class DeviceControl(Generic[D]):
                     return self._failure("recovery_failed", exc)
             try:
                 deadline = None
+                helpers_rebuilt = False
                 if self._adb_recovery is not None:
                     deadline = self._session.begin_budget()
                     self._recover_adb_server(deadline)
@@ -1421,6 +1525,7 @@ class DeviceControl(Generic[D]):
                                 )
                                 self._session._action(lambda timeout: True, deadline)
                             self._adapter.rebind(self._device, result)
+                            helpers_rebuilt = True
                             if input_probe is not None and not input_probe():
                                 raise TouchFailure(
                                     profile,
@@ -1445,7 +1550,12 @@ class DeviceControl(Generic[D]):
                     else None
                 )
                 return DeviceResult(
-                    True, self._state, self.serial, self._device, readiness=ready
+                    True,
+                    self._state,
+                    self.serial,
+                    self._device,
+                    readiness=ready,
+                    helpers_rebuilt=helpers_rebuilt,
                 )
             except Exception as exc:
                 if (

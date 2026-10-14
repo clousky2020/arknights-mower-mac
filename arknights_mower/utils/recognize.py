@@ -103,6 +103,11 @@ class Recognizer:
             raise MowerExit
         self.clear()
 
+    def set_frame(self, frame) -> None:
+        """安装本次手势按住期间的截图，后续输入仍照常清空缓存。"""
+        self.update()
+        self._screencap, self._img, self._gray = frame
+
     def reset_after_external_control(self) -> None:
         """重新开始连续观测时，丢弃旧标准画面帧及场景停留计时。"""
         self.update()
@@ -666,8 +671,6 @@ class Recognizer:
         # 连接中，优先级最高
         if self.find("connecting"):
             self.scene = Scene.CONNECTING
-        elif self.find("infra_overview"):
-            self.scene = Scene.INFRA_MAIN
         elif self.find("room_detail") or self.find("arrange_check_in_on"):
             # 进驻详情浮窗（浮窗头 room_detail 或浮窗上的关闭按钮 arrange_check_in_on）：
             # 浮窗开着时优先识别为详情浮层，须在 train_main/training_support 之前（否则
@@ -685,6 +688,8 @@ class Recognizer:
             self.scene = Scene.TRAIN_SKILL_UPGRADE_ERROR
         elif self.find("skill_confirm"):
             self.scene = Scene.TRAIN_SKILL_UPGRADE
+        elif self.find("infra_overview"):
+            self.scene = Scene.INFRA_MAIN
         else:
             self.scene = Scene.UNKNOWN
             self.check_current_focus()
@@ -704,8 +709,6 @@ class Recognizer:
         # 连接中，优先级最高
         if self.find("connecting"):
             self.scene = Scene.CONNECTING
-        elif self.find("infra_overview"):
-            self.scene = Scene.INFRA_MAIN
         elif self.find("factory_dashboard"):
             self.scene = Scene.FACTORY_DASHBOARD
         elif self.find("factory_formula") or self.find("factory_furniture"):
@@ -715,6 +718,8 @@ class Recognizer:
             self.scene = Scene.FACTORY_PRODUCT_COLLECT
         elif self.find("factory_tag"):
             self.scene = Scene.FACTORY_ROOM
+        elif self.find("infra_overview"):
+            self.scene = Scene.INFRA_MAIN
         else:
             self.scene = Scene.UNKNOWN
             self.check_current_focus()
@@ -889,6 +894,7 @@ class Recognizer:
 
         template_matching = {
             "recycle/dashboard": ((465, 148), (682, 264)),
+            "infra_collect_recycle": ((240, 980), (1920, 1080)),
             # "arrange_check_in": ((30, 300), (175, 700)),
             "terminal_main": ((0, 0), (1920, 1080)),
             "arrange_check_in_on": ((30, 300), (175, 700)),
@@ -998,6 +1004,17 @@ class Recognizer:
             if max_val >= threshold:
                 logger.debug(f"find: {res_name} {top_left=} {max_val=}")
                 return top_left, va(top_left, (w, h))
+            if res_name == "connecting":
+                # 进驻信息面板从 x=1231 开始遮住提交提示，只复核仍可见的文字。
+                # 高分文字和面板标题同时存在才判连接中，避免读取提交前的驻员。
+                visible_width = 1231 - scope[0][0]
+                visible_scope = scope[0], va(scope[0], (visible_width, h))
+                visible = cropimg(self.gray, visible_scope)
+                partial_score = cv2.matchTemplate(
+                    visible, res[:, :visible_width], cv2.TM_CCOEFF_NORMED
+                )[0, 0]
+                if partial_score >= 0.9 and self.find("room_detail"):
+                    return visible_scope
             return None
 
         dpi_aware = res in [

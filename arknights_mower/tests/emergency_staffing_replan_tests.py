@@ -19,6 +19,7 @@ from arknights_mower.tests.emergency_group_staffing_tests import (
 )
 from arknights_mower.tests.emergency_group_staffing_tests import staffing_task
 from arknights_mower.tests.mass_mood_recovery_tests import NOW, PRIMARY
+from arknights_mower.utils.scene import Scene
 from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
 
 
@@ -29,6 +30,7 @@ def reject_room(solver, task, room, monkeypatch):
     solver.ensure_dorm_recovery_order = MagicMock(return_value=False)
     solver._can_refresh_idle_dorm_search = MagicMock(return_value=False)
     solver.find = MagicMock(return_value=True)
+    solver.scene = MagicMock(return_value=Scene.INFRA_ARRANGE_ORDER)
     solver.choose_agent = MagicMock(
         side_effect=AgentSelectionNotReady("心情不足或无法读取")
     )
@@ -149,8 +151,8 @@ def test_direct_release_task_reserves_only_ready_individuals(recovery_fixture): 
     assert observed[0][1]
 
 
-@pytest.mark.parametrize("known_mood", [0, 24])
-def test_rejected_roster_retains_plan_and_rechecks_the_same_worker(
+@pytest.mark.parametrize("known_mood", [None, 0, 24])
+def test_rejected_roster_retries_same_worker_without_waiting_for_mood(
     staffing, monkeypatch, known_mood
 ):
     solver = staffing.solver
@@ -159,9 +161,8 @@ def test_rejected_roster_retains_plan_and_rechecks_the_same_worker(
     assert not staffing.state["staffing_complete"]
     solver.op_data.operators[rejected].time_stamp = None
     solver.op_data.dorm_mood_estimates.pop(rejected, None)
-    assert not solver._emergency_schedule_staffing()
-    assert not solver.tasks
-    solver.op_data.operators[rejected].mood = known_mood
-    solver.op_data.operators[rejected].time_stamp = NOW
+    if known_mood is not None:
+        solver.op_data.operators[rejected].mood = known_mood
+        solver.op_data.operators[rejected].time_stamp = NOW
     assert solver._emergency_schedule_staffing()
     assert staffing_task(solver).plan == original

@@ -37,21 +37,22 @@ from arknights_mower.utils.path import resolve_config_path
 # A polled read-only query is bounded to its own freshness: MuMu's ``info``
 # answers the readiness poll, which repeats until the transaction deadline, so
 # one slow answer is a wait rather than a reason to hold the whole budget.
-QUERY_TIMEOUT = 3
+QUERY_TIMEOUT = 10
 
 
 class _CommandWindow:
     def __init__(self, run, monotonic, timeout, command_timeout=None):
         self._run = run
         self._monotonic = monotonic
-        self._deadline = monotonic() + max(0, timeout)
+        self._timeout = max(0, timeout)
+        self._deadline = monotonic() + self._timeout
         self._command_timeout = command_timeout
 
     def remaining(self) -> float:
         remaining = self._deadline - self._monotonic()
         if remaining <= 0:
             raise TimeoutError("设备会话操作时间预算已耗尽")
-        return remaining
+        return min(self._timeout, remaining)
 
     def run(
         self, argv: list[str], timeout: float | None = None, *, raw_output: bool = False
@@ -583,7 +584,7 @@ class ProductionSimulator:
         if factory is None:
             return None
         run = self._manager_runner(factory)
-        query_timeout = getattr(profile, "manager_query_timeout", 3.0)
+        query_timeout = getattr(profile, "manager_query_timeout", QUERY_TIMEOUT)
         adapter = factory(
             profile,
             _CommandWindow(
