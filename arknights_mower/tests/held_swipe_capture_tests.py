@@ -338,3 +338,43 @@ def test_failed_release_keeps_structured_unknown_input_without_replay(monkeypatc
         fixture.peer.assert_not_called()
     finally:
         fixture.doCleanups()
+
+
+@pytest.mark.parametrize("fallback", ["scrcpy_channel", "input_swipe"])
+def test_capture_survives_the_avd_channels(gesture, monkeypatch, fallback):
+    """AVD 分支必须保 capture 语义：截图发生在抬手之前，插画面返回三元组。"""
+    device, events, clock, wait, stop, frame = gesture
+    device.avd_mode = True  # getprop 探测结果：is_avd_like 为真
+    device.force_input_tap = fallback == "input_swipe"
+    device.run = lambda command: events.append(("run", command))
+
+    if fallback == "scrcpy_channel":
+        seen_kwargs = {}
+
+        def control(*args, **kwargs):
+            seen_kwargs.update(kwargs)
+            if kwargs.get("before_release") is not None:
+                kwargs["before_release"]()
+            events.append(("up", clock.now))
+
+        device.control.scrcpy = SimpleNamespace()
+        device._control_with_retry = control
+    else:
+        # input swipe 通道无 before_release 参数：_swipe_ext 自身在命令后补跑
+        device.control.scrcpy = None
+
+    assert (
+        device.swipe_ext([(900, 970), (800, 970)], [0], up_wait=400, capture=True)
+        is frame
+    )
+    kinds = [event[0] for event in events if event[0] in ("capture", "up", "run")]
+    if fallback == "input_swipe":
+        # input swipe 无抬手指令，run 与 capture 相邻且都在命令发出之后
+        assert kinds == ["run", "capture"]
+        assert events == [
+            ("run", "input swipe 900 970 800 970 400"),
+            ("capture", pytest.approx(0.1)),
+        ]
+    else:
+        assert kinds == ["capture", "up"]
+        assert "before_release" in seen_kwargs

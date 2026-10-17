@@ -732,7 +732,7 @@ class Device:
         res = line.strip().replace("=", " ").split(" ")
         return int(res[2]), int(res[4]), int(res[6])
 
-    def _control_with_retry(self, method_name: str, *args) -> None:
+    def _control_with_retry(self, method_name: str, *args, **kwargs) -> None:
         """通过主触控通道（scrcpy/maatouch/mumu）执行触控。
 
         AVD 环境下，若 scrcpy 触控抛出异常，自动停止并重启 scrcpy-server 后重试，
@@ -740,10 +740,10 @@ class Device:
         非 AVD 或 scrcpy 不可用时直接调用，保持原有行为不变。
         """
         if not (self.is_avd_like and self.control.scrcpy is not None):
-            getattr(self.control, method_name)(*args)
+            getattr(self.control, method_name)(*args, **kwargs)
             return
         try:
-            getattr(self.control, method_name)(*args)
+            getattr(self.control, method_name)(*args, **kwargs)
         except MowerExit:
             raise
         except Exception as e:
@@ -757,7 +757,7 @@ class Device:
                     except Exception:
                         pass
                     self.control.scrcpy.start()
-                    getattr(self.control, method_name)(*args)
+                    getattr(self.control, method_name)(*args, **kwargs)
                     logger.info(f"{method_name} 经 scrcpy 重启后重试成功")
                     return
                 except MowerExit:
@@ -887,8 +887,21 @@ class Device:
             self.run(
                 f"input swipe {int(start[0])} {int(start[1])} {int(end[0])} {int(end[1])} {duration}"
             )
+            # input swipe 无抬手前回调，capture 语义仍需在此处补上截图
+            if before_release is not None:
+                before_release()
         elif self.is_avd_like:
-            self._control_with_retry("swipe_ext", points, durations, up_wait)
+            self._control_with_retry(
+                "swipe_ext",
+                points,
+                durations,
+                up_wait,
+                **(
+                    {"before_release": before_release}
+                    if before_release is not None
+                    else {}
+                ),
+            )
         else:
             self.control.swipe_ext(
                 points,
