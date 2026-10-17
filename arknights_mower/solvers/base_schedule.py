@@ -3502,7 +3502,11 @@ class BaseSchedulerSolver(
                 return
             if scan_moods and not self._initial_mood_read_pending():
                 reserved, _ = dorm_task_reservations(
-                    self.op_data, [self.task, *self.tasks]
+                    self.op_data,
+                    # self.task 仅在 run() 主循环里赋值；仓库扫描后的 plan_solver、
+                    # 以及 run() 首次 _fill_empty_dorms 都在其之前触发本方法，
+                    # 未绑定时退化为只看任务列表。
+                    [getattr(self, "task", None), *self.tasks],
                 )
                 candidates = dorm_candidates(self.op_data, reserved)
                 if not (candidates.recovering or candidates.estimated_recovering):

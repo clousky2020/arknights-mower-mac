@@ -2697,6 +2697,46 @@ class TestDormShiftOffMerge(unittest.TestCase):
         )
 
 
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_plan_primary_recovery_without_assigned_task_uses_task_list_only(self):
+        """run() 主循环赋值 self.task 之前触发的恢复规划不得直接崩溃。
+
+        仓库扫描后 plan_solver 与 run() 首次 _fill_empty_dorms 都在
+        self.task 绑定前进入本路径，必须退化为只看任务列表。
+        """
+        solver = BaseSchedulerSolver()
+        solver.op_data = SimpleNamespace(
+            config=SimpleNamespace(free_room=False),
+            operators={},
+            dorm=[],
+            print=lambda: "{}",
+        )
+        solver.tasks = []
+        solver._prepare_shift_cycle = MagicMock()
+        solver._refresh_deferred_product_reservations = MagicMock()
+        solver._scan_card_moods = MagicMock()
+        solver.find_next_task = MagicMock(return_value=None)
+        solver.resting = MagicMock(return_value={})
+        solver._initial_mood_read_pending = MagicMock(return_value=False)
+        reserved = ({"阿米娅"}, set())
+        with (
+            patch.object(
+                base_schedule,
+                "dorm_task_reservations",
+                return_value=reserved,
+            ) as reservations,
+            patch.object(
+                base_schedule,
+                "dorm_candidates",
+                return_value=SimpleNamespace(recovering=[], estimated_recovering=[]),
+            ),
+            patch.object(base_schedule, "try_reorder", return_value=None),
+        ):
+            self.assertTrue(solver._plan_primary_recovery())
+        (op_data, tasks), _ = reservations.call_args
+        self.assertIs(op_data, solver.op_data)
+        self.assertEqual(tasks, [None])
+        solver._scan_card_moods.assert_called_once()
 class TestDroneAccelerate(unittest.TestCase):
     """#907：无人机加速面板首次点击未生效时不应误消费跑单任务。
 
