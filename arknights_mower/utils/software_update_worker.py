@@ -38,6 +38,7 @@ if __package__:
         registration_key,
         submission_lock,
         utf8_output,
+        wait_for_supervisor_release,
         write_json,
     )
 else:
@@ -54,6 +55,7 @@ else:
         registration_key,
         submission_lock,
         utf8_output,
+        wait_for_supervisor_release,
         write_json,
     )
 
@@ -1395,6 +1397,8 @@ class Worker:
         while time.monotonic() < deadline:
             self.stopped = [r for r in self.original if not process_alive(r["pid"])]
             if len(self.stopped) == len(self.original):
+                for record in self.original:
+                    wait_for_supervisor_release(record, deadline)
                 return
             time.sleep(0.5)
         raise RuntimeError(
@@ -1561,6 +1565,12 @@ class Worker:
         )
 
     def restart(self, records, verify=True, *, recovery=False):
+        # 按需计算服务参与更新前关闭；由恢复后的实例按需重建。
+        records = [
+            record
+            for record in records
+            if record.get("kind") not in ("ocr-service", "ocr-worker")
+        ]
         self.report(
             "restarting",
             "恢复原版本实例，等待网页服务就绪"

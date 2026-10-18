@@ -21,6 +21,44 @@ COLOR_FORMAT = f"%(log_color)s{BASIC_FORMAT}"
 DATE_FORMAT = None
 basic_formatter = logging.Formatter(BASIC_FORMAT, DATE_FORMAT)
 color_formatter = colorlog.ColoredFormatter(COLOR_FORMAT, DATE_FORMAT)
+LIVE_LOG_CAPACITY = 256
+LIVE_LOG_MESSAGE_LIMIT = 16 * 1024
+
+
+def _live_message(message):
+    if len(message) <= LIVE_LOG_MESSAGE_LIMIT:
+        return message
+    suffix = "\n[实时日志已截断，完整内容见 runtime.log]"
+    return message[: LIVE_LOG_MESSAGE_LIMIT - len(suffix)] + suffix
+
+
+class LatestLogQueue(Queue):
+    """消费停滞时淘汰最旧记录，生产者和退出标记不等待空位。"""
+
+    def __init__(self, maxsize=LIVE_LOG_CAPACITY):
+        if maxsize <= 0:
+            raise ValueError("日志队列容量必须大于 0")
+        super().__init__(maxsize=maxsize)
+        self.dropped = 0
+
+    def put(self, item, block=True, timeout=None):
+        if isinstance(item, str):
+            item = _live_message(item)
+        with self.not_full:
+            if self._qsize() >= self.maxsize:
+                self._get()
+                self.unfinished_tasks -= 1
+                self.dropped += 1
+            self._put(item)
+            self.unfinished_tasks += 1
+            self.not_empty.notify()
+
+
+class LiveQueueHandler(QueueHandler):
+    def prepare(self, record):
+        prepared = super().prepare(record)
+        prepared.msg = prepared.message = _live_message(prepared.message)
+        return prepared
 
 
 class PackagePathFilter(logging.Filter):
@@ -111,12 +149,12 @@ class Handler(logging.StreamHandler):
 
 
 # w(ebsocket)hlr: WebSocket
-frontend_log_queue = Queue()
+frontend_log_queue = LatestLogQueue()
 whlr = Handler()
 whlr.setLevel(logging.INFO)
 
-log_queue = Queue()
-queue_handler = QueueHandler(log_queue)
+log_queue = LatestLogQueue()
+queue_handler = LiveQueueHandler(log_queue)
 logger.addHandler(queue_handler)
 listener = QueueListener(log_queue, dhlr, whlr, respect_handler_level=True)
 listener.start()
@@ -276,7 +314,7 @@ def close_screenshot_store(timeout=5) -> dict:
     if store is None:
         return {"remaining_threads": []}
     result = store.close(timeout=timeout)
-    if result["remaining_threads"]:
+    if result["remaining_threads"] or result.get("remaining_encoding_workers"):
         logger.warning("截图关闭超过等待预算，剩余后台操作：%s", result)
     return result
 
@@ -294,7 +332,11 @@ def save_screenshot_frame(img, sub_folder=None, *, capture_ms=None) -> None:
     store = _store()
     if store is None:
         return
-    filename = store.submit_frame(img, sub_folder, capture_ms=capture_ms)
+    try:
+        filename = store.submit_frame(img, sub_folder, capture_ms=capture_ms)
+    except MemoryError as exc:
+        store._report_error("截图快照内存不足，本帧不保存", str(exc))
+        return
     logger.debug(filename)
 
 

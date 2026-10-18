@@ -140,38 +140,50 @@ def test_runtime_recovery_preserves_scheduler_and_refreshes_capture(
     recovery.csleep.assert_called_once_with(30)
 
 
-def test_unknown_side_effect_keeps_task_and_worker_until_cancel(
-    task_main, monkeypatch, cancellation
+@pytest.mark.parametrize("cancel_observation", [False, True])
+def test_unknown_side_effect_observes_before_existing_solver_reentry(
+    task_main, monkeypatch, cancellation, cancel_observation
 ):
+    from arknights_mower.utils import crash_recovery
+
     failure = TouchFailure(
         Conf().device, "windows", OSError("unknown"), delivery_unknown=True
     )
     device = object()
     control = SimpleNamespace(
         shutdown_requested=False,
+        close=Mock(return_value=SimpleNamespace(unwrap=lambda: None)),
         recover=Mock(return_value=SimpleNamespace(unwrap=lambda: device)),
         pause_dispatch=Mock(),
     )
     pending = [object()]
     scheduler = SimpleNamespace(
-        device=device, tasks=pending, recog=SimpleNamespace(update=Mock())
+        device=device,
+        tasks=pending,
+        recog=SimpleNamespace(update=Mock(), reset_after_external_control=Mock()),
     )
     monkeypatch.setattr(task_main, "device_control", control)
-    sleeps = []
 
-    def stop_after_paused(seconds):
-        sleeps.append(seconds)
-        if len(sleeps) == 3:
+    def observe(current):
+        assert current is scheduler and current.tasks is pending
+        control.close.assert_called_once_with()
+        control.recover.assert_called_once_with()
+        if cancel_observation:
             cancellation.set()
             raise MowerExit
 
-    monkeypatch.setattr(task_main, "csleep", stop_after_paused)
-    with pytest.raises(MowerExit):
-        task_main._resume_device_dispatch(scheduler, failure)
+    observed = Mock(side_effect=observe)
+    monkeypatch.setattr(crash_recovery, "observe_scheduler", observed)
+    if cancel_observation:
+        with pytest.raises(MowerExit):
+            task_main._resume_device_dispatch(scheduler, failure)
+    else:
+        assert task_main._resume_device_dispatch(scheduler, failure) is device
     assert scheduler.tasks is pending
-    assert control.pause_dispatch.call_count == 2
-    assert control.recover.call_count == 2
-    assert scheduler.recog.update.call_count == 2
+    observed.assert_called_once_with(scheduler)
+    control.pause_dispatch.assert_not_called()
+    scheduler.recog.reset_after_external_control.assert_called_once_with()
+    scheduler.recog.update.assert_not_called()
 
 
 def _unknown_delivery_failure():
@@ -184,70 +196,78 @@ def _pausing_control(device):
     return SimpleNamespace(
         shutdown_requested=False,
         recover=Mock(return_value=SimpleNamespace(unwrap=lambda: device)),
+        close=Mock(return_value=SimpleNamespace(unwrap=lambda: None)),
         pause_dispatch=Mock(),
     )
 
 
-def _stop_after_third_sleep(cancellation):
-    sleeps = []
-
-    def stop_after_paused(seconds):
-        sleeps.append(seconds)
-        if len(sleeps) == 3:
-            cancellation.set()
-            raise MowerExit
-
-    return stop_after_paused
-
-
-def test_freeze_entry_notifies_once_through_the_email_channel(
+def test_uncertain_entry_notifies_once_through_the_email_channel(
     task_main, monkeypatch, cancellation
 ):
+    from arknights_mower.utils import crash_recovery
+
     failure = _unknown_delivery_failure()
     device = object()
     control = _pausing_control(device)
     scheduler = SimpleNamespace(
-        device=device, tasks=[object()], recog=SimpleNamespace(update=Mock())
+        device=device,
+        tasks=[object()],
+        recog=SimpleNamespace(update=Mock(), reset_after_external_control=Mock()),
     )
     monkeypatch.setattr(task_main, "device_control", control)
     notify = Mock()
     monkeypatch.setattr("arknights_mower.utils.email.send_message", notify)
-    monkeypatch.setattr(
-        task_main, "csleep", _stop_after_third_sleep(cancellation)
-    )
+
+    def observe(current):
+        assert current is scheduler
+        cancellation.set()
+        raise MowerExit
+
+    observed = Mock(side_effect=observe)
+    monkeypatch.setattr(crash_recovery, "observe_scheduler", observed)
 
     with pytest.raises(MowerExit):
         task_main._resume_device_dispatch(scheduler, failure)
 
-    # 进入冻结时通知一次；循环空转不再重复通知。
+    # 进入接续前通知一次；观察失败重试不再重复通知。
     assert notify.call_count == 1
     assert notify.call_args.kwargs["level"] == "ERROR"
 
 
-def test_notification_failure_never_breaks_the_freeze_loop(
+def test_notification_failure_never_breaks_the_observation_loop(
     task_main, monkeypatch, cancellation
 ):
+    from arknights_mower.utils import crash_recovery
+
     failure = _unknown_delivery_failure()
     device = object()
     control = _pausing_control(device)
     pending = [object()]
     scheduler = SimpleNamespace(
-        device=device, tasks=pending, recog=SimpleNamespace(update=Mock())
+        device=device,
+        tasks=pending,
+        recog=SimpleNamespace(update=Mock(), reset_after_external_control=Mock()),
     )
     monkeypatch.setattr(task_main, "device_control", control)
     notify = Mock(side_effect=OSError("smtp unreachable"))
     monkeypatch.setattr("arknights_mower.utils.email.send_message", notify)
-    monkeypatch.setattr(
-        task_main, "csleep", _stop_after_third_sleep(cancellation)
-    )
+
+    def observe(current):
+        assert current is scheduler and current.tasks is pending
+        cancellation.set()
+        raise MowerExit
+
+    observed = Mock(side_effect=observe)
+    monkeypatch.setattr(crash_recovery, "observe_scheduler", observed)
 
     with pytest.raises(MowerExit):
         task_main._resume_device_dispatch(scheduler, failure)
 
-    # 通知通道故障不得改变冻结语义：仍保留任务，仍只由取消退出。
+    # 通知通道故障不得改变接续语义：仍保留任务，观察仍继续执行。
     assert notify.call_count == 1
     assert scheduler.tasks is pending
-    assert control.pause_dispatch.call_count == 2
+    observed.assert_called_once_with(scheduler)
+    control.pause_dispatch.assert_not_called()
 
 
 def test_ordinary_recovery_never_notifies(task_main, monkeypatch):

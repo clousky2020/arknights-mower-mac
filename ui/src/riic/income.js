@@ -1,3 +1,4 @@
+import receptionTemplate from '../../../arknights_mower/resources/room/meeting.png?url'
 import officeTemplate from '../../../arknights_mower/resources/room/contact.png?url'
 import recycleTemplate from '../../../arknights_mower/resources/room/recycle.png?url'
 import { DEFAULT_DRONE_CAPACITY } from './vendor/domain/droneCapacity'
@@ -10,8 +11,8 @@ import { normalizeProductionWeights } from './vendor/domain/productionWeights'
 import { incomeInitialInventory } from './incomeCache'
 import { parseOperatorInventory, compileOperatorInventory } from './vendor/domain/operatorInventory'
 
-export const CALCULATOR_REVISION = '9c0b53c'
-export const MOWER_REFERENCE = 'ab0a4e5'
+export const CALCULATOR_REVISION = '5529403'
+export const MOWER_REFERENCE = '80c97ee6'
 export function defaultIncomeSettings() {
   return {
     warmupDays: 3,
@@ -29,7 +30,6 @@ export function defaultIncomeSettings() {
     mowerAlgorithm: null,
     initialInventory: {},
     jayeElite0: false,
-    masteryPlanPresent: false,
     operatorMode: 'cache',
     operatorText: '',
     productionWeights: normalizeProductionWeights()
@@ -90,10 +90,7 @@ export function incomeRequest(plan, settings) {
     options: {
       engine: 'simulation',
       jayeElite0: settings.jayeElite0,
-      simulationAssumptions: {
-        ...mowerAdvancedAssumptions(workspace),
-        masteryPlanPresent: settings.masteryPlanPresent
-      },
+      simulationAssumptions: mowerAdvancedAssumptions(workspace),
       simulationOptions: {
         schedulingModel: 'mower-alpha',
         warmupHours: settings.warmupDays * 24,
@@ -101,8 +98,7 @@ export function incomeRequest(plan, settings) {
         maxStepHours: 0.25,
         maxEvents: 200000,
         warmupModel: 'hourly',
-        recordSegments: false,
-        recordMorale: true,
+        recordSegments: true,
         operatorInventory: operators,
         productionWeights: incomeWeights(settings),
         production: {
@@ -146,19 +142,25 @@ export function applyMowerIncomeSettings(settings, value) {
   })
 }
 
+export function incomeGoldEquivalentLmd(summary) {
+  return (
+    (summary.goldValue ?? (summary.goldCount ?? 0) * 500) +
+    (summary.virtualGoldValue ?? (summary.virtualGoldCount ?? 0) * 500)
+  )
+}
+
 export function incomeMetrics(summary, days) {
   return [
     ['经验', summary.exp, '经验值'],
-    ['赤金产量', summary.goldCount, '个'],
-    ['赤金消耗', summary.goldConsumed, '个'],
-    ['赤金净增', summary.netGoldCount, '个'],
+    ['赤金等价龙门币', incomeGoldEquivalentLmd(summary), '龙门币'],
     ['贸易龙门币', summary.orderLmd, '龙门币'],
     ['龙门币消耗', summary.lmdConsumed, '龙门币'],
     ['龙门币净增', summary.netLmd, '龙门币'],
     ['源石碎片', summary.fragments, '个'],
     ['合成玉', summary.orundum, '个'],
     ['回收站产出', summary.recycleCount, '次'],
-    ['公招刷新', summary.recruitmentCount, '次']
+    ['公招刷新', summary.recruitmentCount, '次'],
+    ...(summary.clueCount == null ? [] : [['会客室线索', summary.clueCount, '个']])
   ].map(([label, daily, unit]) => ({ label, daily: daily ?? 0, total: (daily ?? 0) * days, unit }))
 }
 
@@ -168,10 +170,8 @@ export function incomeImageMetrics(summary, days) {
     {
       key: 'gold',
       icon: '/product/gold.png',
-      daily: summary.netGoldCount,
-      unit: '个',
-      signed: true,
-      present: summary.goldCount || summary.goldConsumed
+      daily: incomeGoldEquivalentLmd(summary),
+      unit: '龙门币'
     },
     {
       key: 'lmd',
@@ -184,7 +184,8 @@ export function incomeImageMetrics(summary, days) {
     { key: 'fragment', icon: '/product/orirock.png', daily: summary.fragments, unit: '个' },
     { key: 'orundum', icon: '/product/orundum.png', daily: summary.orundum, unit: '个' },
     { key: 'recycle', icon: recycleTemplate, daily: summary.recycleCount, unit: '次' },
-    { key: 'recruitment', icon: officeTemplate, daily: summary.recruitmentCount, unit: '次' }
+    { key: 'recruitment', icon: officeTemplate, daily: summary.recruitmentCount, unit: '次' },
+    { key: 'clue', icon: receptionTemplate, daily: summary.clueCount, unit: '个' }
   ]
     .filter((row) => Math.abs(row.daily ?? 0) > 1e-8 || Math.abs(row.present ?? 0) > 1e-8)
     .map((row) => ({ ...row, daily: row.daily ?? 0, total: (row.daily ?? 0) * days }))

@@ -11,7 +11,7 @@ import type { MowerMainConf, RosterWorkspace } from '../domain/roster'
 import type { CompiledSchedule, CompiledSlot, SimulationAssumptions } from './types'
 
 const DEFAULTS: SimulationAssumptions = {
-  schemaVersion: 1, initialMorale: 24, enableParty:false, leifengMode:true, droneIntervalHours:3, droneCountLimit:100, reloadRooms:[], maaGapHours:3, restingThreshold: 0.65, rescueThreshold: 0.75, freeRoom: false, dormOrder: '', groupRestInFullOnMoodGap: true, groupMoodGapThresholdMinutes: 60, groupMoodGapMaxExtraWaitHours: 0, mergeIntervalMinutes: 10, enableMastery: true, fiammettaFool: true, fiammettaThreshold: 0.9, operatorMorale: {}, dormAtmosphere: 0,
+  schemaVersion: 1, initialMorale: 24, enableParty:false, leifengMode:true, droneIntervalHours:3, droneCountLimit:100, reloadRooms:[], maaGapHours:3, restingThreshold: 0.65, rescueThreshold: 0.75, freeRoom: false, dormOrder: '', groupRestInFullOnMoodGap: true, groupMoodGapThresholdMinutes: 75, groupMoodGapMaxExtraWaitHours: 0, groupMoodGapExclusions: [], mergeIntervalMinutes: 10, enableMastery: true, fiammettaFool: true, fiammettaThreshold: 0.9, operatorMorale: {}, dormAtmosphere: 0,
   initialGold: 0, initialFragments: 0, initialDrones: 0,
   collectionIntervalHours: 0, operationDurationHours: 0, horizonHours: 24 * 90,
   elitePhase: 2, currentOccupants: {},
@@ -29,7 +29,8 @@ function safeClone<T>(val: T): T {
 
 export function compileRosterSchedule(workspace: RosterWorkspace, options: Partial<SimulationAssumptions> = {}): CompiledSchedule {
   const sourceWorkspace = safeClone(workspace)
-  const explicitOptions = Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)) as Partial<SimulationAssumptions>
+  // Retired training state from older callers cannot re-enable local mastery plans.
+  const explicitOptions = Object.fromEntries(Object.entries(options).filter(([key, value]) => value !== undefined && key !== 'masteryPlanPresent' && key !== 'mowerMasteryPlanPresent')) as Partial<SimulationAssumptions>
   const assumptions = { ...DEFAULTS, ...mowerAdvancedAssumptions(workspace), ...safeClone(explicitOptions), schemaVersion: 1 as const }
   // User contract: Party Time is a fixed disabled external condition.
   assumptions.enableParty=false
@@ -41,7 +42,6 @@ export function compileRosterSchedule(workspace: RosterWorkspace, options: Parti
     if (!Array.isArray(assumptions.dormIsolation) || assumptions.dormIsolation.some(group => !Array.isArray(group) || group.some(name => typeof name !== 'string' || !isKnown(resolveOperatorCharId(name))))) invalid('assumptions.dormIsolation', '宿舍隔离必须为已知干员名单的分组列表')
     else assumptions.dormIsolation = assumptions.dormIsolation.map(group => [...new Set(group.map(resolveOperatorCharId))])
   }
-  if(assumptions.masteryPlanPresent!==undefined&&typeof assumptions.masteryPlanPresent!=='boolean')invalid('assumptions.masteryPlanPresent','训练计划状态必须为布尔值')
   if(assumptions.majorMaintenanceStartHours!==undefined&&(!Number.isFinite(assumptions.majorMaintenanceStartHours)||assumptions.majorMaintenanceStartHours<0))invalid('assumptions.majorMaintenanceStartHours','Maintenance start must be a nonnegative finite hour offset')
   if(assumptions.runOrderSimulationMode!==undefined&&assumptions.runOrderSimulationMode!=='ideal')invalid('assumptions.runOrderSimulationMode','Invalid simulation run-order mode')
   for (const key of ['enableMastery','enableParty','leifengMode'] as const) if (typeof assumptions[key] !== 'boolean') invalid('assumptions.'+key, 'Native scheduling switch must be boolean')
@@ -51,6 +51,8 @@ export function compileRosterSchedule(workspace: RosterWorkspace, options: Parti
   if (!Number.isInteger(assumptions.groupMoodGapThresholdMinutes) || assumptions.groupMoodGapThresholdMinutes! < 1 || assumptions.groupMoodGapThresholdMinutes! > 1440) invalid('assumptions.groupMoodGapThresholdMinutes', '恢复时间差阈值必须为 1–1440 分钟的整数')
   if (typeof assumptions.groupRestInFullOnMoodGap !== 'boolean') invalid('assumptions.groupRestInFullOnMoodGap', 'group_rest_in_full_on_mood_gap must be boolean')
   if (!Number.isFinite(assumptions.groupMoodGapMaxExtraWaitHours) || assumptions.groupMoodGapMaxExtraWaitHours! < 0 || assumptions.groupMoodGapMaxExtraWaitHours! > 24) invalid('assumptions.groupMoodGapMaxExtraWaitHours', 'group_mood_gap_max_extra_wait_hours must be within 0..24')
+  if (!Array.isArray(assumptions.groupMoodGapExclusions) || assumptions.groupMoodGapExclusions.some(group => typeof group !== 'string' || !group.trim())) invalid('assumptions.groupMoodGapExclusions', '延后回班排除组必须为非空组名列表')
+  else assumptions.groupMoodGapExclusions = [...new Set(assumptions.groupMoodGapExclusions)]
   if (!Number.isFinite(assumptions.mergeIntervalMinutes)) invalid('assumptions.mergeIntervalMinutes', 'merge_interval must be finite')
   if (typeof assumptions.freeRoom !== 'boolean') invalid('assumptions.freeRoom', 'free_room must be boolean')
   if (!Number.isFinite(assumptions.restingThreshold) || assumptions.restingThreshold! < 0 || assumptions.restingThreshold! > 1) invalid('assumptions.restingThreshold', 'Resting threshold must be within 0..1')

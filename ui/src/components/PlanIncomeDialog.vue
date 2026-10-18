@@ -1,10 +1,11 @@
 <script setup>
-import { computed, inject, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   defaultIncomeSettings,
   incomeFacilities,
   incomeMetrics,
   incomeRequest,
+  incomeWorkspace,
   inventoryRequired,
   applyMowerIncomeSettings
 } from '@/riic/income'
@@ -13,7 +14,9 @@ import { incomeAlgorithms, incomeAlgorithmLabel, incomeSettingsUrl } from '@/uti
 import { createIncomeSession } from '@/riic/incomeSession'
 import { loadIncomeArchive, saveIncomeArchive } from '@/riic/incomeArchive'
 import { incomeLogTime } from '@/riic/incomeLogs'
-import IncomeMoraleChart from './IncomeMoraleChart.vue'
+import IncomeTimeline from './IncomeTimeline.vue'
+import IncomeActivity from './IncomeActivity.vue'
+import { validateRosterWorkspace } from '@/riic/vendor/workbench/validate'
 import {
   renderIncomeImage,
   downloadIncomeImage,
@@ -31,6 +34,8 @@ const cacheError = ref('')
 const weightsBusy = ref(false)
 const weightsError = ref('')
 const submitting = ref(false)
+const validating = ref(false)
+const errorAlert = ref(null)
 const controller = new AbortController()
 let alive = true
 let sharedRatios = null
@@ -117,6 +122,7 @@ const exporting = ref(false)
 const exportError = ref('')
 const exported = ref(false)
 const exportName = ref('')
+const exportDetails = reactive({ author: '', remarks: '' })
 const completedSnapshot = ref(null)
 const archiveLoading = ref(true)
 const archiveError = ref('')
@@ -174,6 +180,9 @@ const metrics = computed(() =>
   state.result?.success ? incomeMetrics(state.result.summary, state.result.observedHours / 24) : []
 )
 const summary = computed(() => state.bottleneck?.slowest ?? state.bottleneck?.latest)
+const planIssues = computed(() =>
+  props.snapshot ? validateRosterWorkspace(incomeWorkspace(props.snapshot.plan)).issues : []
+)
 const format = (value) => Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 const weights = [
   ['exp', '经验'],
@@ -229,6 +238,8 @@ async function restoreResult() {
     completedSnapshot.value = record.snapshot
     savedAt.value = record.savedAt
     exportName.value = record.exportName || ''
+    exportDetails.author = record.exportDetails?.author || ''
+    exportDetails.remarks = record.exportDetails?.remarks || ''
     progressLog.value = record.progressLog
     Object.assign(state, {
       result: record.result,
@@ -244,7 +255,11 @@ async function restoreResult() {
 }
 async function persistResult() {
   if (!lastCompleted) return
-  lastCompleted = { ...lastCompleted, exportName: exportName.value }
+  lastCompleted = {
+    ...lastCompleted,
+    exportName: exportName.value,
+    exportDetails: { ...exportDetails }
+  }
   archiveError.value = ''
   try {
     await saveIncomeArchive(lastCompleted)
@@ -254,7 +269,13 @@ async function persistResult() {
   }
 }
 function saveName() {
-  if (lastCompleted && lastCompleted.exportName !== exportName.value) persistResult()
+  if (
+    lastCompleted &&
+    (lastCompleted.exportName !== exportName.value ||
+      (lastCompleted.exportDetails?.author || '') !== exportDetails.author ||
+      (lastCompleted.exportDetails?.remarks || '') !== exportDetails.remarks)
+  )
+    persistResult()
 }
 async function start() {
   if (archiveLoading.value || submitting.value || state.running || exporting.value) return
@@ -264,7 +285,20 @@ async function start() {
   try {
     if (settings.weightMode === 'mower') await readWeights()
     if (!alive) return
-    incomeRequest(props.snapshot.plan, settings)
+    const { image, ...snapshot } = props.snapshot
+    const captured = { ...JSON.parse(JSON.stringify(snapshot)), image }
+    const runSettings = JSON.parse(JSON.stringify(settings))
+    incomeRequest(captured.plan, runSettings)
+    validating.value = true
+    const { data: validation } = await axios.post(
+      `${import.meta.env.VITE_HTTP_URL}/validate-plan`,
+      { plan: captured.plan, operatorMode: runSettings.operatorMode },
+      { timeout: 0, signal: controller.signal }
+    )
+    validating.value = false
+    if (!alive) return
+    if (validation.success !== true)
+      throw new Error(validation.message || '排班校验未通过，尚未开始演算')
     exportGeneration++
     exported.value = false
     exportError.value = ''
@@ -275,12 +309,16 @@ async function start() {
     logPage.value = 1
     logSearch.value = ''
     activeTab.value = 'logs'
-    const { image, ...snapshot } = props.snapshot
-    runSnapshot = { ...JSON.parse(JSON.stringify(snapshot)), image }
-    session.start(runSnapshot.plan, settings)
+    runSnapshot = captured
+    session.start(runSnapshot.plan, runSettings)
   } catch (error) {
-    if (alive) state.error = error.message
+    if (alive) {
+      state.error = error.message
+      await nextTick()
+      if (alive) errorAlert.value?.$el?.scrollIntoView?.({ block: 'nearest' })
+    }
   } finally {
+    validating.value = false
     if (alive) submitting.value = false
   }
 }
@@ -297,7 +335,8 @@ async function exportImage() {
       state.input.settings,
       state.input.plan,
       completedSnapshot.value.theme,
-      completedSnapshot.value.roomBounds
+      completedSnapshot.value.roomBounds,
+      { ...exportDetails }
     )
     if (generation !== exportGeneration) return
     downloadIncomeImage(blob, incomeImageFilename(name, state.result))
@@ -332,8 +371,10 @@ onBeforeUnmount(() => {
     preset="card"
     title="计算收益"
     class="income-dialog"
-    style="width: 760px; max-width: 95vw; max-height: 90vh"
-    :content-style="{ overflowY: 'auto' }"
+    :content-style="{
+      overflowY: 'auto',
+      paddingBottom: activeTab === 'timeline' ? '0' : undefined
+    }"
     :mask-closable="false"
     @update:show="!$event && close()"
   >
@@ -354,10 +395,15 @@ onBeforeUnmount(() => {
         <n-progress type="line" :percentage="Math.floor((state.progress?.fraction ?? 0) * 100)" />
         <p>{{ state.progress?.label || '正在准备演算' }} · 已用 {{ seconds }} 秒</p>
         <n-alert v-if="silent || state.progress?.activity?.status === 'slow'" type="warning">{{
-          state.progress?.activity?.message || '暂未收到新的进度，可以继续等待或停止演算。'
+          state.progress?.activity?.status === 'slow'
+            ? '演算推进较慢，具体任务与校验记录见“演算日志”。'
+            : '暂未收到新的进度，可以继续等待或停止演算。'
         }}</n-alert>
       </div>
-      <n-alert v-if="state.error" class="notice" type="error">
+      <n-alert v-if="validating" class="notice" type="info" role="status">
+        正在校验排班组合，完成后自动开始演算。可关闭窗口取消等待。
+      </n-alert>
+      <n-alert v-if="state.error" ref="errorAlert" role="alert" class="notice" type="error">
         {{ state.error }}
         <p v-for="(d, i) in attemptDiagnostics" :key="i">{{ d.message }}</p>
       </n-alert>
@@ -366,10 +412,19 @@ onBeforeUnmount(() => {
       >
       <n-tabs v-model:value="activeTab" type="line" animated>
         <n-tab-pane name="settings" tab="参数配置">
+          <n-alert v-if="planIssues.length" class="notice" type="warning" title="排班校验提示">
+            <p>副表单独生效的警告仅供检查，实际组合仍在切表前校验。</p>
+            <ul>
+              <li v-for="(issue, i) in planIssues" :key="i">{{ issue.message }}</li>
+            </ul>
+          </n-alert>
           <n-alert class="notice" type="info">
             使用打开窗口时的完整排班快照；预热不计收益。演算采用固定版本的离线模型和理想跑单，结果不代表实测收入。
+            点击开始演算时自动校验排班，校验通过后才启动；全员满练与手动练度不校验森空岛名单。
             初始心情为
             24；设施等级读取排班保存值，未设置时推断；宿舍氛围按等级上限。导入收益图可恢复完整排班及高级设置。
+            指定回满的主班须全部达标，多绑组也须遵守；同组恢复时间差触发延迟回班后，还须等单绑非候补主班回满。候补、替班及多绑组不延长这项组内等待，本体与演算均按排班中的额外等待上限限制这项等待，0
+            表示不限时；指定回满要求不受该上限限制。开启不养闲人后，先回满的成员可按原有清退规则离宿，其余成员继续休息。
           </n-alert>
           <n-form
             :disabled="state.running || exporting || submitting || weightsBusy"
@@ -443,9 +498,6 @@ onBeforeUnmount(() => {
             <n-form-item label="孑精零"
               ><n-switch v-model:value="settings.jayeElite0"
             /></n-form-item>
-            <n-form-item label="有未完成训练计划"
-              ><n-switch v-model:value="settings.masteryPlanPresent"
-            /></n-form-item>
             <n-form-item label="使用有限库存"
               ><n-switch
                 :value="required || settings.finiteInventory"
@@ -457,7 +509,7 @@ onBeforeUnmount(() => {
                 <n-select
                   v-model:value="settings.inventorySource"
                   :options="[
-                    { label: '沿用森空岛缓存（可补填修改）', value: 'cache' },
+                    { label: '沿用森空岛缓存（可修改）', value: 'cache' },
                     { label: '手动设定', value: 'manual' }
                   ]"
                 />
@@ -465,7 +517,7 @@ onBeforeUnmount(() => {
               <p v-if="settings.inventorySource === 'cache'">
                 {{
                   settings.cachedInventory
-                    ? '未提供的数量保持空白，请补填后演算。重新读取会替换本次缓存修改。'
+                    ? '未提供的数量按 0 计算，可手动修改。重新读取会替换本次缓存修改。'
                     : '没有可用库存缓存，请同步或选择手动设定。'
                 }}
                 {{
@@ -493,11 +545,9 @@ onBeforeUnmount(() => {
                 :key="item.resource"
                 :label="item.label"
                 ><n-input-number
-                  :value="
-                    stock?.[item.resource] ?? (settings.inventorySource === 'manual' ? 0 : null)
-                  "
+                  :value="stock?.[item.resource] ?? 0"
                   :disabled="!stock || state.running || exporting || submitting || weightsBusy"
-                  placeholder="缓存未提供，请补填"
+                  placeholder="0"
                   :min="0"
                   :max="Number.MAX_SAFE_INTEGER"
                   :precision="0"
@@ -573,6 +623,30 @@ onBeforeUnmount(() => {
                 :disabled="exporting"
             /></n-form-item>
             <p>排班名称仅用于 JPG 文件名，后附日均加权收益和采样天数；图片不显示名称。</p>
+            <n-form-item label="作者" :show-feedback="false">
+              <n-input
+                v-model:value="exportDetails.author"
+                @change="saveName"
+                placeholder="可选，显示在收益与订单统计下方"
+                :maxlength="40"
+                :disabled="exporting"
+              />
+            </n-form-item>
+            <n-form-item label="备注" :show-feedback="false">
+              <n-input
+                v-model:value="exportDetails.remarks"
+                @change="saveName"
+                type="textarea"
+                placeholder="可填写排班版本、适用条件或使用说明"
+                :maxlength="300"
+                show-count
+                :autosize="{ minRows: 2, maxRows: 4 }"
+                :disabled="exporting"
+              />
+            </n-form-item>
+            <p>
+              作者和备注随收益记录保存，导出时显示在收益与订单统计下方；留空不占空间，无需重新演算。
+            </p>
             <p>
               本次结果：预热 {{ state.input.settings.warmupDays }} 天、统计
               {{ state.input.settings.sampleDays }} 天。修改参数后需重新演算；再次导出使用本次结果。
@@ -588,6 +662,10 @@ onBeforeUnmount(() => {
                   ? incomeAlgorithmLabel(state.input.settings.mowerAlgorithm)
                   : '本次自定义'
               }}；回收站仅计产出次数。
+            </p>
+            <p>
+              赤金等价龙门币 = 制造赤金 × 500 + 龙舌兰等特殊订单溢价；不扣除交付消耗的赤金。
+              <span v-if="state.result.inventoryMode === 'finite'">实际消耗及余额见库存收支。</span>
             </p>
             <h3>日均加权产出 {{ format(state.result.summary.totalScore82) }}</h3>
             <n-table size="small"
@@ -667,16 +745,32 @@ onBeforeUnmount(() => {
             >
           </template>
         </n-tab-pane>
-        <n-tab-pane name="morale" tab="心情曲线" display-directive="show:lazy">
-          <IncomeMoraleChart
-            v-if="state.result?.success"
-            :rows="state.result.morale"
-            :plan="state.input.plan"
-            :warmup-hours="state.input.settings.warmupDays * 24"
+        <n-tab-pane name="timeline" tab="工作记录" display-directive="show:lazy">
+          <IncomeTimeline
+            v-if="
+              state.result?.success && state.result.simulationReport && state.result.timelineData
+            "
+            :report="state.result.simulationReport"
+            :timeline-data="state.result.timelineData"
           />
-          <n-empty v-else description="演算完成后显示心情曲线" />
+          <n-empty
+            v-else
+            :description="
+              state.result?.success
+                ? '这份历史演算记录不含工作记录，请重新演算。原收益和排班图片仍可查看、导出。'
+                : '演算完成后显示工作记录'
+            "
+          />
         </n-tab-pane>
         <n-tab-pane name="logs" tab="演算日志">
+          <n-alert
+            v-if="state.running && state.progress?.activity"
+            class="notice"
+            :type="state.progress.activity.status === 'slow' ? 'warning' : 'info'"
+            title="运行中的演算观察"
+          >
+            <IncomeActivity :activity="state.progress.activity" />
+          </n-alert>
           <n-alert
             v-if="state.bottleneck"
             class="notice"
@@ -691,17 +785,7 @@ onBeforeUnmount(() => {
             <p v-if="state.bottleneck.silence">
               结束前 {{ state.bottleneck.silence.seconds }} 秒未收到进度；尚不能确定原因。
             </p>
-            <template v-if="summary">
-              <p>{{ summary.activity.message }}</p>
-              <p v-if="summary.activity.task">
-                任务：{{ summary.activity.task.type }} {{ summary.activity.task.metadata }}
-              </p>
-              <p v-for="op in summary.activity.operators" :key="op.id">
-                {{ op.name }} · 心情 {{ format(op.morale) }} · {{ op.room }} ·
-                {{ op.groups.join('、') }}
-              </p>
-              <p>这些活动与慢速时段相关，不能仅据此认定某位干员是原因。</p>
-            </template>
+            <IncomeActivity v-if="summary" :activity="summary.activity" />
             <p v-for="(item, i) in state.bottleneck.diagnostics" :key="i">{{ item.message }}</p>
           </n-alert>
 
@@ -757,7 +841,9 @@ onBeforeUnmount(() => {
     </template>
     <template #footer
       ><n-space justify="end">
-        <n-button @click="close">{{ state.running ? '停止并关闭' : '关闭' }}</n-button>
+        <n-button @click="close">{{
+          validating ? '取消等待并关闭' : state.running ? '停止并关闭' : '关闭'
+        }}</n-button>
         <n-button v-if="state.running" type="warning" @click="session.cancel">停止演算</n-button>
         <n-button
           v-if="state.result?.success"
@@ -780,7 +866,9 @@ onBeforeUnmount(() => {
           "
           :loading="submitting"
           @click="start"
-          >{{ state.result?.success ? '重新演算' : '开始演算' }}</n-button
+          >{{
+            validating ? '正在校验排班' : state.result?.success ? '重新演算' : '开始演算'
+          }}</n-button
         >
       </n-space></template
     >
@@ -788,6 +876,20 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+:global(.income-dialog.n-card) {
+  width: calc(98vw / var(--mower-zoom, 1));
+  height: calc(96vh / var(--mower-zoom, 1));
+  height: calc(96dvh / var(--mower-zoom, 1));
+  max-width: none;
+}
+:global(.income-dialog .n-card-content) {
+  min-height: 0;
+}
+:global(.income-dialog .n-tabs-pane-wrapper),
+:global(.income-dialog .n-tab-pane) {
+  overflow: visible;
+}
+
 .income-log {
   max-height: 360px;
   overflow: auto;
@@ -801,7 +903,7 @@ onBeforeUnmount(() => {
 }
 .two-columns {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   align-items: start;
   gap: 12px;
 }

@@ -41,6 +41,7 @@ _STATUS_FIELDS = (
     "preview_replaced",
     "preview_failed",
     "archive_dropped",
+    "archive_buffer_dropped",
 )
 
 
@@ -61,13 +62,6 @@ class Screenshot:
         return self.data.nbytes if isinstance(self.data, np.ndarray) else len(self.data)
 
 
-def _encode_frame(rgb):
-    # Lazy import keeps the persistence module usable without loading config.
-    from arknights_mower.utils.image import img2bytes
-
-    return img2bytes(rgb)
-
-
 def _newer_than(published: Screenshot | None, frame: Screenshot) -> bool:
     """Preview capture time only moves forward, so backlog cannot age the slot."""
     return published is None or published.captured_ns < frame.captured_ns
@@ -85,7 +79,7 @@ class ScreenshotStore:
         max_pending_bytes: int = 64 * 1024**2,
         max_recent_count: int = _RECENT_FRAME_LIMIT,
         max_recent_bytes: int = _RECENT_BYTE_LIMIT,
-        encoder: Callable = _encode_frame,
+        encoder: Callable | None = None,
         writer: Callable | None = None,
         clock: Callable[[], float] | None = None,
         wall_time_ns: Callable[[], int] | None = None,
@@ -119,6 +113,11 @@ class ScreenshotStore:
         self._recent_bytes = 0
         self._deleted_archives: set[str] = set()
         self._encoder = encoder
+        self._encoding_workers = None
+        if encoder is None:
+            from arknights_mower.utils.screenshot_encoding import ScreenshotEncoding
+
+            self._encoding_workers = ScreenshotEncoding()
         self._write_frame = writer
         self._clock = clock or (lambda: time.monotonic())
         self._wall_time_ns = wall_time_ns or (lambda: time.time_ns())
@@ -176,6 +175,8 @@ class ScreenshotStore:
         self._archive_queue: deque[
             tuple[int, int, str, str, int, deque[Screenshot]]
         ] = deque()
+        self._archive_buffer_bytes = 0
+        self._archive_buffer_dropped = 0
         self._log_archive_queue: list[tuple[int, str]] = []
 
     def start(self):
@@ -245,20 +246,28 @@ class ScreenshotStore:
     def close(self, timeout=5):
         """Drain history until the deadline, then discard waiting work.
 
-        In-flight native encoding or OS writes cannot be killed by Python.
-        Report any still-running daemon worker; it exits once that call returns.
+        Owned encoding children stop within the flush budget. An OS write
+        may still leave a daemon worker until that call returns.
         A subsequent close can join it, but never reopens admission.
         """
         # Shutdown uses real time even when metric clocks are frozen in tests.
         deadline = time.monotonic() + max(0, timeout)
+        reap_budget = min(0.2, max(0, timeout) / 2)
         with self._ready:
             if not self._stop.is_set():
-                self._flush_deadline = deadline
+                self._flush_deadline = deadline - reap_budget
                 self._stop.set()
                 self._shutdown_preview_dropped += int(self._preview_pending is not None)
                 self._preview_pending = None
                 # 唤醒空闲写盘线程；不向已满队列插入退出标记。
                 self._ready.notify_all()
+        for thread in self._threads:
+            thread.join(max(0, deadline - reap_budget - time.monotonic()))
+        if self._encoding_workers is not None:
+            try:
+                self._encoding_workers.close(deadline=deadline)
+            except Exception as exc:
+                self._report_error("截图编码进程关闭失败", exc)
         for thread in self._threads:
             thread.join(max(0, deadline - time.monotonic()))
         # A manual cleanup may still be in an OS call. Do not wait on its lock.
@@ -274,6 +283,8 @@ class ScreenshotStore:
             self._shutdown_archive_dropped += len(self._archive_queue) + len(
                 self._log_archive_queue
             )
+            for task in self._archive_queue:
+                self._archive_buffer_bytes -= sum(frame.size for frame in task[5])
             self._archive_queue.clear()
             self._log_archive_queue.clear()
             self._error_windows.clear()
@@ -283,9 +294,19 @@ class ScreenshotStore:
             self._queue.clear()
             self._ready.notify_all()
             remaining = [thread.name for thread in self._threads if thread.is_alive()]
-        result = {"remaining_threads": remaining, **self.stats()}
+        remaining_encoding = (
+            self._encoding_workers.remaining_workers()
+            if self._encoding_workers is not None
+            else []
+        )
+        result = {
+            "remaining_threads": remaining,
+            "remaining_encoding_workers": remaining_encoding,
+            **self.stats(),
+        }
         if (
             remaining
+            or remaining_encoding
             or result["shutdown_dropped"]
             or result["shutdown_archive_dropped"]
         ):
@@ -448,7 +469,12 @@ class ScreenshotStore:
         data = b""
         error = None
         try:
-            data = bytes(self._encoder(raw))
+            if self._encoding_workers is None:
+                data = bytes(self._encoder(raw))
+            else:
+                data = self._encoding_workers.encode(
+                    raw, preview=preview, deadline=self._flush_deadline
+                )
             if not data or len(data) > 1920 * 1080 * 4:
                 raise ValueError("JPEG 编码结果为空或超过单帧上限")
         except Exception as exc:
@@ -639,6 +665,14 @@ class ScreenshotStore:
                     <= timestamp_ns + _ERROR_WINDOW_NS
                 ]
                 buffered = deque((*before, *after))
+            # 已接收的归档画面保留至处理结束；容量不足时仅省略新任务的
+            # 缓存画面，错误记录和后续截图仍沿用原有归档流程。
+            buffered_bytes = sum(frame.size for frame in buffered)
+            if self._archive_buffer_bytes + buffered_bytes > self.max_recent_bytes:
+                self._archive_buffer_dropped += len(buffered)
+                buffered.clear()
+                buffered_bytes = 0
+            self._archive_buffer_bytes += buffered_bytes
             self._archive_queue.append(
                 (scan_start, timestamp_ns, archive_id, message[:4096], 1, buffered)
             )
@@ -673,9 +707,15 @@ class ScreenshotStore:
                 self._error_windows = [
                     window for window in self._error_windows if window[2] != archive_id
                 ]
-                self._archive_queue = deque(
-                    item for item in self._archive_queue if item[2] != archive_id
-                )
+                retained = deque()
+                for item in self._archive_queue:
+                    if item[2] == archive_id:
+                        self._archive_buffer_bytes -= sum(
+                            frame.size for frame in item[5]
+                        )
+                    else:
+                        retained.append(item)
+                self._archive_queue = retained
                 self._log_archive_queue = [
                     item for item in self._log_archive_queue if item[1] != archive_id
                 ]
@@ -851,6 +891,7 @@ class ScreenshotStore:
                 self._save_error_logs(archive_id)
                 continue
             destination = self.folder / "errors" / archive_id
+            buffered_bytes = sum(frame.size for frame in buffered)
             try:
                 with self._archive_lock:
                     if self._flush_expired():
@@ -948,6 +989,10 @@ class ScreenshotStore:
                             continue
             except (OSError, ValueError, TypeError, AttributeError) as exc:
                 self._report_error("归档报错截图失败", exc)
+            finally:
+                with self._lock:
+                    buffered.clear()
+                    self._archive_buffer_bytes -= buffered_bytes
 
     def _save_error_logs(self, archive_id: str):
         from arknights_mower.utils.diagnostics import timeline
@@ -1022,6 +1067,8 @@ class ScreenshotStore:
                 "archive_log_pending_count": len(self._log_archive_queue),
                 "archive_window_count": len(self._error_windows),
                 "archive_dropped": self._archive_dropped,
+                "archive_buffer_bytes": self._archive_buffer_bytes,
+                "archive_buffer_dropped": self._archive_buffer_dropped,
                 "preview_active_count": int(self._preview_active is not None),
                 "preview_pending_bytes": (
                     self._preview_pending.size if self._preview_pending else 0
@@ -1054,6 +1101,11 @@ class ScreenshotStore:
                 "encode_ms": round(self._encode_ms, 2),
                 "preview_encode_ms": round(self._preview_encode_ms, 2),
                 "encode_failed": self._encode_failed,
+                "encode_worker_count": (
+                    len(self._encoding_workers.remaining_workers())
+                    if self._encoding_workers is not None
+                    else 0
+                ),
                 "preview_failed": self._preview_failed,
                 "pending_bytes": self._pending_bytes,
                 "max_pending_count": self.max_pending_count,

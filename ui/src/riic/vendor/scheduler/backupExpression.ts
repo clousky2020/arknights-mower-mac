@@ -11,8 +11,9 @@ type Value = string | number | boolean | null | MowerDateTimeValue
 type Expression = (state: RuntimeState) => Value
 type Token = { text: string; kind: 'operator' | 'value' | 'worker' | 'external' | 'query'; value?: Value; name?: string; member?: string }
 const roomName = /^(?:room_[1-3]_[1-3]|dormitory_[1-4]|central|meeting|factory|contact|train|recycle)$/
-// Inventory and facility queries: Mower 3de2b2ac Operators (MIT).
+// Inventory queries: Mower 3de2b2ac; facility-product counts: 3ad69f15 Operators (MIT).
 const inventoryNames = new Set<string>(MOWER_INVENTORY_ITEMS.map(item => item.name))
+const facilityProducts = new Set(['gold', 'exp3', 'orirock', 'orirock_device', 'lmd', 'orundum'])
 const facilityRoomName = /^(?:room_[1-3]_[1-3]|dormitory_[1-4]|gaming_[1-3]|central|meeting|factory|contact|train|recycle)$/
 const fail = (message: string): never => { throw new Error(`副表：${message}`) }
 
@@ -41,7 +42,7 @@ function tokenize(text: string): Token[] {
   for (let rest = text.trim(); rest; rest = rest.trimStart()) {
     if (tokens.length >= 1024) return fail('条件文本超过限制')
     const worker = /^op_data\.operators\[['"]([^'"\[\]]+)['"]\]\.(is_resting\(\)|is_working\(\)|current_mood\(\)|current_room|current_index|room|index|mood|upper_limit|lower_limit|group|workaholic|exhaust_require|rest_in_full|operator_type|resting_priority)\b/.exec(rest) ?? /^op_data\.operators\[['"]([^'"\[\]]+)['"]\]\.(is_resting\(\)|is_working\(\)|current_mood\(\))/.exec(rest)
-    const query = /^op_data\.(group_min_mood|facility_has_mastery_plan|inventory_count|facility_product)\b/.exec(rest)
+    const query = /^op_data\.(group_min_mood|facility_has_mastery_plan|inventory_count|facility_product_count|facility_product_type_count|facility_product)\b/.exec(rest)
     const external = /^op_data\.(?:party_time\b|major_maintenance_remaining_hours\(\))/.exec(rest)
     const quoted = /^(['"])((?:\\.|(?!\1)[^\\])*)\1/.exec(rest)
     const number = /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.exec(rest)
@@ -113,6 +114,14 @@ export function compileBackupExpression(source: unknown, participants: Set<strin
       if (token?.kind === 'value') return () => token.value!
       if (token?.kind === 'query') {
         if (!take('(')) return fail(`${token.member} 缺少参数括号`)
+        if (token.member === 'facility_product_type_count') {
+          if (!take(')')) return fail('facility_product_type_count 不接受参数')
+          return state => {
+            const products = state.mowerFacilityProducts
+            if (!products) return fail('缺少设施产物状态')
+            return new Set(Object.values(products).filter(product => product !== null && facilityProducts.has(product))).size
+          }
+        }
         const argument = tokens[cursor++]
         if (argument?.kind !== 'value' || typeof argument.value !== 'string' || !take(')')) return fail(`${token.member} 需要一个字符串参数`)
         const name = argument.value
@@ -126,6 +135,14 @@ export function compileBackupExpression(source: unknown, participants: Set<strin
             return count
           }
         }
+        if (token.member === 'facility_product_count') {
+          if (!facilityProducts.has(name)) return fail(`不支持的产物或订单类型：${name}`)
+          return state => {
+            const products = state.mowerFacilityProducts
+            if (!products) return fail('缺少设施产物状态')
+            return Object.values(products).filter(product => product === name).length
+          }
+        }
         if (token.member === 'facility_product') {
           if (!facilityRoomName.test(name)) return fail(`不支持的设施位置：${name}`)
           return state => {
@@ -136,7 +153,8 @@ export function compileBackupExpression(source: unknown, participants: Set<strin
         }
         if (token.member === 'facility_has_mastery_plan') {
           if (name !== 'train') return fail(`不支持的训练室位置：${name}`)
-          return state => state.config.mowerMasteryPlanPresent ?? fail('缺少训练室专精计划状态；请明确是否存在尚未完结的计划')
+          // User contract: local simulation always assumes no unfinished training plan.
+          return () => false
         }
         // Alpha _group_moods uses the current effective group and only fixed work anchors.
         return state => {
@@ -225,7 +243,7 @@ export function compileBackupExpression(source: unknown, participants: Set<strin
   return {
     evaluate, usesMajorMaintenance,
     usesInventory: tokens.some(token=>token.kind==='query'&&token.member==='inventory_count'),
-    usesFacilityProduct: tokens.some(token=>token.kind==='query'&&token.member==='facility_product'),
+    usesFacilityProduct: tokens.some(token=>token.kind==='query'&&['facility_product','facility_product_count','facility_product_type_count'].includes(token.member!)),
     usesMasteryPlan: tokens.some(token=>token.kind==='query'&&token.member==='facility_has_mastery_plan'),
     usesCurrentMood: tokens.some(token=>token.kind==='worker'&&token.member==='current_mood()'||token.kind==='query'&&token.member==='group_min_mood'),
   }

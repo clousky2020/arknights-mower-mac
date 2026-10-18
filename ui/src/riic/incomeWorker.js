@@ -1,13 +1,22 @@
 import { runCalculationBridge } from './vendor/workbench/calculationBridge'
 import { incomeRequest } from './income'
 import { incomeEventLog } from './incomeLogs'
+import { incomeOrderDistribution } from './incomeOrders'
 import { createRecruitmentObservation } from './incomeRecruitment'
-import { OPERATOR_MAP } from './vendor/domain/operators'
+import { createClueObservation } from './incomeClues'
+import { buildTimelineData } from './vendor/workbench/timeline/timelineModel'
 
 export function calculateIncome(plan, settings, onProgress) {
   const { workspace, options } = incomeRequest(plan, settings)
   const recruitment = createRecruitmentObservation(settings.warmupDays * 24)
-  options.simulationOptions.observeInterval = recruitment.observe
+  const clues = createClueObservation(
+    settings.warmupDays * 24,
+    options.simulationOptions.operatorInventory
+  )
+  options.simulationOptions.observeInterval = (config, start, end) => {
+    recruitment.observe(config, start, end)
+    clues.observe(config, start, end)
+  }
   const result = runCalculationBridge(workspace, options, (p) =>
     onProgress?.({
       label: `${p.phase === 'warmup' ? '预热' : '统计'} ${(p.phase === 'warmup'
@@ -19,15 +28,14 @@ export function calculateIncome(plan, settings, onProgress) {
     })
   )
   const simulation = result.simulationReport
-  const diagnostics = [
-    ...(result.validation?.criticalErrors ?? []),
-    ...(simulation?.diagnostics ?? [])
-  ]
+  const diagnostics = [...(result.validation?.issues ?? []), ...(simulation?.diagnostics ?? [])]
     .slice(0, 200)
     .map((d) => ({
       code: d.code,
       message:
-        d.message +
+        (d.code === 'MOWER_CLUE_OBSERVATION_MODEL'
+          ? '线索产量按交流固定开启计算；调度侧 Party Time 仍为空，不执行线索待办及交流任务。'
+          : d.message) +
         (d.code === 'FINITE_INVENTORY_MODEL' && settings.allowGoldDebt
           ? ' 本次允许赤金透支，赤金不足不阻止交付；其他材料仍受库存约束。'
           : '')
@@ -55,11 +63,9 @@ export function calculateIncome(plan, settings, onProgress) {
   return {
     success: true,
     eventLog: incomeEventLog(simulation),
-    morale: Object.entries(simulation.moraleTimeline ?? {}).map(([id, row]) => ({
-      id,
-      name: OPERATOR_MAP.get(id)?.name ?? id,
-      ...row
-    })),
+    orderDistribution: incomeOrderDistribution(simulation),
+    simulationReport: simulation,
+    timelineData: buildTimelineData(simulation),
     resources: production.sample,
     droneRooms: [
       ...new Set(
@@ -68,10 +74,12 @@ export function calculateIncome(plan, settings, onProgress) {
           .map((e) => e.roomId)
       )
     ],
+    clueExchangeMode: 'always-on',
     summary: {
       ...result.report.summary,
       netLmd,
       recruitmentCount: recruitment.result().completed / days,
+      clueCount: clues.result().completed / days,
       lmdConsumed:
         production.assumptions.outputMode === 'potential'
           ? potentialLmdCost / days

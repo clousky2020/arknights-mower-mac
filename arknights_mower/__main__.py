@@ -285,6 +285,17 @@ def main(saved_state, *, preparation_serial=None):
             resource_task_session(),
         ):
             return _main(saved_state)
+    except Exception:
+        if base_scheduler is not None and getattr(
+            base_scheduler, "_state_restore_complete", False
+        ):
+            try:
+                from arknights_mower.solvers.record import save_current_state
+
+                save_current_state()
+            except Exception:
+                logger.exception("工作线程退出前保存运行缓存失败，保留原缓存")
+        raise
     finally:
         _close_device_session()
         _cancel_maintenance_timer()
@@ -329,6 +340,7 @@ def initialize(
 
 def _initialize_scheduler(tasks, device):
     base_scheduler = BaseSchedulerSolver(device=device)
+    base_scheduler._state_restore_complete = False
     from arknights_mower.utils.operators import build_global_plan
 
     plan, source_plan = build_global_plan(include_source=True)
@@ -355,37 +367,48 @@ def _initialize_scheduler(tasks, device):
     return base_scheduler
 
 
-def _notify_freeze(failure):
-    """Announce one frozen dispatch boundary through the configured email channel.
+def _notify_uncertain_input(failure):
+    """Announce one uncertain dispatch boundary through the configured email channel.
 
-    Freezing preserves the task without replaying uncertain input, so the operator
-    is the only exit. That makes the entry the single moment worth reporting: the
-    wait loop below cannot reach this call again. A notification fault must not add
-    a second failure mode to a path whose purpose is containment.
+    The task and its compensation survive the boundary, so the report covers the
+    interruption itself rather than a lost run: the observation loop below cannot
+    reach this call again. A notification fault must not add a second failure mode
+    to a path whose purpose is safe reentry.
     """
     reason = str(failure) or failure.code
     body = (
-        "输入结果待核实，已暂停设备调度并保留当前任务，"
-        "不会重复提交副作用。程序将保持冻结，直到手动停止。\n\n"
+        "输入结果待核实，已保留当前任务与补偿，不会重复提交副作用。"
+        "程序将重新观察基建，由原任务流程接续。\n\n"
         f"原因：{reason}"
     )
     try:
         from arknights_mower.utils.email import send_message
 
-        send_message(body, subject="设备调度已冻结", level="ERROR")
+        send_message(body, subject="输入结果待核实", level="ERROR")
     except Exception:
-        logger.exception("冻结通知发送失败")
+        logger.exception("待核实通知发送失败")
 
 
 def _resume_device_dispatch(scheduler=None, failure=None):
+    uncertain = isinstance(failure, TouchFailure) and failure.delivery_unknown
+    abandon_old_session = uncertain
+    if uncertain and scheduler is not None:
+        scheduler._process_recovery_occurred_at = datetime.now().isoformat()
+
     def resume():
+        nonlocal abandon_old_session
         if device_control.shutdown_requested or config.stop_mower.is_set():
             raise MowerExit
+        if abandon_old_session:
+            # Keep the existing owner if cleanup is temporarily unsuccessful.
+            # A new session never reuses the interrupted touch callback.
+            device_control.close().unwrap()
+            abandon_old_session = False
         device = device_control.recover().unwrap()
         if scheduler is not None:
             scheduler.device = device
             scheduler.recog.device = device
-            if getattr(scheduler, "_idle_observation_pending", False):
+            if uncertain or getattr(scheduler, "_idle_observation_pending", False):
                 scheduler.recog.reset_after_external_control()
                 scheduler._idle_observation_pending = False
             else:
@@ -394,16 +417,23 @@ def _resume_device_dispatch(scheduler=None, failure=None):
 
     csleep(30)
     device = wait_for_recovery(resume, retry_errors=RECOVERABLE_DEVICE_ERRORS)
-    if isinstance(failure, TouchFailure) and failure.delivery_unknown:
-        logger.warning("输入结果待核实：保留当前任务，暂停设备调度，不重复提交副作用")
-        _notify_freeze(failure)
+    if uncertain and scheduler is not None:
+        from arknights_mower.utils.crash_recovery import observe_scheduler
+
+        logger.warning("输入结果待核实：保留当前任务，重新观察后由原任务流程接续")
+        _notify_uncertain_input(failure)
         while not config.stop_mower.is_set():
-            device_control.pause_dispatch(failure)
-            csleep(30)
-            if device_control.shutdown_requested:
-                raise MowerExit
-            if scheduler is not None:
-                wait_for_recovery(resume, retry_errors=RECOVERABLE_DEVICE_ERRORS)
+            try:
+                observe_scheduler(scheduler)
+                return device
+            except MowerExit:
+                raise
+            except Exception:
+                logger.exception("输入中断后的观察暂未完成，稍后自动重试")
+                csleep(30)
+                device = wait_for_recovery(
+                    resume, retry_errors=RECOVERABLE_DEVICE_ERRORS
+                )
         raise MowerExit
     return device
 
@@ -413,7 +443,7 @@ def simulate(saved):
     具体调用方法可见各个函数的参数说明
     """
     logger.info(f"正在使用全局配置空间: {path.global_space}")
-    tasks = saved["tasks"] if saved else []
+    tasks = saved.get("tasks", []) if saved else []
     connection_retries = 1
     global base_scheduler
     if config.stop_mower.is_set():
@@ -424,13 +454,22 @@ def simulate(saved):
             if config.stop_mower.is_set():
                 raise MowerExit
             base_scheduler = initialize([], connection_retries=connection_retries)
+            base_scheduler._process_recovery_occurred_at = (
+                saved.get("_process_crash_occurred_at") if saved else None
+            )
             # saved 为空表示没有可载入的运行缓存。此时干员 current_room 尚未读取，
             # 首轮任务开始前必须暂缓副表判断，避免把“未知”误判成“不在工作”。
             base_scheduler.defer_backup_plan_until_mood_read = (
                 not saved
+                or bool(saved.get("_process_crash_recovery"))
                 or bool(saved.get("initial_mood_pending", False))
                 or config.conf.automatic_rescue_enable
                 or bool(saved and saved.get("automatic_rescue_state"))
+            )
+            base_scheduler._initial_staffing_pending = (
+                not saved
+                or bool(saved.get("_process_crash_no_snapshot"))
+                or bool(saved.get("initial_staffing_pending", False))
             )
             base_scheduler._initial_mood_refresh_rooms = set(
                 saved.get("initial_mood_refresh_rooms", ()) if saved else ()
@@ -470,7 +509,7 @@ def simulate(saved):
     _apply_version_update_resting_threshold(
         NewsChecker.get_maintenance(), base_scheduler
     )
-    if saved:
+    if saved and not saved.get("_process_crash_no_snapshot"):
         try:
             for k, v in saved["operators"].items():
                 if k not in base_scheduler.op_data.operators:
@@ -501,6 +540,8 @@ def simulate(saved):
                     ("dorm_mood_peers", {}),
                     ("idle_rest_check", None),
                     ("temporary_dorm_fill", False),
+                    ("recall_work_rate", None),
+                    ("recall_work_rate_checked", False),
                 ):
                     setattr(
                         base_scheduler.op_data.operators[k],
@@ -511,7 +552,9 @@ def simulate(saved):
                     v, "dorm_recovery_fixed", ()
                 )
             base_scheduler.op_data.restore_group_shift_state(
-                saved.get("group_shift_state")
+                saved.get("group_shift_state"),
+                saved.get("group_recovery_full_members"),
+                saved.get("group_recovery_return_time"),
             )
             base_scheduler.waiting_group_shifts = saved.get("waiting_group_shifts", [])
             from arknights_mower.utils.config.plan import migrate_backup_tasks
@@ -537,6 +580,9 @@ def simulate(saved):
             )
             base_scheduler.op_data.room_observations = copy.deepcopy(
                 saved.get("room_observations", {})
+            )
+            base_scheduler.op_data.recall_recovery_rates = copy.deepcopy(
+                saved.get("recall_recovery_rates", {})
             )
             base_scheduler.emergency_state = copy.deepcopy(
                 saved.get("automatic_rescue_state")
@@ -571,10 +617,14 @@ def simulate(saved):
             base_scheduler.daily_skland = saved["daily_skland"]
             base_scheduler.daily_mail = saved["daily_mail"]
             base_scheduler.task_count = saved["task_count"]
-            if len(base_scheduler.op_data.backup_plans) > 0:
+            if len(base_scheduler.op_data.backup_plans) > 0 and not saved.get(
+                "_process_crash_recovery"
+            ):
                 # 启动的时候按照条件触发副表
                 base_scheduler.backup_plan_solver()
         except Exception as ex:
+            if saved.get("_process_crash_recovery"):
+                raise
             logger.exception(ex)
     from arknights_mower.solvers.emergency import RESUME_META
     from arknights_mower.utils.emergency_recovery import ORDINARY_SHIFTS
@@ -602,6 +652,11 @@ def simulate(saved):
                 room for room in base_scheduler.op_data.plan if room in base_room_list
             }
         base_scheduler.tasks.insert(0, SchedulerTask(time=datetime.now()))
+    if saved and saved.get("_process_crash_recovery"):
+        from arknights_mower.utils.crash_recovery import reconcile_scheduler
+
+        reconcile_scheduler(base_scheduler)
+    base_scheduler._state_restore_complete = True
     while True:
         try:
             config.maintenance_recheck.clear()

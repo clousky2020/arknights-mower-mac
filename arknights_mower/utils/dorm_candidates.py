@@ -33,6 +33,12 @@ def dorm_candidate_mood(op_data, name, now=None, *, estimates=None):
     op = op_data.operators.get(name)
     if has_resting_mood(op, now):
         return resting_mood(op, now)
+    return card_mood_estimate(op_data, name, now, estimates=estimates)
+
+
+def card_mood_estimate(op_data, name, now=None, *, estimates=None):
+    """返回一小时内的卡牌预估，不创建或修改实读心情。"""
+    now = now or datetime.now()
     estimate = (
         getattr(op_data, "dorm_mood_estimates", {}) if estimates is None else estimates
     ).get(name)
@@ -47,8 +53,41 @@ def full_dorm_candidate(op_data, name, *, estimates=None, now=None):
     return mood is not None and mood >= 24
 
 
-def retained_task_reservations(op_data, tasks, *, current_task=None):
+def retained_task_reservations(
+    op_data, tasks, *, current_task=None, returning_groups=()
+):
     """保留执行预约目标、当前驻员和整组成员，规划与纠错共用。"""
+    if returning_groups:
+        from arknights_mower.utils.retained_recovery import retained_recovery_may_return
+
+        names, slots = set(), set()
+        for task in tasks:
+            if (
+                task is None
+                or task is current_task
+                or not getattr(task, "retains_execution", False)
+            ):
+                continue
+            task_names, task_slots = retained_task_reservations(op_data, [task])
+            released = {
+                name
+                for group in returning_groups
+                if retained_recovery_may_return(op_data, task, group)
+                for name in op_data.shift_group_members(group)
+            }
+            task_names.difference_update(released)
+            task_slots.difference_update(
+                position
+                for name in released
+                for op in (op_data.operators[name],)
+                for position in (
+                    (op.current_room, op.current_index),
+                    (op.room, op.index),
+                )
+            )
+            names.update(task_names)
+            slots.update(task_slots)
+        return names, slots
     names, slots = set(), set()
     for task in tasks:
         if (

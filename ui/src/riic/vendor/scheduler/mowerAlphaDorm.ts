@@ -1,6 +1,7 @@
+import {MowerShiftPreviewError} from './mowerNativeErrors'
 import {mowerDormIsolationCost} from './mowerDormIsolation'
 import { orderMowerAlphaDormIndices } from './mowerDormOrder'
-import {mowerRestingBindingGroups,mowerSharedReplacements,mowerSameGroupPrimaryReplacement} from './mowerSharedGroups'
+import {mowerRestingBindingGroups,mowerSharedReplacements,mowerSameGroupPrimaryReplacement,mowerArrangementGroupTransitions} from './mowerSharedGroups'
 // October 3 alpha b2d9ac85fe070e805aadf0d5f44fc095c1e95253 (Mower, MIT).
 // Shared identity, takeover and displacement rules; actual room I/O stays in the adapter.
 import {mowerReplacementCandidates,restingMood,hasRestingMood} from './mowerOperatorState'
@@ -40,20 +41,30 @@ export function alphaDormResidents(data:MowerSchedulingData):Map<string,string>{
  return [alphaPosition(...b.position),b.name||(op&&data.recoveryDorm(b,op.name)?op.name:'')]
 }))}
 /** Mandatory members losing a bed recall their whole group; standby retains its anchor. */
-export function alphaRestoreDisplaced(data:MowerSchedulingData,previous:Map<string,string>,plan:MowerTaskPlan,tasks:MowerTask[]):Set<string>{
+export function alphaRestoreDisplaced(data:MowerSchedulingData,previous:Map<string,string>,plan:MowerTaskPlan,tasks:MowerTask[],admissions:ReadonlyMap<string,string>=new Map()):Set<string>{
  const current=alphaDormResidents(data)
  for(const bed of data.dorms){
   const key=alphaPosition(...bed.position),name=plan[bed.position[0]]?.[bed.position[1]]
   if(name!==undefined&&name!=='Current'&&!(['Free',''].includes(name)&&bed.name!==previous.get(key)&&bed.name))current.set(key,['Free',''].includes(name)?'':name)
  }
+ for(const [position,name] of admissions)current.set(position,name)
  const retained=new Set(current.values()),recalled=new Set<string>()
  for(const [position,name] of previous){
   if(!name||name===current.get(position)||retained.has(name))continue
   const op=data.operators[name];if(!op?.isHigh()||!data.plan[op.room])continue
-  if(data.canStandby(op)&&Object.values(data.operators).some(anchor=>retained.has(anchor.name)&&anchor.isHigh()&&!data.canStandby(anchor)&&!anchor.room.startsWith('dorm')&&!anchor.workaholic&&!data.restMoodComplete(anchor.name)&&(!op.group||anchor.group===op.group)))continue
-  for(const member of op.group?data.group(op.group):[name])recalled.add(member)
+  if(op.multiGroup&&!op.independentRest||op.group&&!data.isGroupShiftAnchor(op))continue
+  const members=op.group?data.shiftGroupMembers(op.group):[name],completed=!!op.group&&hasRestingMood(op,data.nowMicros)&&restingMood(op,data.nowMicros)>=op.upperLimit
+  if((completed||data.canStandby(op))&&Object.values(data.operators).some(anchor=>retained.has(anchor.name)&&data.isGroupShiftAnchor(anchor)&&(data.canStandby(op)&&alphaRestingTier(data,anchor.name)<=3||!data.canStandby(anchor)&&!(hasRestingMood(anchor,data.nowMicros)&&restingMood(anchor,data.nowMicros)>=anchor.upperLimit))&&(!op.group||members.includes(anchor.name))))continue
+  for(const member of members)if(member===name||!data.operators[member]!.independentRest)recalled.add(member)
  }
- for(const name of recalled){const op=data.operators[name]!;(plan[op.room]??=Array(data.plan[op.room]!.length).fill('Current'))[op.index]=name}
+ const transitions=mowerArrangementGroupTransitions(data,plan)
+ for(const name of recalled){const op=data.operators[name]!;if(op.group&&!op.multiGroup)transitions[op.group]=false}
+ for(const name of [...recalled]){const op=data.operators[name]!;if(op.multiGroup&&mowerRestingBindingGroups(data,op,transitions).length)recalled.delete(name)}
+ for(const name of [...recalled]){
+  const op=data.operators[name]!,target=plan[op.room]?.[op.index]
+  if(target&&!['Current','Free','',name].includes(target)||Object.entries(plan).some(([room,row])=>row.some((target,index)=>target===name&&(room!==op.room||index!==op.index)))){recalled.delete(name);continue}
+  ;(plan[op.room]??=Array(data.plan[op.room]!.length).fill('Current'))[op.index]=name
+ }
  for(const bed of data.dorms)if(recalled.has(bed.name)){
   if(recalled.has(current.get(alphaPosition(...bed.position))??''))(plan[bed.position[0]]??=Array(data.plan[bed.position[0]]!.length).fill('Current'))[bed.position[1]]='Free'
   bed.reset()
@@ -69,9 +80,12 @@ export function alphaRestoreDisplaced(data:MowerSchedulingData,previous:Map<stri
  }
  return recalled
 }
-export function alphaSlotTakable(data:MowerSchedulingData,bed:MowerDormState,requester?:string,activeGroups?:Set<string>):boolean{
+function alphaSlotEffective(data:MowerSchedulingData,bed:MowerDormState,activeGroups?:Set<string>):boolean{
  const owner=data.operators[data.plan[bed.position[0]]?.[bed.position[1]]??''],groups=owner?.multiGroup?mowerRestingBindingGroups(data,owner,Object.fromEntries([...(activeGroups??[])].map(group=>[group,true]))):[]
- if(!data.effectiveFreeSlot(bed)&&!(bed.autoFree&&(owner?.multiGroup?groups.length>0&&mowerSharedReplacements(owner,groups).includes('Free'):activeGroups?.has(owner?.group??''))))return false
+ return data.effectiveFreeSlot(bed)||!!(bed.autoFree&&(owner?.multiGroup?groups.length>0&&mowerSharedReplacements(owner,groups).includes('Free'):activeGroups?.has(owner?.group??'')))
+}
+export function alphaSlotTakable(data:MowerSchedulingData,bed:MowerDormState,requester?:string,activeGroups?:Set<string>):boolean{
+ if(!alphaSlotEffective(data,bed,activeGroups))return false
  const reserved=data.reservedProductBeds.get(alphaPosition(...bed.position));if(reserved&&requester!==reserved&&(!requester||![3,5,6].includes(alphaRestingTier(data,requester))))return false
  const actual=data.currentOperator(...bed.position),name=bed.name||(actual&&data.recoveryDorm(bed,actual.name)?actual.name:'')
  if(!name)return true
@@ -79,36 +93,116 @@ export function alphaSlotTakable(data:MowerSchedulingData,bed:MowerDormState,req
  if(!op||data.freeRoomExcluded(name)||op.currentRoom!==bed.position[0]||op.currentIndex!==bed.position[1]||!requester)return false
  return alphaRestingTier(data,requester)<alphaRestingTier(data,name)||data.emergencyDormAgents.has(name)&&(op.index<2||alphaRestingTier(data,requester)===alphaRestingTier(data,name))&&hasRestingMood(op,data.nowMicros)&&!op.moodIsPrediction&&op.mood>=op.upperLimit
 }
-export function alphaFindDormSlot(data:MowerSchedulingData,name:string,used:Set<number>,activeGroups?:Set<string>,plan:MowerTaskPlan={}):number|undefined{
+/** Ordinary beds and sole-Free rooms follow the configured order; multi-Free first beds are a fallback. */
+function singleRecoveryBedCost(bed:MowerDormState,beds:readonly MowerDormState[]):number{
+ const peers=beds.filter(other=>other.position[0]===bed.position[0])
+ return peers.length>1&&bed.position[1]===Math.min(...peers.map(other=>other.position[1]))?1:0
+}
+export function alphaFindDormSlot(data:MowerSchedulingData,name:string,used:Set<number>,activeGroups?:Set<string>,plan:MowerTaskPlan={},reservedSlots:ReadonlySet<string>=new Set()):number|undefined{
  if(data.restMoodComplete(name)||alphaRestingTier(data,name)===7)return undefined
  const vip=Object.keys(data.plan).filter(room=>room.startsWith('dorm')).length,indices=orderMowerAlphaDormIndices(data,activeGroups)
  const order=alphaRestingTier(data,name)<=1||data.dormOrder.some(value=>value.endsWith('_low'))?indices:[...indices.slice(vip),...indices.slice(0,vip)]
- const candidates=order.filter(i=>!used.has(i)&&alphaSlotTakable(data,data.dorms[i]!,name,activeGroups))
- const cost=(i:number)=>{const bed=data.dorms[i]!,isolation=mowerDormIsolationCost(data,name,...bed.position,plan);if(!bed.name)return [0,0,0,isolation];const [tier,mood]=alphaRestingKey(data,bed.name);return [1,-tier,isolation,-mood]}
- candidates.sort((a,b)=>{const x=cost(a),y=cost(b);return x[0]!-y[0]!||x[1]!-y[1]!||x[2]!-y[2]!||x[3]!-y[3]!})
+ const candidates=order.filter(i=>!used.has(i)&&!reservedSlots.has(alphaPosition(...data.dorms[i]!.position))&&alphaSlotTakable(data,data.dorms[i]!,name,activeGroups))
+ const compatibleBeds=indices.map(i=>data.dorms[i]!).filter(b=>alphaSlotEffective(data,b,activeGroups))
+ const cost=(i:number)=>{const bed=data.dorms[i]!,isolation=mowerDormIsolationCost(data,name,...bed.position,plan),single=data.operators[name]?.singleRecoveryManager?singleRecoveryBedCost(bed,compatibleBeds):0;if(!bed.name)return [0,0,single,0,isolation];const [tier,mood]=alphaRestingKey(data,bed.name);return [1,-tier,single,isolation,-mood]}
+ candidates.sort((a,b)=>{const x=cost(a),y=cost(b);return x[0]!-y[0]!||x[1]!-y[1]!||x[2]!-y[2]!||x[3]!-y[3]!||x[4]!-y[4]!})
  return candidates[0]
 }
-/** Only new arrivals compete for each room's first dynamic recovery position. */
-export function alphaPrioritizeRecovery(data:MowerSchedulingData,plan:MowerTaskPlan,preceding:MowerTaskPlan={},reservedSlots=new Set<string>()):MowerTaskPlan{
- if(!Object.keys(plan).length)return plan
- const projected=projectMowerArrangements(data,[preceding,plan]),explicit=new Set(Object.values(plan).flat()),lockedRooms=new Set<string>()
+/** Allocate recovery tiers in configured bed order; equal tiers retain actual beds. */
+export function alphaPrioritizeRecovery(data:MowerSchedulingData,plan:MowerTaskPlan,preceding:MowerTaskPlan={},reservedSlots:ReadonlySet<string>=new Set(),reservedNames:ReadonlySet<string>=new Set()):MowerTaskPlan{
+ if(!Object.keys(plan).length&&!Object.keys(preceding).length)return plan
+ const projected=projectMowerArrangements(data,[preceding,plan])
+ const explicit=new Set([...Object.values(preceding).flat(),...Object.values(plan).flat()]),lockedRooms=new Set<string>()
  for(const slot of [...reservedSlots,...data.reservedProductBeds.keys()])lockedRooms.add(slot.split('\0')[0]!)
  for(const bed of data.dorms){const op=data.operators[bed.name];if(op&&!explicit.has(op.name)&&(op.currentRoom!==bed.position[0]||op.currentIndex!==bed.position[1]))lockedRooms.add(bed.position[0])}
- const beds=projected.dorms.filter(b=>projected.effectiveFreeSlot(b)&&!lockedRooms.has(b.position[0]))
- const arrivals=beds.flatMap(b=>{const op=data.operators[b.name];return op&&explicit.has(op.name)&&!data.dynamicDormPosition(op.currentRoom,op.currentIndex)?[op.name]:[]})
- if(!arrivals.length)return plan
- arrivals.sort((a,b)=>compareAlphaKeys(alphaRestingKey(data,a),alphaRestingKey(data,b)))
- const targets=new Map<string,MowerDormState>();for(const b of beds)if(!targets.has(b.position[0]))targets.set(b.position[0],b)
- const result=structuredClone(plan)
- for(const name of arrivals){
-  const source=beds.find(b=>b.name===name)!
-  for(const target of targets.values()){
-   if(target===source)break
-   if(target.name&&compareAlphaKeys(alphaRestingKey(data,source.name),alphaRestingKey(data,target.name))>=0)continue
-   ;[source.name,target.name]=[target.name,source.name]
-   for(const bed of [source,target])(result[bed.position[0]]??=Array(data.plan[bed.position[0]]!.length).fill('Current'))[bed.position[1]]=bed.name||'Free'
-   if(!source.name)break
+ let beds=orderMowerAlphaDormIndices(projected).map(i=>projected.dorms[i]!).filter(b=>projected.effectiveFreeSlot(b))
+ for(const bed of beds)if(bed.name&&(!projected.operators[bed.name]||reservedNames.has(bed.name)||projected.freeRoomExcluded(bed.name)||projected.restMoodComplete(bed.name)||alphaRestingTier(projected,bed.name)===7))lockedRooms.add(bed.position[0])
+ beds=beds.filter(b=>!lockedRooms.has(b.position[0]))
+ const actual=new Map(beds.map(b=>[alphaPosition(...b.position),data.currentOperator(...b.position)?.name??'']))
+ if(beds.every(b=>actual.get(alphaPosition(...b.position))===b.name))return plan
+ const first=new Map<string,number>()
+ for(const bed of beds)first.set(bed.position[0],Math.min(first.get(bed.position[0])??Infinity,bed.position[1]))
+ const isFirst=(bed:MowerDormState)=>bed.position[1]===first.get(bed.position[0])
+ const groups:MowerDormState[][]=[]
+ for(const bed of beds){
+  const previous=groups.at(-1)
+  if(previous&&!isFirst(bed)&&previous[0]!.position[0]===bed.position[0]&&!isFirst(previous[0]!))previous.push(bed)
+  else groups.push([bed])
+ }
+ const fillerTier=8
+ const tier=(name:string)=>{
+  if(!name)return fillerTier
+  const op=projected.operators[name]!
+  return hasRestingMood(op,projected.nowMicros)&&restingMood(op,projected.nowMicros)>=op.upperLimit?fillerTier:alphaRestingTier(projected,name)
+ }
+ const names=beds.map(b=>b.name).filter(Boolean).sort((a,b)=>compareAlphaKeys(alphaRestingKey(projected,a),alphaRestingKey(projected,b)))
+ const desired=beds.map(b=>tier(b.name)).sort((a,b)=>a-b),allocations=new Map<string,string>()
+ let offset=0
+ const quotas=groups.map(group=>{
+  const quota=new Map<number,number>()
+  for(const level of desired.slice(offset,offset+group.length))quota.set(level,(quota.get(level)??0)+1)
+  offset+=group.length
+  return quota
+ })
+ const assign=(bed:MowerDormState,name:string,quota:Map<number,number>,level:number)=>{
+  allocations.set(alphaPosition(...bed.position),name);quota.set(level,quota.get(level)!-1)
+  if(name)names.splice(names.indexOf(name),1)
+ }
+ const retain=(index:number,completedOnly=false)=>{
+  const quota=quotas[index]!
+  for(const bed of groups[index]!){
+   const key=alphaPosition(...bed.position),level=tier(bed.name)
+   if(allocations.has(key)||completedOnly&&(!bed.name||level!==fillerTier))continue
+   if(bed.name&&actual.get(key)===bed.name&&names.includes(bed.name)&&quota.get(level))assign(bed,bed.name,quota,level)
   }
+ }
+ const fill=(index:number,includeFillers=false)=>{
+  const quota=quotas[index]!,vacant=groups[index]!.filter(b=>!allocations.has(alphaPosition(...b.position)))
+  for(const [level,count] of [...quota].sort(([a],[b])=>a-b)){
+   if(level===fillerTier&&!includeFillers)continue
+   for(let i=0;i<count;i++)assign(vacant.shift()!,names.find(name=>tier(name)===level)??'',quota,level)
+  }
+ }
+ const targets=groups.flatMap((group,i)=>isFirst(group[0]!)?[i]:[]),ordinary=groups.flatMap((_,i)=>targets.includes(i)?[]:[i])
+ // Quotas already follow the full order, including ordinary beds before later single-target beds.
+ groups.forEach((_,i)=>retain(i,true))
+ targets.forEach(i=>retain(i));targets.forEach(i=>fill(i))
+ ordinary.forEach(i=>retain(i));ordinary.forEach(i=>fill(i))
+ groups.forEach((_,i)=>fill(i,true))
+ if(targets.some(i=>allocations.get(alphaPosition(...groups[i]![0]!.position))!==actual.get(alphaPosition(...groups[i]![0]!.position)))){
+  // A changed single-target owner releases equal-tier bed preservation across dorms.
+  // Keep full-morale padding in its compatible quota; rank recovering residents first.
+  const remaining=beds.map(b=>b.name).filter(name=>name&&tier(name)!==fillerTier)
+  for(const [position,name] of allocations)if(tier(name)!==fillerTier)allocations.delete(position)
+  for(const group of groups){
+   const slots=group.filter(b=>!allocations.has(alphaPosition(...b.position)))
+   const residents=new Set(slots.map(b=>actual.get(alphaPosition(...b.position))))
+   remaining.sort((a,b)=>compareAlphaKeys(alphaRestingKey(projected,a),alphaRestingKey(projected,b))||Number(residents.has(b))-Number(residents.has(a)))
+   const selected=remaining.splice(0,slots.length)
+   for(const bed of slots){
+    const position=alphaPosition(...bed.position),name=actual.get(position)??'',index=selected.indexOf(name)
+    if(index>=0){allocations.set(position,name);selected.splice(index,1)}
+   }
+   for(const bed of slots){const position=alphaPosition(...bed.position);if(!allocations.has(position))allocations.set(position,selected.shift()!)}
+  }
+ }
+ // Preserve protected rooms and occupied-bed tiers while keeping skill-bearing workers off multi-Free first beds.
+ const allBeds=projected.dorms.filter(b=>projected.effectiveFreeSlot(b)),placed=new Set<string>()
+ const providers=[...allocations.values()].filter(name=>name&&projected.operators[name]?.singleRecoveryManager&&tier(name)!==fillerTier)
+ providers.sort((a,b)=>compareAlphaKeys(alphaRestingKey(projected,a),alphaRestingKey(projected,b)))
+ for(const name of providers){
+  const source=beds.find(b=>allocations.get(alphaPosition(...b.position))===name)!
+  const destination=beds.find(b=>{
+   const occupant=allocations.get(alphaPosition(...b.position))??''
+   return !placed.has(occupant)&&singleRecoveryBedCost(b,allBeds)<singleRecoveryBedCost(source,allBeds)&&(!occupant||tier(occupant)===tier(name))
+  })
+  if(destination){const sourceKey=alphaPosition(...source.position),targetKey=alphaPosition(...destination.position);allocations.set(sourceKey,allocations.get(targetKey)??'');allocations.set(targetKey,name)}
+  placed.add(name)
+ }
+ const result=structuredClone(plan)
+ for(const bed of beds){
+  const name=allocations.get(alphaPosition(...bed.position))!
+  if(name!==bed.name)(result[bed.position[0]]??=Array(projected.plan[bed.position[0]]!.length).fill('Current'))[bed.position[1]]=name||'Free'
  }
  return result
 }
@@ -156,17 +250,22 @@ function alphaRecoveryAssignments(data:MowerSchedulingData,beds:MowerDormState[]
  return {assignments,dropped:candidates.filter(c=>!keptNames.has(c.name))}
 }
 /** Preserve valid beds; rank only decides who fits after capacity changes. */
-export function alphaRebalanceDorms(data:MowerSchedulingData,previous:MowerDormState[],reserved=new Set<string>()):MowerTaskPlan {
+export function alphaRebalanceDorms(data:MowerSchedulingData,previous:MowerDormState[],reserved=new Set<string>(),reservedSlots:ReadonlySet<string>=new Set()):MowerTaskPlan {
  const unique=new Map<string,MigrationCandidate>()
  previous.forEach((bed,order)=>{if(bed.name&&data.operators[bed.name]&&!reserved.has(bed.name)&&!unique.has(bed.name))unique.set(bed.name,{name:bed.name,order,time:bed.timeMicros,position:bed.position})})
  if(!unique.size)return {}
- const candidates=[...unique.values()].sort((a,b)=>compareAlphaKeys(alphaRestingKey(data,a.name),alphaRestingKey(data,b.name))||a.order-b.order),beds=data.dorms.filter(b=>data.effectiveFreeSlot(b))
+ const candidates=[...unique.values()].sort((a,b)=>compareAlphaKeys(alphaRestingKey(data,a.name),alphaRestingKey(data,b.name))||a.order-b.order),beds=data.dorms.filter(b=>data.effectiveFreeSlot(b)&&!reservedSlots.has(alphaPosition(...b.position)))
  const {assignments,dropped}=alphaRecoveryAssignments(data,beds,candidates),plan:MowerTaskPlan={},destinations=new Set<string>()
- for(const c of dropped){const op=data.operators[c.name]!;if(op.isHigh())alphaNativeReturn(data,plan,op.group?data.group(op.group):[op.name])}
+ for(const c of dropped){
+  const op=data.operators[c.name]!;if(!op.isHigh())continue
+  const recalling=op.group?data.group(op.group):[op.name]
+  if(recalling.some(name=>{const member=data.operators[name]!;return reserved.has(name)||reservedSlots.has(alphaPosition(member.room,member.index))}))throw new MowerShiftPreviewError('宿舍迁移召回与已确认换人冲突，暂缓切表')
+  alphaNativeReturn(data,plan,recalling)
+ }
  for(const bed of beds){const c=assignments.get(alphaPosition(...bed.position));if(!c)continue;destinations.add(alphaPosition(...bed.position));if(data.currentOperator(...bed.position)?.name!==c.name)(plan[bed.position[0]]??=Array(data.plan[bed.position[0]]!.length).fill('Current'))[bed.position[1]]=c.name;bed.name=c.name;bed.timeMicros=c.time}
  const effective=new Set(beds.map(b=>alphaPosition(...b.position)))
- for(const c of candidates)if(!destinations.has(alphaPosition(...c.position))&&data.plan[c.position[0]]?.[c.position[1]]!==undefined)(plan[c.position[0]]??=Array(data.plan[c.position[0]]!.length).fill('Current'))[c.position[1]]=effective.has(alphaPosition(...c.position))?'Free':data.plan[c.position[0]]![c.position[1]]!
- for(const bed of data.dorms)if(!destinations.has(alphaPosition(...bed.position)))bed.reset()
+ for(const c of candidates)if(!destinations.has(alphaPosition(...c.position))&&!reservedSlots.has(alphaPosition(...c.position))&&data.plan[c.position[0]]?.[c.position[1]]!==undefined)(plan[c.position[0]]??=Array(data.plan[c.position[0]]!.length).fill('Current'))[c.position[1]]=effective.has(alphaPosition(...c.position))?'Free':data.plan[c.position[0]]![c.position[1]]!
+ for(const bed of data.dorms)if(!destinations.has(alphaPosition(...bed.position))&&!reservedSlots.has(alphaPosition(...bed.position)))bed.reset()
  return Object.fromEntries(Object.entries(plan).filter(([,names])=>names.some(n=>n!=='Current')))
 }
 /** Closing a temporary group bed recalls every member of a displaced main group. */

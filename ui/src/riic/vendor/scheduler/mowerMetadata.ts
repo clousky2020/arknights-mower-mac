@@ -1,3 +1,4 @@
+import {admitMowerDerivedTasks} from './mowerTaskDerivation'
 // Port of default plan_metadata and plan_mood_limit_releases, Mower alpha.
 // Source: c6bdbb292fe7fcd84c6dfb66154a12a1a9bc5b88 (MIT, Copyright 2021 Nano).
 import {MOWER_TASK_TYPES as T,MowerTask,toMowerMicros,type MowerTaskQueue,type MowerTaskPlan} from './mowerTaskQueue'
@@ -67,7 +68,7 @@ export function planMowerMetadata(data:MowerSchedulingData,queue:MowerTaskQueue)
   if(high.length&&group){
    const baseTime=high[0]!.timeMicros,needEarly=!data.operators[high[0]!.name]!.exhaustRequire
    let maximumFull:number|undefined,moodGap=false
-   if(data.groupRestInFullOnMoodGap&&baseTime!==undefined&&!full.length)for(const bed of high.slice(1))if(bed.timeMicros!==undefined&&baseTime-bed.timeMicros>toMowerMicros(data.powerPlantCount===2?1.5:1)){maximumFull=baseTime;moodGap=true}
+   if(data.groupRestInFullOnMoodGap&&!data.groupMoodGapExclusions.includes(group)&&baseTime!==undefined&&!full.length)for(const bed of high.slice(1))if(bed.timeMicros!==undefined&&baseTime-bed.timeMicros>toMowerMicros(data.powerPlantCount===2?1.5:1)){maximumFull=baseTime;moodGap=true}
    if(full.length){const times=full.flatMap(b=>b.timeMicros===undefined?[]:[b.timeMicros]);maximumFull=times.length?Math.max(...times):undefined}
    const known=high.filter(b=>b.timeMicros!==undefined).sort((a,b)=>a.timeMicros!-b.timeMicros!),nearest=known[0]
    let time:number
@@ -100,7 +101,7 @@ export function planMowerMetadata(data:MowerSchedulingData,queue:MowerTaskQueue)
   const time=Math.min(bed.timeMicros,minimumRest);if(time<now)continue
   const previous=releases.get(time);if(previous)previous.dorms.push(bed);else releases.set(time,{timeMicros:time,dorms:[bed],restInFull:null})
  }
- const generated=generateMowerDormTasks([...newTasks.values(),...releases.values()],data,existingTargets);queue.tasks.push(...generated)
+ const generated=admitMowerDerivedTasks(data,queue.tasks,generateMowerDormTasks([...newTasks.values(),...releases.values()],data,existingTargets));queue.tasks.push(...generated)
  const returning=new Set(generated.flatMap(t=>Object.values(t.plan).flat())),busy=data.busyRestingNames
  for(const op of Object.values(data.operators)){
   if(!op.isHigh()||op.room.startsWith('dorm')||op.currentRoom||op.group&&data.canStandby(op)||!data.restMoodComplete(op.name))continue
@@ -110,7 +111,7 @@ export function planMowerMetadata(data:MowerSchedulingData,queue:MowerTaskQueue)
   if(!workers.every(worker=>!worker.currentRoom&&(data.canStandby(worker)||hasRestingMood(worker,now)&&worker.currentMood(now)>=worker.upperLimit)))continue
   const plan:MowerTaskPlan={}
   for(const name of members){const member=data.operators[name]!;if(!member.room||!data.plan[member.room])continue;const slots=plan[member.room]??=Array(data.plan[member.room]!.length).fill('Current');if(['Current',name].includes(slots[member.index]!))slots[member.index]=name}
-  const task=new MowerTask({type:T.SHIFT_ON,plan});task.timeMicros=now;queue.tasks.push(task);members.forEach(name=>returning.add(name))
+  const task=new MowerTask({type:T.SHIFT_ON,plan});task.timeMicros=now;queue.tasks.push(...admitMowerDerivedTasks(data,queue.tasks,[task]));members.forEach(name=>returning.add(name))
  }
- queue.tasks.push(...limited)
+ queue.tasks.push(...admitMowerDerivedTasks(data,queue.tasks,limited))
 }

@@ -70,13 +70,13 @@ describe('宿舍隔离配置', () => {
   })
 })
 
-it('组内恢复时间差默认60分钟，修改后保存并参与排班导出', async () => {
+it('组内恢复时间差默认75分钟，修改后保存并参与排班导出', async () => {
   setup()
-  expect(store.group_mood_gap_threshold_minutes).toBe(60)
-  axios.get.mockResolvedValue({ data: { ...response, group_mood_gap_threshold_minutes: 75 } })
-  await store.load_config()
   expect(store.group_mood_gap_threshold_minutes).toBe(75)
-  expect(store.build_advanced_settings().group_mood_gap_threshold_minutes).toBe(75)
+  axios.get.mockResolvedValue({ data: { ...response, group_mood_gap_threshold_minutes: 60 } })
+  await store.load_config()
+  expect(store.group_mood_gap_threshold_minutes).toBe(60)
+  expect(store.build_advanced_settings().group_mood_gap_threshold_minutes).toBe(60)
   loaded.value = true
   await nextTick()
   await store.flush_config_saves()
@@ -86,5 +86,51 @@ it('组内恢复时间差默认60分钟，修改后保存并参与排班导出',
   )
   axios.get.mockResolvedValue({ data: response })
   await store.load_config()
-  expect(store.group_mood_gap_threshold_minutes).toBe(60)
+  expect(store.group_mood_gap_threshold_minutes).toBe(75)
+})
+
+it('额外等待上限读取旧值并随修改保存和排班导出', async () => {
+  setup()
+  expect(store.group_mood_gap_max_extra_wait_hours).toBe(0)
+  axios.get.mockResolvedValue({ data: { ...response, group_mood_gap_max_extra_wait_hours: 1.5 } })
+  await store.load_config()
+  expect(store.group_mood_gap_max_extra_wait_hours).toBe(1.5)
+  expect(store.build_advanced_settings().group_mood_gap_max_extra_wait_hours).toBe(1.5)
+  loaded.value = true
+  await nextTick()
+  await store.flush_config_saves()
+  store.group_mood_gap_max_extra_wait_hours = 0.5
+  await vi.waitFor(() =>
+    expect(axios.patch.mock.lastCall[1]).toEqual({ group_mood_gap_max_extra_wait_hours: 0.5 })
+  )
+  axios.get.mockResolvedValue({ data: response })
+  await store.load_config()
+  expect(store.group_mood_gap_max_extra_wait_hours).toBe(0)
+})
+
+it('延后回班排除组支持多选、即时保存及排班导出，旧配置默认不排除', async () => {
+  setup()
+  expect(store.group_mood_gap_exclusions).toEqual([])
+  axios.get.mockResolvedValue({
+    data: { ...response, group_mood_gap_exclusions: ['主表组', '副表组'] }
+  })
+  await store.load_config()
+  expect(store.build_config().group_mood_gap_exclusions).toEqual(['主表组', '副表组'])
+  expect(store.build_advanced_settings().group_mood_gap_exclusions).toEqual(['主表组', '副表组'])
+  loaded.value = true
+  await nextTick()
+  await store.flush_config_saves()
+  store.group_mood_gap_exclusions.push('多绑组')
+  await vi.waitFor(() =>
+    expect(axios.patch.mock.lastCall[1]).toEqual({
+      group_mood_gap_exclusions: ['主表组', '副表组', '多绑组']
+    })
+  )
+  store.group_mood_gap_exclusions.splice(0, 2)
+  await vi.waitFor(() =>
+    expect(axios.patch.mock.lastCall[1]).toEqual({ group_mood_gap_exclusions: ['多绑组'] })
+  )
+  axios.get.mockResolvedValue({ data: response })
+  await store.load_config()
+  expect(store.group_mood_gap_exclusions).toEqual([])
 })

@@ -473,7 +473,7 @@ def test_infra_main_switches_before_shift_off_arrangement():
     )
     solver.task = task
     solver.tasks = [task]
-    solver.op_data = SimpleNamespace(run_order_rooms={})
+    solver.op_data = SimpleNamespace(run_order_rooms={}, operators={})
     solver._prepare_group_shift = MagicMock()
     solver._complete_group_shift = MagicMock(return_value=True)
     solver.find = MagicMock(return_value=(1, 1))
@@ -500,7 +500,7 @@ def test_infra_main_switches_before_shift_off_arrangement():
 
 def test_infra_main_keeps_shift_off_pending_when_product_switch_waits():
     solver = object.__new__(base.BaseSchedulerSolver)
-    solver.op_data = SimpleNamespace()
+    solver.op_data = SimpleNamespace(operators={})
     solver._prepare_group_shift = MagicMock()
     solver._complete_group_shift = MagicMock(return_value=True)
     task = SchedulerTask(
@@ -2763,9 +2763,9 @@ def test_product_switch_retry_verifies_queue_when_recipe_already_matches(verifie
 
 @pytest.fixture(scope="module")
 def queue_ocr_engine():
-    from rapidocr_onnxruntime import RapidOCR
+    from arknights_mower.utils.rapidocr import create_engine
 
-    return RapidOCR(text_score=0.3)
+    return create_engine()
 
 
 @pytest.mark.parametrize("name, expected", [("queue_one", 1), ("queue_max", 99)])

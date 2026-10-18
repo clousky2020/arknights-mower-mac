@@ -40,6 +40,51 @@ def state_dir(root=None):
     return get_path("@app/tmp/updates", space="") / key
 
 
+@contextmanager
+def supervision_lock(directory, timeout=15.0, *, child=False):
+    """Lock configuration-space ownership without importing the installation."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    name = "instance-child.lock" if child else "instance.lock"
+    with (directory / name).open("a+b") as stream:
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                stream.seek(0)
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("该配置空间已有运行实例或监督进程") from None
+                time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if sys.platform == "win32":
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def wait_for_supervisor_release(record, deadline):
+    """Keep source/frozen replacement outside a still-owned installation."""
+    directory = record.get("supervision_directory")
+    if directory:
+        with supervision_lock(directory, timeout=max(0, deadline - time.monotonic())):
+            pass
+
+
 def read_json(path, default=None):
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -223,6 +268,10 @@ def instances(directory=None, *, timeout=5, strict=True):
                     result.append(record)
                 else:
                     path.unlink(missing_ok=True)
+                    if record.get("kind") == "ocr-worker":
+                        (directory.parent / "shutdown" / path.name).unlink(
+                            missing_ok=True
+                        )
             except FileNotFoundError:
                 pass  # The instance may have removed its registration on exit.
             except (OSError, ValueError) as exc:
@@ -277,8 +326,18 @@ def send_instance_command(record, action, directory=None):
 
 
 class RuntimeRegistration:
-    def __init__(self, kind, *, space="", name="", port=None, running=None):
-        self.directory = state_dir()
+    def __init__(
+        self,
+        kind,
+        *,
+        space="",
+        name="",
+        port=None,
+        running=None,
+        directory=None,
+        maintenance=True,
+    ):
+        self.directory = Path(directory) if directory is not None else state_dir()
         launch_id = (
             os.environ.pop("MOWER_LAUNCH_ID", "")
             if kind == "instance" and os.environ.get("MOWER_MANAGED") == "1"
@@ -310,14 +369,18 @@ class RuntimeRegistration:
             "managed": kind == "instance" and os.environ.get("MOWER_MANAGED") == "1",
             "ready": False,
             "restart_job": os.environ.get("MOWER_RESTART_JOB", ""),
+            "supervision_directory": os.environ.get("MOWER_SUPERVISOR_DIRECTORY", "")
+            if kind == "instance"
+            else "",
         }
         self.publish()
         atexit.register(self.close)
         self.thread = threading.Thread(target=self._heartbeat, daemon=True)
         self.thread.start()
-        threading.Thread(
-            target=self._retry_backups, name="mower-backup-cleanup", daemon=True
-        ).start()
+        if maintenance:
+            threading.Thread(
+                target=self._retry_backups, name="mower-backup-cleanup", daemon=True
+            ).start()
 
     def _retry_backups(self):
         # A copied stdlib runtime has no application backup-cleanup service.

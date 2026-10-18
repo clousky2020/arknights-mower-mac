@@ -29,6 +29,8 @@ export interface RuntimeConfig {
  /** The application simulation selects the October 3 source contract. */
  mowerDormIsolation?:string[][]
  mowerAlpha?:boolean;mowerDormOrder?:string[]
+ /** Operators with an unlocked single-target recovery skill in the active simulation roster. */
+ mowerSingleRecoverySkillNames?:string[]
  mowerMoodLimits?:MowerMoodLimitConfig
   positions: RuntimePosition[]; beds: RuntimeBed[]; initialMorale?: Record<string, number>
   /** Default scene input uses native policy upper limits; explicit overrides remain unchanged. */
@@ -52,10 +54,8 @@ export interface RuntimeConfig {
   mowerDeviceObservations?:{initialManufactureDroneSelection:number|'max'}
   mowerServices?:{enableParty:boolean;droneIntervalHours:number;reloadRooms:readonly string[]|null;maaGapHours:number;leifengMode:boolean}
   mowerClueObservations?:{partyEndMicros:number|null;clueCount:number}
-  /** Explicit unresolved-plan state for backup conditions; distinct from enabling mastery. */
-  mowerMasteryPlanPresent?: boolean
   mowerTaskScheduling?:MowerTaskSchedulingOptions
-  mowerPolicy?: { groupRestInFullOnMoodGap?:boolean; groupMoodGapThresholdMinutes?:number; groupMoodGapMaxExtraWaitHours?:number; mergeIntervalMinutes?:number; restMoodLimits?: Record<string,number>; freeRoom?: boolean; taskBuffers?: boolean; rescueThreshold?: number; restingThreshold: number; powerPlantCount: number; opeRestingPriority: string[] }
+  mowerPolicy?: { groupRestInFullOnMoodGap?:boolean; groupMoodGapThresholdMinutes?:number; groupMoodGapMaxExtraWaitHours?:number; groupMoodGapExclusions?:string[]; mergeIntervalMinutes?:number; restMoodLimits?: Record<string,number>; freeRoom?: boolean; taskBuffers?: boolean; rescueThreshold?: number; restingThreshold: number; powerPlantCount: number; opeRestingPriority: string[] }
   runOrderPolicies?: RunOrderPolicy[]
 }
 export interface RuntimeEvent {
@@ -103,6 +103,8 @@ export interface RuntimeRates {
   recoveryRate: (operatorId: string, roomId: string, state: RuntimeState) => number
   /** Stable rate tables for one physical-state sweep; callers must not mutate state while using them. */
   snapshotRates?:()=>{work:Readonly<Record<string,number>>;recovery:Readonly<Record<string,number>>}
+  /** Isolated recall forecast: current projected consumption and conservative recovery. */
+  forecastRates?:(state:RuntimeState)=>{work:Readonly<Record<string,number>>;recovery:Readonly<Record<string,number>>}
   /** Additional skill morale boundaries; callers can split intervals at non-roster events too. */
   thresholds?: (operatorId: string, state: RuntimeState) => number[]
 }
