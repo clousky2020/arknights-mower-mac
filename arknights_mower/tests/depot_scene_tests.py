@@ -74,7 +74,12 @@ def scan(monkeypatch, tmp_path):
         img=np.zeros((1080, 1920, 3), dtype=np.uint8),
         gray=np.zeros((1080, 1920), dtype=np.uint8),
     )
-    solver.device = SimpleNamespace(exit=Mock(), launch=Mock())
+    # mac-avd 的 AVD 触控适配在场景图登录分支读取 device.is_avd_like
+    # （arknights_mower/utils/graph.py: login_start / login_quickly 等）。
+    # 这些测试不关心 AVD 行为，桩里显式给 False 走通用分支。
+    solver.device = SimpleNamespace(
+        exit=Mock(), launch=Mock(), is_avd_like=False
+    )
     solver.check_current_focus = Mock()
 
     def back_to_index():
