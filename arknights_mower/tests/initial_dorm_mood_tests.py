@@ -149,7 +149,7 @@ def test_deadline_preserves_partial_estimates(solver):
     assert dorm_candidate_mood(solver.op_data, "银灰") == 3
 
 
-def test_actual_mood_overrides_card_and_estimate_expiry_keeps_unknown(solver):
+def test_latest_mood_wins_and_estimate_expiry_keeps_unknown(solver):
     data = solver.op_data
     solver._read_initial_card_mood()
     op = data.operators["银灰"]
@@ -158,7 +158,11 @@ def test_actual_mood_overrides_card_and_estimate_expiry_keeps_unknown(solver):
     assert dorm_candidate_mood(data, "银灰") is None
     data.update_detail("银灰", 12, "meeting", 0, True)
     data.dorm_mood_estimates["银灰"] = (3, datetime.now())
-    assert dorm_candidate_mood(data, "银灰") == pytest.approx(12)
+    assert dorm_candidate_mood(data, "银灰") == 3
+    assert op.mood == 12
+    for observed_at in (op.time_stamp, op.time_stamp - timedelta(seconds=1)):
+        data.dorm_mood_estimates["银灰"] = (3, observed_at)
+        assert dorm_candidate_mood(data, "银灰") == pytest.approx(12)
 
 
 def test_legacy_probe_room_is_really_read_despite_recent_cache(solver, monkeypatch):
@@ -495,3 +499,47 @@ def test_real_primary_planning_propagates_scan_transport_failures(solver, error)
     with pytest.raises(type(error)):
         solver._plan_primary_recovery()
     solver.resting.assert_not_called()
+
+
+def test_return_scan_excludes_only_current_task(solver):
+    task = SchedulerTask(task_type=TaskTypes.SHIFT_ON)
+    later = SchedulerTask(
+        time=datetime.now() + timedelta(minutes=2), task_type=TaskTypes.RUN_ORDER
+    )
+    solver.task, solver.tasks = task, [task, later]
+    before = copy.deepcopy([vars(pending) for pending in solver.tasks])
+    solver.no_pending_task.return_value = False
+    solver._scan_card_moods(current_task=task)
+    assert dorm_candidate_mood(solver.op_data, "红") == 24
+    assert [vars(pending) for pending in solver.tasks] == before
+    solver.tap_confirm.assert_not_called()
+    solver.back_to_infrastructure.assert_called_once()
+
+
+@pytest.mark.parametrize("kind", [TaskTypes.RUN_ORDER, TaskTypes.FIAMMETTA])
+def test_return_scan_yields_to_other_imminent_task(solver, kind):
+    task = SchedulerTask(task_type=TaskTypes.SHIFT_ON)
+    critical = SchedulerTask(
+        time=datetime.now() + timedelta(seconds=30), task_type=kind
+    )
+    solver.task, solver.tasks = task, [task, critical]
+    solver._scan_card_moods(current_task=task)
+    solver.enter_room.assert_not_called()
+    assert not getattr(solver, "_card_moods_scanned_this_run", False)
+
+
+def test_return_scan_stops_when_critical_task_arrives_between_pages(solver):
+    task = SchedulerTask(task_type=TaskTypes.SHIFT_ON)
+    critical = SchedulerTask(task_type=TaskTypes.RUN_ORDER)
+    solver.task, solver.tasks = task, [task]
+    solver.wait_for_agent_page.return_value = [("银灰", 0)]
+
+    def swipe(*args, **kwargs):
+        solver.tasks.append(critical)
+        return 1, None
+
+    solver.swipe_agent_page.side_effect = swipe
+    solver._scan_card_moods(current_task=task)
+    solver.wait_for_agent_page.assert_called_once()
+    assert dorm_candidate_mood(solver.op_data, "银灰") == 3
+    solver.back_to_infrastructure.assert_called_once()

@@ -37,6 +37,17 @@ def supervisor_directory(arguments):
 instance_lock = runtime.supervision_lock
 
 
+def _console_options():
+    """Keep source logs in an attached console without opening a new one."""
+    if sys.platform == "win32" and not runtime.frozen():
+        import ctypes
+
+        process_ids = (ctypes.c_ulong * 1)()
+        if ctypes.WinDLL("kernel32").GetConsoleProcessList(process_ids, 1):
+            return {}
+    return runtime.hidden_console_options()
+
+
 def child_command(arguments, *, executable=None, entry=None, frozen=None):
     executable = executable or sys.executable
     frozen = runtime.frozen() if frozen is None else frozen
@@ -323,8 +334,12 @@ def supervise(
             }
             if wanted is not None:
                 notice["resume_requested"] = wanted
-            if isinstance(previous, dict) and previous.get("active") is True:
-                notice["start_type"] = previous.get("start_type", "0")
+            if isinstance(previous, dict):
+                if previous.get("reset_observation_pending"):
+                    notice["start_type"] = "2"
+                    notice["reset_observation_pending"] = True
+                elif previous.get("active") is True:
+                    notice["start_type"] = previous.get("start_type", "0")
             runtime.write_json(recovery_path, notice, sync=True)
         if wanted is None:
             base_environment.pop("MOWER_RECOVERY_RUN", None)
@@ -375,7 +390,7 @@ def supervise(
             directory / "supervisor.json",
             {"pid": os.getpid(), "generation": generation, "phase": "starting"},
         )
-        options = runtime.hidden_console_options()
+        options = _console_options()
         try:
             if sys.platform == "win32":
                 control_name = f"Local\\MowerRecoveryIntent_{generation}"

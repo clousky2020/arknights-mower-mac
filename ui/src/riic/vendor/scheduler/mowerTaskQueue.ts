@@ -31,12 +31,22 @@ export class MowerTask {
  observedOrderDueMicros?:number;wakeOnlyCompletion=false
  executionFailure?:{reason:string;rooms:string[];snapshot:MowerTaskFailureSnapshot}
  executionRetained=false
+ /** Only observation-derived corrections may be rebuilt before physical execution. */
+ derivedCorrection=false
+ correctionSkipDorm=false
  get retainsExecution():boolean{return !!this.executionFailure||this.executionRetained}
+ previewReturnVeto?:{conditions:number[];names:string[]}
  groupShiftTransitions:Record<string,boolean>={}
+ /** Once room execution begins, remaining rooms retain the confirmed shift intent. */
+ arrangementStarted=false
  productShiftLocked=false
  ordinaryCoordination=false
  exhaustSupport=false
  coordinationRequestNames:string[]=[]
+ urgentRecoveryRequestNames:string[]=[]
+ urgentRecoverySupportNames:string[]=[]
+ urgentRecoveryReservedNames:string[]=[]
+ urgentRecoveryReservedSlots:string[]=[]
  preferredReplacementRestore=false
  coordinationDependencyWait=false
  /** A complete physical arrangement must finish before backup/return replanning. */
@@ -44,7 +54,7 @@ export class MowerTask {
  /** Old rules remain available only while this physical backup arrangement is unfinished. */
  backupRefreshRules?:Record<string,MowerBackupRefreshRule>
  backupExplicitSlots:Set<string>=new Set()
- backupShiftIntent?:MowerTaskPlan;backupShiftConditions?:boolean[];dormFillPlan:MowerTaskPlan={};simpleDormFill=false;arrangementRetryDueMicros?:number
+ backupGroup?:string;backupShiftIntent?:MowerTaskPlan;backupShiftConditions?:boolean[];dormFillPlan:MowerTaskPlan={};simpleDormFill=false;arrangementRetryDueMicros?:number
  dormRecoveryRestore:string[]=[]
  arrangementRetryRoom?:string;arrangementRetryCount?:number
  dormMoodResidents:string[]=[];idleDormSearchNames:Record<string,string[]>={};idleDormShiftGroups?:Record<string,string[]>

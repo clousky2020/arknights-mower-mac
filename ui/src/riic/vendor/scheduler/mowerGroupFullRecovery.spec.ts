@@ -2,10 +2,10 @@ import {describe,it,expect} from 'vitest'
 import {MowerOperatorState,type MowerOperatorOptions} from './mowerOperatorState'
 import {MowerSchedulingData,MowerDormState} from './mowerSchedulingData'
 import {planMowerAlphaMetadata} from './mowerAlphaMetadata'
-import {MowerTaskQueue,MOWER_TASK_TYPES as T,toMowerMicros} from './mowerTaskQueue'
-import {projectMowerArrangements} from './mowerObservations'
+import {MowerTask,MowerTaskQueue,MOWER_TASK_TYPES as T,toMowerMicros} from './mowerTaskQueue'
+import {projectMowerArrangements,mowerRefreshDormTime,invalidateMowerDormTime,mowerUpdateDetail} from './mowerObservations'
 import {commitMowerGroupShifts} from './mowerSharedGroups'
-import {mowerGroupRecoveryDeadline,mowerGroupRecoveryWorkers} from './mowerGroupRecovery'
+import {mowerGroupRecoveryDeadline,mowerGroupRecoveryWorkers,splitMowerRecoveryTask} from './mowerGroupRecovery'
 
 type Resident={name:string;hours?:number;options?:Partial<MowerOperatorOptions>}
 function fixture(rows:Resident[],gap=false,maxWait=0){
@@ -16,6 +16,24 @@ function returnTask(data:MowerSchedulingData){const queue=new MowerTaskQueue();p
 function releaseFull(data:MowerSchedulingData,name:string){const op=data.operators[name]!;data.dorms.find(b=>b.name===name)!.reset();op.currentRoom='';op.currentIndex=-1;op.mood=op.upperLimit;op.timeStampMicros=data.nowMicros;op.depletionRate=0}
 
 describe('strict grouped recovery in the alpha simulator',()=>{
+ it('does not restore an old gap requirement after actual return and temporary regrouping',()=>{
+  const data=fixture([{name:'A',hours:1},{name:'B',hours:4}],true)
+  expect(mowerGroupRecoveryDeadline(data,'G').requiredNames).toEqual(['A','B'])
+  const op=data.operators.A!
+  mowerUpdateDetail(data,'A',14.09,op.room,op.index,true)
+  op.group='temporary';op.workaholic=true;op.currentRoom='';op.currentIndex=-1
+  op.group='G';op.workaholic=false
+  expect(mowerGroupRecoveryDeadline(data,'G')).toEqual({requiredNames:['B'],timeMicros:toMowerMicros(4)})
+  op.restInFull=true
+  expect(mowerGroupRecoveryDeadline(data,'G').requiredNames).toContain('A')
+ })
+ it('does not add idle members to an emptied gap wait',()=>{
+  const data=fixture([{name:'A',hours:1},{name:'B',hours:4}],true)
+  data.groupRecoveryFullMembers.G=[]
+  for(const op of Object.values(data.operators)){op.currentRoom='';op.currentIndex=-1}
+  for(const bed of data.dorms)bed.reset()
+  expect(mowerGroupRecoveryDeadline(data,'G')).toEqual({requiredNames:[],timeMicros:undefined})
+ })
  it('waits for every explicitly full-rest member without either lead time',()=>{
   const data=fixture([{name:'迷迭香',hours:1},{name:'黑键',hours:2,options:{restInFull:true}},{name:'绮良',hours:4,options:{restInFull:true}}])
   const task=returnTask(data)!
@@ -255,4 +273,50 @@ it('applies multiple exclusions independently when two groups rest together',()=
  data.groupMoodGapExclusions=['G','H']
  expect(times()).toEqual([toMowerMicros(1-8/60),toMowerMicros(2-8/60)])
  expect(data.groupRecoveryFullMembers).toEqual({})
+})
+
+describe('latest mood and independent recovery deadlines',()=>{
+ it('accepts a newer full card without replacing the observed mood or deadline',()=>{
+  const data=fixture([{name:'A',hours:3,options:{restInFull:true}}]),op=data.operators.A!
+  data.nowMicros=toMowerMicros(1/60)
+  data.dormMoodEstimates.set('A',[24,data.nowMicros])
+  expect(mowerGroupRecoveryDeadline(data,'G').timeMicros).toBe(data.nowMicros)
+  expect(op.mood).toBe(12);expect(op.timeStampMicros).toBe(0);expect(op.depletionRate).toBe(0)
+  expect(data.dorms[0]!.timeMicros).toBe(toMowerMicros(3))
+ })
+ it('does not infer a recovery deadline from a low card',()=>{
+  const data=fixture([{name:'A',options:{restInFull:true,timeStampMicros:undefined}}])
+  data.dormMoodEstimates.set('A',[12,0])
+  expect(mowerGroupRecoveryDeadline(data,'G').timeMicros).toBeUndefined()
+ })
+ it('keeps a fixed-slot countdown across isolated projections and clears it on movement',()=>{
+  const data=fixture([{name:'A',options:{restInFull:true}}]),op=data.operators.A!
+  data.dorms=[];data.plan.dormitory_1=['manager']
+  mowerRefreshDormTime(data,'dormitory_1',0,'A',toMowerMicros(4))
+  expect(mowerGroupRecoveryDeadline(data,'G').timeMicros).toBe(toMowerMicros(4))
+  const projected=projectMowerArrangements(data,[])
+  expect(mowerGroupRecoveryDeadline(projected,'G').timeMicros).toBe(toMowerMicros(4))
+  projected.operators.A!.currentIndex=1
+  expect(mowerGroupRecoveryDeadline(projected,'G').timeMicros).toBeUndefined()
+  expect(mowerGroupRecoveryDeadline(data,'G').timeMicros).toBe(toMowerMicros(4))
+  invalidateMowerDormTime(data,'dormitory_1')
+  expect(mowerGroupRecoveryDeadline(data,'G').timeMicros).toBeUndefined()
+ })
+})
+
+
+describe('recovery partition dependencies',()=>{
+ it.each(['same-group','shared-cover','started','backup'] as const)('keeps %s work together',dependency=>{
+  const data=fixture([{name:'A',hours:4,options:{restInFull:true}}])
+  data.operators.B=new MowerOperatorState({name:'B',room:'central',index:0,operatorType:'high',mood:24,timeStampMicros:0})
+  data.plan.central=['B']
+  const task=new MowerTask({time:0,type:T.SHIFT_ON,plan:{room_1_1:['A'],central:['B']}}),pending:MowerTask[]=[]
+  if(dependency==='same-group')data.operators.B.group='G'
+  if(dependency==='shared-cover'){data.operators.B.currentRoom='room_1_1';data.operators.B.currentIndex=0}
+  if(dependency==='started')task.arrangementStarted=true
+  if(dependency==='backup'){task.backupShiftIntent=structuredClone(task.plan);task.backupShiftConditions=[true]}
+  const before=structuredClone(task.plan)
+  splitMowerRecoveryTask(data,task,pending,['A'])
+  expect(task.plan).toEqual(before);expect(task.time).toBe(0);expect(pending).toEqual([])
+ })
 })

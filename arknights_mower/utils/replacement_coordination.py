@@ -212,6 +212,47 @@ def preferred_replacement_restore(data, is_busy, protected=(), slots=()):
             return plan
 
 
+def ordinary_recall_mood_admissible(data, recalled, candidates, *, now=None):
+    """普通请求到急救线后才评估召回，双方必须有有效心情读数。"""
+    now = now or datetime.now()
+
+    def anchor(op):
+        return data.is_group_shift_anchor(op) or (
+            len(candidates) == 1
+            and op.is_high()
+            and op.independent_rest
+            and not op.workaholic
+            and not op.room.startswith("dorm")
+            and not data._can_standby(op)
+        )
+
+    from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
+
+    def mood(op):
+        return dorm_candidate_mood(data, op.name, now)
+
+    request_moods = [
+        (op, value)
+        for name in candidates
+        if (op := data.operators.get(name)) is not None
+        and anchor(op)
+        and op.is_working()
+        and (value := mood(op)) is not None
+    ]
+    if not any(value <= data.rescue_mood_threshold(op) for op, value in request_moods):
+        return False
+    for name in recalled:
+        op = data.operators.get(name)
+        if op is None:
+            return False
+        if not anchor(op):
+            continue
+        value = mood(op)
+        if value is None:
+            return False
+    return True
+
+
 def recall_can_sustain(
     original, admitted, recalled, candidates, *, rates=None, now=None, urgent=False
 ):
@@ -220,7 +261,15 @@ def recall_can_sustain(
     from arknights_mower.utils.recovery_execution import (
         recovery_ready_for_arrangement,
     )
+    from arknights_mower.utils.urgent_recovery import (
+        active_urgent_recovery,
+        urgent_support_blocked,
+    )
 
+    if set(recalled) & active_urgent_recovery(
+        original
+    ).keys() or urgent_support_blocked(original, candidates):
+        return False
     now = now or datetime.now()
     for name in recalled:
         op = original.operators[name]
@@ -244,18 +293,18 @@ def recall_can_sustain(
     if urgent:
         # 用尽急救不能被普通回班等待和未来续航预测阻挡。
         return True
+    if not ordinary_recall_mood_admissible(original, recalled, candidates, now=now):
+        return False
     if rates is None:
         from arknights_mower.utils.recall_estimates import estimated_recall_rates
 
         rates = estimated_recall_rates(original, admitted, now=now)
     work, recovery = rates
 
+    from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
+
     def mood_at_check(op):
-        # 休息期间保守沿用实读心情，不把旧工作掉率套在恢复阶段。
-        if op.is_resting():
-            return op.mood
-        elapsed = max(0, (now - op.time_stamp).total_seconds() / 3600)
-        return max(0, min(24, op.mood - max(0, op.depletion_rate) * elapsed))
+        return dorm_candidate_mood(original, op.name, now)
 
     connected = replacement_dependencies(
         original,
@@ -271,14 +320,7 @@ def recall_can_sustain(
         observed = original.operators.get(name)
         if op is None or not op.current_room:
             continue
-        if (
-            observed is None
-            or observed.time_stamp is None
-            or getattr(observed, "mood_is_prediction", False)
-            or observed.time_stamp > now
-            or not isfinite(observed.mood)
-            or not 0 <= observed.mood <= 24
-        ):
+        if observed is None or mood_at_check(observed) is None:
             return False
         if (
             op.is_resting()

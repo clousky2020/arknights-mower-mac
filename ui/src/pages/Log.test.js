@@ -1,7 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { effectScope, nextTick, ref } from 'vue'
+import { effectScope, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { readFileSync } from 'node:fs'
+import { compileScript, parse } from '@vue/compiler-sfc'
 
 import LogPage from './Log.vue'
+
+const { descriptor } = parse(readFileSync(new URL('./Log.vue', import.meta.url), 'utf8'))
+const script = compileScript(descriptor, { id: 'task-dialog-loading-test' })
+const openDialogNode = script.scriptSetupAst.find((node) => node.id?.name === 'openTaskDialog')
+const openDialogCode = descriptor.scriptSetup.content
+  .slice(openDialogNode.start, openDialogNode.end)
+  .replace("import('@/components/TaskDialog.vue')", 'loadTaskDialog()')
+  .replaceAll('task_dialog_active', 'page.task_dialog_active')
+
+function taskDialogHandler(component, loadTaskDialog, message) {
+  return new Function(
+    'loadTaskDialog',
+    'TaskDialog',
+    'task_dialog_loading',
+    'show_task',
+    'db_message',
+    'page',
+    `${openDialogCode}; return { openTaskDialog }`
+  )(
+    loadTaskDialog,
+    component.TaskDialog,
+    component.task_dialog_loading,
+    component.show_task,
+    message,
+    component
+  )
+}
 
 const state = vi.hoisted(() => ({
   client: null,
@@ -36,6 +65,9 @@ describe('log page', () => {
   let scope
 
   beforeEach(() => {
+    vi.useFakeTimers()
+    onMounted.mockClear()
+    onUnmounted.mockClear()
     state.client = { get: vi.fn(), post: vi.fn() }
     state.warning = vi.fn()
     state.mower = {
@@ -47,14 +79,15 @@ describe('log page', () => {
         plan_condition: ref([]),
         log_lines: ref([]),
         task_list: ref([]),
-        waiting: ref(false),
-        get_task_id: ref(0)
+        waiting: ref(false)
       },
       get_tasks: vi.fn(),
-      get_running: vi.fn()
+      get_running: vi.fn(),
+      start_task_polling: vi.fn(),
+      stop_task_polling: vi.fn()
     }
     state.config = { refs: { theme: ref('light') } }
-    vi.stubGlobal('localStorage', { setItem: vi.fn(), getItem: vi.fn() })
+    vi.stubGlobal('localStorage', { setItem: vi.fn(), getItem: vi.fn(() => null) })
     vi.stubGlobal('document', {
       hidden: false,
       querySelector: vi.fn(),
@@ -66,7 +99,32 @@ describe('log page', () => {
 
   afterEach(() => {
     scope.stop()
+    vi.clearAllTimers()
+    vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+
+  it('subscribes to task updates only while the log page is mounted', async () => {
+    state.client.get.mockResolvedValue({ data: {} })
+    vi.stubGlobal(
+      'ResizeObserver',
+      vi.fn(function () {
+        this.observe = vi.fn()
+        this.disconnect = vi.fn()
+      })
+    )
+    const component = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
+    onMounted.mock.lastCall[0]()
+    expect(state.mower.start_task_polling).toHaveBeenCalledOnce()
+    expect(state.mower.get_tasks).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(1)
+
+    component.start()
+    expect(state.mower.get_tasks).toHaveBeenCalledOnce()
+    onUnmounted.mock.lastCall[0]()
+    expect(state.mower.stop_task_polling).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+    await nextTick()
   })
 
   it.each(['启动中', '等待设备恢复'])(
@@ -126,6 +184,80 @@ describe('log page', () => {
     component.select_stop_action('maa')
     expect(state.client.get).toHaveBeenCalledWith('/stop-maa')
   })
+
+  it('mounts the task form on first opening and retains it after closing', async () => {
+    const component = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
+    const dialog = { name: 'TaskForm' }
+    const load = vi.fn().mockResolvedValue({ default: dialog })
+    const { openTaskDialog } = taskDialogHandler(component, load, { error: vi.fn() })
+    expect(component.TaskDialog.value).toBe(null)
+
+    await Promise.all([openTaskDialog(), openTaskDialog()])
+    expect(load).toHaveBeenCalledOnce()
+    expect(component.TaskDialog.value).toBe(dialog)
+    expect(component.show_task.value).toBe(true)
+
+    component.show_task.value = false
+    await nextTick()
+    expect(component.TaskDialog.value).toBe(dialog)
+    await openTaskDialog()
+    expect(load).toHaveBeenCalledOnce()
+    expect(component.show_task.value).toBe(true)
+  })
+
+  it('reports a failed task form load and retries only on the next user action', async () => {
+    const component = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
+    const dialog = { name: 'TaskForm' }
+    const load = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ default: dialog })
+    const message = { error: vi.fn() }
+    const { openTaskDialog } = taskDialogHandler(component, load, message)
+    await openTaskDialog()
+    expect(message.error).toHaveBeenCalledWith('新增任务表单加载失败，请点击「新增任务」重试')
+    expect(component.task_dialog_loading.value).toBe(false)
+    expect(component.TaskDialog.value).toBe(null)
+    expect(component.show_task.value).toBe(false)
+    await nextTick()
+    expect(load).toHaveBeenCalledOnce()
+
+    await openTaskDialog()
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(component.TaskDialog.value).toBe(dialog)
+    expect(component.show_task.value).toBe(true)
+  })
+
+  it.each([false, true])(
+    'ignores a task form load after leaving the page (failure=%s)',
+    async (fail) => {
+      const component = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
+      let resolve
+      let reject
+      const load = vi.fn(
+        () =>
+          new Promise((resolvePromise, rejectPromise) => {
+            resolve = resolvePromise
+            reject = rejectPromise
+          })
+      )
+      const message = { error: vi.fn() }
+      const { openTaskDialog } = taskDialogHandler(component, load, message)
+      const loading = openTaskDialog()
+      expect(component.task_dialog_loading.value).toBe(true)
+      expect(component.TaskDialog.value).toBe(null)
+      expect(component.show_task.value).toBe(false)
+      expect(component.task_dialog_active).toBe(true)
+      onUnmounted.mock.lastCall[0]()
+      expect(component.task_dialog_active).toBe(false)
+      if (fail) reject(new Error('offline'))
+      else resolve({ default: { name: 'TaskForm' } })
+      await loading
+      expect(component.TaskDialog.value).toBe(null)
+      expect(component.show_task.value).toBe(false)
+      expect(message.error).not.toHaveBeenCalled()
+    }
+  )
 
   it('reclamps panes when plan conditions appear after the initial layout pass', async () => {
     let conditionHeight = 0

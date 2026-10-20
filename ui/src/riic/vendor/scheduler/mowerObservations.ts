@@ -44,6 +44,7 @@ export function mowerUpdateDetail(data:MowerSchedulingData,name:string,mood:numb
  if(op.currentRoom!==room){op.currentRoom=room;onRoomChanged?.(op,!working&&!!room&&!room.startsWith('dorm'))}
  op.currentIndex=index;op.mood=mood
  if(data.alpha){
+  if(returned&&!room.startsWith('dorm'))for(const [group,names] of Object.entries(data.groupRecoveryFullMembers))data.groupRecoveryFullMembers[group]=names.filter(member=>member!==name)
   if(updateTime){if(room===op.dormMoodFallback&&mood>=0&&mood<=24)for(const [name,stamp] of Object.entries(op.dormMoodPeers)){const peer=data.operators[name];if(peer&&!peer.currentRoom&&peer.timeStampMicros===stamp&&mood>=peer.upperLimit)peer.idleRestCheck=[peer.upperLimit,peer.mood,peer.timeStampMicros]}op.dormMoodPeers={}}
   if(updateTime&&mood>=0&&mood<op.upperLimit)op.dormMoodFallback=''
   data.updateStandbyLowPriority(op,returned)
@@ -58,8 +59,13 @@ export function mowerUpdateDetail(data:MowerSchedulingData,name:string,mood:numb
  if(op.nativeName==='菲亚梅塔'&&(op.timeStampMicros===undefined||op.timeStampMicros<data.nowMicros))return updateTime?index:undefined
  return undefined
 }
+export function invalidateMowerDormTime(data:MowerSchedulingData,room:string):void {
+ for(const bed of data.allDorms())if(bed.position[0]===room)bed.timeMicros=undefined
+ for(const op of Object.values(data.operators))if(op.currentRoom===room)op.dormRecoveryObservation=undefined
+}
 export function mowerRefreshDormTime(data:MowerSchedulingData,room:string,index:number,name:string,timeMicros:number,trueExhaustRooms=new Set<string>()):void {
  const op=data.operators[name];if(!op)return
+ if(data.alpha&&room.startsWith('dorm')&&op.currentRoom===room&&op.currentIndex===index&&op.timeStampMicros!==undefined&&!op.moodIsPrediction&&op.mood>=0&&op.mood<=24&&Number.isFinite(timeMicros))op.dormRecoveryObservation=[room,index,op.timeStampMicros,timeMicros]
  const bed=data.allDorms().find(b=>b.position[0]===room&&b.position[1]===index&&data.recoveryDorm(b,name))
  if(bed){
   if(data.alpha&&bed.name===name&&bed.timeMicros!==undefined)return

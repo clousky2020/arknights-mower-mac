@@ -1,6 +1,18 @@
 <script setup>
+defineOptions({ name: 'MowerLogPage' })
+
 import { storeToRefs } from 'pinia'
-import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import {
+  computed,
+  inject,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  provide,
+  ref,
+  shallowRef,
+  watch
+} from 'vue'
 import { useDialog, useMessage } from 'naive-ui'
 
 import { useMowerStore } from '@/stores/mower'
@@ -13,18 +25,9 @@ import {
 import { createScreenshotPreview } from '@/utils/screenshotPreview'
 import StartSchedule from '@/components/StartSchedule.vue'
 const mower_store = useMowerStore()
-const {
-  log,
-  log_mobile,
-  running,
-  status_label,
-  plan_condition,
-  log_lines,
-  task_list,
-  waiting,
-  get_task_id
-} = storeToRefs(mower_store)
-const { get_tasks, get_running } = mower_store
+const { log, log_mobile, running, status_label, plan_condition, log_lines, task_list, waiting } =
+  storeToRefs(mower_store)
+const { get_tasks, get_running, start_task_polling, stop_task_polling } = mower_store
 const axios = inject('axios')
 const mobile = inject('mobile')
 
@@ -79,7 +82,9 @@ async function restore_log_layout() {
     const { data } = await axios.get(`${import.meta.env.VITE_HTTP_URL}/ui-state/log-layout`)
     layout_preference.screenshot_height = data?.screenshot_height ?? null
     layout_preference.task_height = data?.task_height ?? null
-  } catch {}
+  } catch {
+    // Keep the default layout when saved preferences are unavailable.
+  }
   await nextTick()
   apply_log_layout()
 }
@@ -168,7 +173,7 @@ watch(
 
 let runningTimer
 onMounted(() => {
-  get_tasks()
+  start_task_polling()
   get_running()
   runningTimer = setInterval(get_running, 5000)
   const savedPreviewState = localStorage.getItem('sc_preview')
@@ -184,7 +189,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  clearTimeout(get_task_id.value)
+  task_dialog_active = false
+  stop_task_polling()
   clearInterval(runningTimer)
   document.removeEventListener('visibilitychange', updateScreenshotPreview)
   layoutObserver?.disconnect()
@@ -220,6 +226,27 @@ import ExpandIcon from '@vicons/fluent/PanelTopExpand20Regular'
 
 const show_task_table = ref(true)
 const show_task = ref(false)
+const TaskDialog = shallowRef(null)
+const task_dialog_loading = ref(false)
+let task_dialog_active = true
+async function openTaskDialog() {
+  if (task_dialog_loading.value) return
+  if (TaskDialog.value) {
+    show_task.value = true
+    return
+  }
+  task_dialog_loading.value = true
+  try {
+    const { default: component } = await import('@/components/TaskDialog.vue')
+    if (!task_dialog_active) return
+    TaskDialog.value = component
+    show_task.value = true
+  } catch {
+    if (task_dialog_active) db_message.error('新增任务表单加载失败，请点击「新增任务」重试')
+  } finally {
+    if (task_dialog_active) task_dialog_loading.value = false
+  }
+}
 const add_task = ref(true)
 provide('show_task', show_task)
 provide('show_feedback', show_feedback)
@@ -414,9 +441,9 @@ async function db_delete(keys) {
           </tr>
         </thead>
         <tbody v-show="!mobile || show_task_table">
-          <template v-for="task in task_list">
+          <template v-for="(task, task_index) in task_list" :key="task_index">
             <template v-if="Object.keys(task.plan).length">
-              <tr v-for="(value, key, idx) in task.plan">
+              <tr v-for="(value, key, idx) in task.plan" :key="key">
                 <td v-if="idx == 0" :rowspan="Object.keys(task.plan).length">
                   {{ task.time.split('T')[1].split('.')[0] }}
                   <div v-if="task.emergency_recovery_release">自动救急</div>
@@ -484,8 +511,8 @@ async function db_delete(keys) {
         :waiting="waiting"
       />
       <ProcessControl ref="process_control" compact :running="running" />
-      <task-dialog />
-      <n-button type="warning" @click="show_task = true">
+      <component :is="TaskDialog" v-if="TaskDialog" />
+      <n-button type="warning" :loading="task_dialog_loading" @click="openTaskDialog">
         <template #icon>
           <n-icon>
             <add-icon />

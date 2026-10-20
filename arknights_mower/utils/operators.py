@@ -3,10 +3,11 @@ import copy
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta
+from functools import lru_cache
 from time import monotonic
 from typing import Any, Literal, overload
 
-from evalidate import Expr, base_eval_model
+from evalidate import EvalModel, ExecutionException, Expr, base_eval_model
 
 from arknights_mower.utils import config
 from arknights_mower.utils.config.plan_advanced import export_advanced_settings
@@ -50,6 +51,7 @@ _MAX_INTEGER_LITERAL_BITS = 256
 _MAX_STRING_LITERAL_LENGTH = 512
 _MAX_POWER_EXPONENT = 64
 _MAX_NUMERIC_RESULT_BITS = 4096
+_MAX_COMPILED_EXPRESSIONS = 256
 _NUMERIC_EXPRESSION_CALLS = {
     "current_mood",
     "facility_operator_count",
@@ -156,6 +158,21 @@ def _validate_expression_resources(expression: str) -> None:
                 raise ValueError("幂运算结果过大")
 
 
+@lru_cache(maxsize=_MAX_COMPILED_EXPRESSIONS)
+def _compile_expression(
+    expression, nodes, attributes, allowed_functions, imported_names
+):
+    """最多保留 256 条已校验代码；许可变化另行校验，旧项按 LRU 淘汰。"""
+    _validate_expression_resources(expression)
+    permissions = EvalModel(
+        nodes=list(nodes),
+        attributes=list(attributes),
+        allowed_functions=list(allowed_functions),
+        imported_functions=dict.fromkeys(imported_names),
+    )
+    return Expr(expression, permissions).code
+
+
 @overload
 def build_global_plan(
     *,
@@ -231,6 +248,10 @@ def build_global_plan(
     # 默认任务
     plan["default_plan"] = Plan(plan1, plan_config, products=default_products)
     # 备用自定义任务
+    groups = {
+        group["id"]: get_logic_exp(copy.deepcopy(group["trigger"]))
+        for group in plan["backup_groups"]
+    }
     backup_plans: list[Plan] = []
 
     for i in plan["backup_plans"]:
@@ -283,6 +304,11 @@ def build_global_plan(
                 task=backup_task,
                 name=i.get("name"),
                 products=backup_products,
+                group_ids=i["group_ids"],
+                backup_type=i["type"],
+                group_triggers={
+                    key: groups[key] for key in i["group_ids"] if key != "default"
+                },
             )
         )
     plan["backup_plans"] = backup_plans
@@ -299,6 +325,8 @@ class Operators:
 
     global_plan = None
     plan_condition = []
+    backup_group = "default"
+    backup_groups = ()
     shadow_copy = {}
     current_room_changed_callback = None
     first_init = True
@@ -310,6 +338,7 @@ class Operators:
         self.group_shift_state = {}
         self.group_recovery_full_members = {}
         self.group_recovery_return_time = {}
+        self.urgent_recovery_supporters = {}
         self.exhaust_agent = set()
         self.exhaust_group = set()
         self.rest_in_full_group = set()
@@ -326,6 +355,8 @@ class Operators:
         self.free_blacklist = []
         self.global_plan = plan
         self.backup_plans = plan["backup_plans"]
+        self.backup_groups = plan.get("backup_groups", [])
+        self.backup_group = "default"
         # 切换默认排班
         self.swap_plan([False] * (len(self.backup_plans)))
         self.run_order_rooms = {}
@@ -374,7 +405,23 @@ class Operators:
             self.maintenance_primary_slots
         )
 
-    def swap_plan(self, condition, refresh=False):
+    def evaluate_backup_selection(self):
+        from arknights_mower.utils.backup_groups import select_backup_plans
+        from arknights_mower.utils.logic_expression import get_logic_exp
+
+        groups = [
+            {**group, "trigger": get_logic_exp(copy.deepcopy(group["trigger"]))}
+            for group in self.backup_groups
+        ]
+        return select_backup_plans(
+            self.backup_plans,
+            groups,
+            lambda trigger: bool(self.evaluate_expression(str(trigger))),
+            current_group=self.backup_group,
+            current=self.plan_condition,
+        )
+
+    def swap_plan(self, condition, refresh=False, *, backup_group=None):
         from arknights_mower.utils.backup_validation import validate_backup_facilities
 
         if error := validate_backup_facilities(
@@ -402,7 +449,10 @@ class Operators:
                 self.plan, self.config = self.merge_plan(index, self.config, self.plan)
                 backup = self.global_plan["backup_plans"][index]
                 self.products.update(backup.products)
-                maintenance = backup.uses_major_maintenance_condition
+                maintenance = backup.uses_condition(
+                    "major_maintenance_remaining_hours",
+                    backup_group or self.backup_group,
+                )
                 for room, slots in backup.plan.items():
                     if room not in self.plan:
                         continue
@@ -413,6 +463,8 @@ class Operators:
                         if maintenance and slot.agent in TRADE_ORDER_AGENTS:
                             self.maintenance_primary_slots.add((room, slot_index))
         self.plan_condition = condition
+        if backup_group is not None:
+            self.backup_group = backup_group
         if refresh:
             self.first_init = True
             error = self.init_and_validate(True)
@@ -804,14 +856,17 @@ class Operators:
         )
 
     def rest_mood_complete(self, name):
+        from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
+
         op = self.operators.get(name)
+        mood = dorm_candidate_mood(self, name)
         return (
             self.has_rest_mood_limit(name)
             and op is not None
-            and has_resting_mood(op)
+            and mood is not None
             and (
-                resting_mood(op) >= op.upper_limit
-                or (not op.current_room)
+                mood >= op.upper_limit
+                or not op.current_room
                 and getattr(op, "rest_mood_release_limit", None) == op.upper_limit
             )
         )
@@ -987,13 +1042,22 @@ class Operators:
 
     def evaluate_expression(self, expression):
         try:
-            _validate_expression_resources(expression)
+            code = _compile_expression(
+                expression,
+                tuple(self.eval_model.nodes),
+                tuple(self.eval_model.attributes),
+                tuple(self.eval_model.allowed_functions),
+                tuple(self.eval_model.imported_functions),
+            )
             model = {e: e for e in base_room_list}
             model.update({e: e for e in MANUFACTURE_PRODUCTS | TRADE_PRODUCTS})
             model.update({e: e for e in FACILITY_TYPE_IDS.values()})
             model["op_data"] = self
-            result = Expr(expression, self.eval_model).eval(model)
-            return result
+            # 代码缓存不保留运行时对象；每次从当前模型和驻员状态求值。
+            try:
+                return eval(code, self.eval_model.imported_functions.copy(), model)
+            except Exception as e:
+                raise ExecutionException(e) from e
         except Exception as e:
             logger.exception(f"附表格式出错: {e}")
             return None
@@ -1031,6 +1095,17 @@ class Operators:
             for backup in self.backup_plans
             for hours in backup.major_maintenance_thresholds
         ]
+        from arknights_mower.utils.logic_expression import get_logic_exp
+        from arknights_mower.utils.plan import Plan
+
+        thresholds.extend(
+            hours
+            for group in self.backup_groups
+            if group["id"] != "default"
+            for hours in Plan.maintenance_thresholds(
+                get_logic_exp(copy.deepcopy(group["trigger"]))
+            )
+        )
         if not thresholds:
             return None
         info = NewsChecker.get_maintenance()
@@ -1518,7 +1593,12 @@ class Operators:
             if v.current_room == room
         }
         if room in RIGHT_SIDE_ROOM_CAPACITY:
-            res = [""] * RIGHT_SIDE_ROOM_CAPACITY[room]
+            capacity = (
+                1
+                if room == "recycle" and getattr(self, "recycle_capacity", 2) == 1
+                else RIGHT_SIDE_ROOM_CAPACITY[room]
+            )
+            res = [""] * capacity
         else:
             res = [obj.agent for obj in self.plan[room]]
         not_found = False
@@ -1691,6 +1771,12 @@ class Operators:
         agent.current_room = current_room
         agent.current_index = current_index
         agent.mood = mood
+        if returned_to_post and not to_dorm and not preserve_depletion_rate:
+            # 实际回班结束本人的本轮恢复；临时换组后离岗不能重新加入旧等待。
+            for group, names in self.group_recovery_full_members.items():
+                self.group_recovery_full_members[group] = [
+                    member for member in names if member != name
+                ]
         if update_time:
             agent.idle_rest_check = None
             if (
@@ -1740,9 +1826,31 @@ class Operators:
         for bed in self.all_dorms():
             if bed.position[0] == room:
                 bed.time = None
+        for op in self.operators.values():
+            if op.current_room == room:
+                op.dorm_recovery_observation = None
 
     def refresh_dorm_time(self, room, index, agent, *, group_transitions=None):
         _name = agent["agent"]
+        operator = self.operators.get(_name)
+        if (
+            room.startswith("dorm")
+            and operator is not None
+            and (
+                getattr(operator, "current_room", None),
+                getattr(operator, "current_index", None),
+            )
+            == (room, index)
+            and operator.time_stamp is not None
+            and not getattr(operator, "mood_is_prediction", False)
+            and 0 <= operator.mood <= 24
+            and isinstance(agent.get("time"), datetime)
+        ):
+            operator.dorm_recovery_observation = (
+                (room, index),
+                operator.time_stamp,
+                agent["time"],
+            )
         # 此方法也会作为无界函数绑定到轻量读房测试对象，避免依赖对象上存在
         # all_dorms 方法；旧对象没有 group_dorm 时按普通 Free 床位处理。
         dorms = [*self.dorm, *getattr(self, "group_dorm", [])]
@@ -1897,6 +2005,9 @@ class Operators:
             operator.dorm_position_version = getattr(exist, "dorm_position_version", 0)
             operator.dorm_recovery_room = getattr(exist, "dorm_recovery_room", "")
             operator.dorm_recovery_index = getattr(exist, "dorm_recovery_index", -1)
+            operator.dorm_recovery_observation = getattr(
+                exist, "dorm_recovery_observation", None
+            )
             operator.resting_from_train = getattr(exist, "resting_from_train", False)
             operator.dorm_recovery_fixed = getattr(exist, "dorm_recovery_fixed", ())
             operator.dorm_mood_fallback = getattr(exist, "dorm_mood_fallback", "")
@@ -2173,6 +2284,9 @@ class Operators:
         projected.group_recovery_return_time = dict(
             getattr(self, "group_recovery_return_time", {})
         )
+        projected.urgent_recovery_supporters = copy.deepcopy(
+            getattr(self, "urgent_recovery_supporters", {})
+        )
         projected.dorm = copy.deepcopy(self.dorm)
         projected.group_dorm = copy.deepcopy(getattr(self, "group_dorm", []))
         for plan in plans:
@@ -2316,21 +2430,23 @@ class Operators:
             }
             if ordinary == {name}:
                 return False
+        from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
+
         candidate = self.operators.get(name)
+        mood = dorm_candidate_mood(self, name, now)
         return (
-            candidate is not None
-            and candidate.time_stamp is not None
-            and 0 <= candidate.mood <= 24
-            and candidate.current_mood(now) <= candidate.lower_limit
+            candidate is not None and mood is not None and mood <= candidate.lower_limit
         )
 
-    def replacement_candidates(self, operator):
+    def replacement_candidates(self, operator, *, replacement_override=None):
         """工作替班按配置顺序取用；未豁免的耗尽候补稳定移到末尾。"""
         replacements = (
             self.shared_replacements(operator, self.resting_binding_groups(operator))
             if operator.multi_group
             else operator.replacement
         )
+        if replacement_override is not None:
+            replacements = replacement_override
         candidates = [
             name
             for name in replacements
@@ -2973,6 +3089,7 @@ class Operators:
                 MAX_BACKUP_VALIDATION_COMBINATIONS,
                 known_operators=baseline.operators,
                 deadline=deadline,
+                groups=self.backup_groups,
             )
             for flags in combinations:
                 check_validation_deadline(deadline)
@@ -3181,6 +3298,7 @@ class Operator:
         self.dorm_recovery_room = ""
         self.dorm_recovery_index = -1
         self.dorm_recovery_fixed = ()
+        self.dorm_recovery_observation = None
 
     def is_high(self):
         # 是否为高效组

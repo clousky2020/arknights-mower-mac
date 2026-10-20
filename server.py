@@ -1838,6 +1838,8 @@ def _start_mower(
             or resource_update.running()
         ):
             return False
+        if crash_recovery.reset_observation_pending():
+            start_type = "2"
         if crash_recovery.status()["active"] and recovery_state is None:
             if automatic:
                 if not crash_recovery.status().get("automatic"):
@@ -1872,7 +1874,7 @@ def _start_mower(
         log_stream.clear()
         try:
             if not automatic:
-                crash_recovery.request_resume()
+                crash_recovery.request_resume(start_type)
             task_intent(True, automatic=automatic)
             if recovery_state is not None and not crash_recovery.status().get(
                 "automatic"
@@ -3183,7 +3185,10 @@ def get_maa_conn_presets():
 def get_mood_ratios():
     from arknights_mower.solvers import record
 
-    return record.get_mood_ratios()
+    return record.get_mood_ratios(
+        include_work_rest=request.args.get("include_work_rest", "true").lower()
+        != "false"
+    )
 
 
 @app.route("/record/mood-available-operators")
@@ -4179,7 +4184,9 @@ def ws_chat(ws):
                 from arknights_mower.agent.agent import ask_llm
 
                 for reply in ask_llm(
-                    user_input, context=context, api_key=config.conf.resolved_ai_key
+                    user_input,
+                    context=context[:-1],
+                    api_key=config.conf.resolved_ai_key,
                 ):
                     ws.send(json.dumps({"reply": reply}))
                     last_reply = reply

@@ -5,6 +5,37 @@ from datetime import datetime, timedelta
 from arknights_mower.utils import config
 
 
+def recovery_mood_complete(data, operator, now=None):
+    """回满判断接受较新的有效实读或列表预估，不改写恢复记录。"""
+    from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
+
+    if operator is None:
+        return False
+    mood = dorm_candidate_mood(data, operator.name, now)
+    return mood is not None and mood >= operator.upper_limit
+
+
+def observed_recovery_deadline(data, name):
+    """固定宿舍位的实读倒计时也可用于等待，不将该位开放为 Free。"""
+    op = data.operators[name]
+    _, bed = data.get_dorm_by_name(name)
+    if bed is not None:
+        return bed.time
+    observation = getattr(op, "dorm_recovery_observation", None)
+    if (
+        observation is not None
+        and observation[:2] == ((op.current_room, op.current_index), op.time_stamp)
+        and not getattr(op, "mood_is_prediction", False)
+    ):
+        due = observation[2]
+        if op.mood < 24:
+            due = op.time_stamp + (due - op.time_stamp) * (
+                (op.upper_limit - op.mood) / (24 - op.mood)
+            )
+        return due
+    return None
+
+
 def observed_full_mood(operator):
     """只有实际采样能确认恢复完成，倒计时推算不构成实读。"""
     return (
@@ -54,16 +85,21 @@ def group_recovery_deadline(data, group, *, now=None):
         anchors = data.group_recovery_return_time = {}
 
     def completed_at(op):
-        if observed_full_mood(op) or completed_mood_limit_release(data, op):
+        if recovery_mood_complete(data, op, now) or completed_mood_limit_release(
+            data, op
+        ):
             return now
-        _, bed = data.get_dorm_by_name(op.name)
-        return bed.time if bed is not None else None
+        return observed_recovery_deadline(data, op.name)
 
     if group in config.conf.group_mood_gap_exclusions:
         latches.pop(group, None)
         anchors.pop(group, None)
     elif group in latches:
-        latches[group] = [op.name for op in gap_workers]
+        latches[group] = [
+            op.name
+            for op in gap_workers
+            if op.is_resting() or op.name in latches[group]
+        ]
     elif config.conf.group_rest_in_full_on_mood_gap:
         times = [at for op in gap_workers if (at := completed_at(op)) is not None]
         limit = timedelta(minutes=config.conf.group_mood_gap_threshold_minutes)

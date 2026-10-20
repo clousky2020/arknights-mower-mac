@@ -114,7 +114,9 @@ def replay(monkeypatch):
     return instance, Clock
 
 
-def simulate_room_io(solver, clock, failures=0, failure_kind="exception"):
+def simulate_room_io(
+    solver, clock, failures=0, failure_kind="exception", *, observed_moods=None
+):
     """Keep arrangement execution real; selection/readback is the device seam."""
     remaining = failures
 
@@ -133,6 +135,14 @@ def simulate_room_io(solver, clock, failures=0, failure_kind="exception"):
             solver.task.time = clock.now() + timedelta(minutes=1)
             return False
         solver.op_data = solver.op_data.project_arrangements([{room: plan[room]}])
+        for name in plan[room]:
+            if name in (observed_moods or {}):
+                op = solver.op_data.operators[name]
+                op.mood, op.time_stamp, op.mood_is_prediction = (
+                    observed_moods[name],
+                    clock.now(),
+                    False,
+                )
         # 替代最终阵容读房：同房未换床住客也获得新计时。
         for bed in solver.op_data.all_dorms():
             if bed.position[0] == room and bed.name and bed.time is None:
@@ -336,3 +346,550 @@ def test_planning_preserves_existing_order_and_original_roster_task(replay):
     assert solver.agent_arrange.call_count == 2
     solver.accept_order.assert_called_once()
     solver.drone.assert_not_called()
+
+
+def start_observed_correction(solver, clock, *, recovery_wait=False):
+    solver.tasks = []
+    solver.op_data.backup_plans = []
+    solver.op_data.plan_condition = []
+    solver.op_data.operators["冰酿"].current_room = "dormitory_1"
+    solver.op_data.operators["冰酿"].current_index = 1
+    primary = solver.op_data.operators["歌蕾蒂娅"]
+    primary.current_room, primary.current_index = "", -1
+    if recovery_wait:
+        default = solver.op_data.global_plan["default_plan"]
+        default.plan["central"] = [Room("歌蕾蒂娅", "感知", ["陈"])]
+        default.config.rest_in_full = ["黑键"]
+        solver.op_data.plan["central"] = copy.deepcopy(default.plan["central"])
+        solver.op_data.config.rest_in_full = ["黑键"]
+        primary.group = "感知"
+        solver.op_data.groups["感知"].append(primary.name)
+        solver.op_data.operators["黑键"].rest_in_full = True
+    else:
+        op = solver.op_data.operators["黑键"]
+        op.current_room, op.current_index = "contact", 0
+        solver.op_data.dorm[0].name = ""
+        solver.op_data.dorm[0].time = None
+    solver.agent_get_mood = base.BaseSchedulerSolver.agent_get_mood.__get__(solver)
+    solver._read_agent_mood = MagicMock()
+
+    def read_recovery_rooms(rooms):
+        for op in solver.op_data.operators.values():
+            if op.current_room in rooms:
+                op.time_stamp = clock.now()
+
+    solver._read_recovery_rooms = MagicMock(side_effect=read_recovery_rooms)
+    simulate_room_io(solver, clock)
+    solver.infra_main()
+    correction = next(
+        task for task in solver.tasks if task.type == TaskTypes.SELF_CORRECTION
+    )
+    assert correction.meta_data == ""
+    solver.get_run_order_time.assert_not_called()
+    return correction
+
+
+def test_observed_correction_completion_keeps_order_planning(replay):
+    solver, clock = replay
+    correction = start_observed_correction(solver, clock)
+    dispatch(solver, clock)
+    assert correction not in solver.tasks
+    orders = [task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER]
+    assert len(orders) == 1
+    assert orders[0].meta_data == "room_1_1"
+    solver.get_run_order_time.assert_called_once_with("room_1_1")
+
+
+def start_pending_group_return(solver, clock):
+    correction = start_observed_correction(solver, clock, recovery_wait=True)
+    assert "歌蕾蒂娅" not in correction.plan.get("central", [])
+    assert "黑键" not in correction.plan.get("contact", [])
+    # 普通纠错保留未回满组；中断后保留的明确回班任务仍须核验实际恢复。
+    correction.plan = {"central": ["歌蕾蒂娅"], "contact": ["黑键"]}
+    correction.derived_correction_started = True
+    correction.execution_retained = True
+    return correction
+
+
+def test_full_recovery_correction_keeps_order_planning(replay):
+    solver, clock = replay
+    correction = start_observed_correction(solver, clock, recovery_wait=True)
+    assert "歌蕾蒂娅" not in correction.plan.get("central", [])
+    assert "黑键" not in correction.plan.get("contact", [])
+    deadline = solver.op_data.get_dorm_by_name("黑键")[1].time
+    dispatch(solver, clock)
+    assert correction not in solver.tasks
+    assert not getattr(solver, "waiting_group_shifts", [])
+    assert solver.op_data.operators["黑键"].is_resting()
+    assert solver.op_data.get_dorm_by_name("黑键")[1].time >= deadline
+    dispatch(solver, clock)
+    solver.get_run_order_time.assert_called_once_with("room_1_1")
+
+
+def test_recovery_wait_reads_orders_without_recreating_correction(replay):
+    solver, clock = replay
+    correction = start_pending_group_return(solver, clock)
+    original_time = correction.time
+    dispatch(solver, clock)
+    assert solver.waiting_group_shifts == [correction]
+    assert correction not in solver.tasks
+    waiting_plan = copy.deepcopy(correction.plan)
+    refresh = [
+        task
+        for task in solver.tasks
+        if task.type == TaskTypes.REFRESH_TIME and task.meta_data == "room_1_1"
+    ]
+    assert len(refresh) == 1
+    assert refresh[0].time <= clock.now()
+    recovery_checks = [
+        task for task in solver.tasks if getattr(task, "recovery_observation_rooms", ())
+    ]
+    assert recovery_checks and all(task.time > clock.now() for task in recovery_checks)
+    dispatch(solver, clock, observe_failures=False)
+    orders = [task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER]
+    assert len(orders) == 1
+    solver.get_run_order_time.assert_called_once_with("room_1_1")
+    assert solver.waiting_group_shifts == [correction]
+    assert correction.plan == waiting_plan
+    assert correction.time == original_time
+    independent_corrections = [
+        task for task in solver.tasks if task.type == TaskTypes.SELF_CORRECTION
+    ]
+    for task in independent_corrections:
+        assert "歌蕾蒂娅" not in task.plan.get("central", [])
+        assert "黑键" not in task.plan.get("contact", [])
+        dispatch(solver, clock, observe_failures=False)
+        assert task not in solver.tasks
+    assert solver.waiting_group_shifts == [correction]
+    assert not any(task.type == TaskTypes.SELF_CORRECTION for task in solver.tasks)
+    assert solver.agent_get_mood(skip_dorm=True, read_rooms=False) is None
+    solver._queue_missing_run_order_reads()
+    assert [task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER] == orders
+    assert not any(
+        task.type == TaskTypes.REFRESH_TIME and task.meta_data == "room_1_1"
+        for task in solver.tasks
+    )
+    # 独立纠错改变宿舍阵容后可重建读房任务，原回班意图与时间仍保留。
+    recovery_checks = [
+        task for task in solver.tasks if getattr(task, "recovery_observation_rooms", ())
+    ]
+    assert recovery_checks and all(task.time > clock.now() for task in recovery_checks)
+    for _ in range(3):
+        solver._queue_missing_run_order_reads()
+        assert solver.agent_get_mood(skip_dorm=True, read_rooms=False) is None
+        assert solver.waiting_group_shifts == [correction]
+        assert correction.plan == waiting_plan
+        assert correction.time == original_time
+        assert [
+            task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER
+        ] == orders
+        assert not any(task.type == TaskTypes.SELF_CORRECTION for task in solver.tasks)
+    solver.get_run_order_time.assert_called_once_with("room_1_1")
+    independent = solver.op_data.operators["鸿雪"]
+    independent.current_room, independent.current_index = "", -1
+    plan = solver.agent_get_mood(skip_dorm=True, read_rooms=False, return_plan=True)
+    assert plan == {"room_1_1": ["鸿雪"]}
+    independent.current_room, independent.current_index = "room_1_1", 0
+    clock.current += timedelta(minutes=1)
+    recovered = solver.op_data.operators["黑键"]
+    recovered.mood = 24
+    recovered.time_stamp = clock.now()
+    solver.op_data.get_dorm_by_name("黑键")[1].time = clock.now()
+    solver._resume_waiting_group_shifts()
+    assert correction not in solver.waiting_group_shifts
+    assert any(task is correction for task in solver.tasks)
+    assert correction.time == original_time
+    assert correction.plan["central"] == waiting_plan["central"]
+    assert correction.plan["contact"] == waiting_plan["contact"]
+    dispatch(solver, clock, observe_failures=False)
+    assert correction not in solver.tasks
+    assert solver.op_data.operators["歌蕾蒂娅"].current_room == "central"
+    assert solver.op_data.operators["黑键"].current_room == "contact"
+    solver.get_run_order_time.assert_called_once_with("room_1_1")
+
+
+@pytest.mark.parametrize("kind", ["order", "refresh", "original", "restoration"])
+def test_recovery_wait_preserves_existing_order_responsibility(replay, kind):
+    solver, clock = replay
+    correction = start_pending_group_return(solver, clock)
+    pending = SchedulerTask(
+        clock.now() + timedelta(minutes=30),
+        {} if kind == "refresh" else {"room_1_1": ["鸿雪"]},
+        TaskTypes.REFRESH_TIME if kind == "refresh" else TaskTypes.RUN_ORDER,
+        meta_data="room_1_1" if kind in ("order", "refresh") else "",
+    )
+    if kind == "original":
+        pending.emergency_original_roster = {"room_1_1": ["鸿雪"]}
+    elif kind == "restoration":
+        pending.run_order_original_roster = {"room_1_1": ["鸿雪"]}
+        pending.run_order_restore_pending = True
+    solver.tasks.append(pending)
+    original = copy.deepcopy(vars(pending))
+    dispatch(solver, clock)
+    assert solver.waiting_group_shifts == [correction]
+    assert pending in solver.tasks
+    assert vars(pending) == original
+    assert [
+        task
+        for task in solver.tasks
+        if task.type == TaskTypes.RUN_ORDER
+        or task.type == TaskTypes.REFRESH_TIME
+        and task.meta_data
+    ] == [pending]
+    solver.get_run_order_time.assert_not_called()
+
+
+def start_unknown_recovery_return(solver, clock):
+    correction = start_pending_group_return(solver, clock)
+    recovering = solver.op_data.operators["黑键"]
+    recovering.current_room, recovering.current_index = "", -1
+    recovering.time_stamp = None
+    solver.op_data.dorm[0].name, solver.op_data.dorm[0].time = "", None
+    solver._scan_card_moods = MagicMock()
+    return correction
+
+
+def test_unknown_recovery_failure_still_reads_independent_orders(replay):
+    solver, clock = replay
+    correction = start_unknown_recovery_return(solver, clock)
+    original_plan, original_time = copy.deepcopy(correction.plan), correction.time
+    dispatch(solver, clock, observe_failures=False)
+    assert correction.execution_failure
+    assert correction.plan == original_plan
+    assert correction.time == original_time
+    assert (
+        len(
+            [
+                task
+                for task in solver.tasks
+                if task.type == TaskTypes.REFRESH_TIME and task.meta_data == "room_1_1"
+            ]
+        )
+        == 1
+    )
+    dispatch(solver, clock, observe_failures=False)
+    assert solver.get_run_order_time.call_args_list == [(("room_1_1",), {})]
+    orders = [task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER]
+    assert len(orders) == 1
+    for _ in range(3):
+        dispatch(solver, clock, observe_failures=False)
+        assert [
+            task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER
+        ] == orders
+        assert correction in solver.tasks
+        assert correction.execution_failure
+        assert correction.plan == original_plan
+        assert correction.time == original_time
+    solver.get_run_order_time.assert_called_once_with("room_1_1")
+
+
+def test_saved_recovery_failure_rebuilds_missing_order_responsibility(replay):
+    solver, clock = replay
+    correction = start_unknown_recovery_return(solver, clock)
+    dispatch(solver, clock, observe_failures=False)
+    assert correction.execution_failure
+    solver.tasks = [correction]
+    original_failure = copy.deepcopy(correction.execution_failure)
+    original_time = correction.time
+    dispatch(solver, clock, observe_failures=False)
+    assert (
+        len(
+            [
+                task
+                for task in solver.tasks
+                if task.type == TaskTypes.REFRESH_TIME and task.meta_data == "room_1_1"
+            ]
+        )
+        == 1
+    )
+    dispatch(solver, clock, observe_failures=False)
+    solver.get_run_order_time.assert_called_once_with("room_1_1")
+    assert len([task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER]) == 1
+    assert correction.execution_failure == original_failure
+    assert correction.time == original_time
+
+
+@pytest.mark.parametrize("kind", ["order", "refresh", "original", "restoration"])
+def test_unknown_recovery_preserves_existing_order_responsibility(replay, kind):
+    solver, clock = replay
+    correction = start_unknown_recovery_return(solver, clock)
+    pending = SchedulerTask(
+        clock.now() + timedelta(minutes=30),
+        {} if kind == "refresh" else {"room_1_1": ["鸿雪"]},
+        TaskTypes.REFRESH_TIME if kind == "refresh" else TaskTypes.RUN_ORDER,
+        meta_data="room_1_1" if kind in ("order", "refresh") else "",
+    )
+    if kind == "original":
+        pending.emergency_original_roster = {"room_1_1": ["鸿雪"]}
+    elif kind == "restoration":
+        pending.run_order_original_roster = {"room_1_1": ["鸿雪"]}
+        pending.run_order_restore_pending = True
+    solver.tasks.append(pending)
+    original = copy.deepcopy(vars(pending))
+    dispatch(solver, clock, observe_failures=False)
+    assert correction.execution_failure
+    assert [
+        task
+        for task in solver.tasks
+        if task.type in (TaskTypes.RUN_ORDER, TaskTypes.REFRESH_TIME)
+    ] == [pending]
+    assert vars(pending) == original
+    solver.get_run_order_time.assert_not_called()
+
+
+def test_last_order_completion_continues_with_failed_correction(replay, monkeypatch):
+    solver, clock = replay
+    correction = start_unknown_recovery_return(solver, clock)
+    original_time = correction.time
+    solver.get_run_order_time.side_effect = lambda room: (
+        clock.now() + timedelta(hours=1)
+    )
+    dispatch(solver, clock, observe_failures=False)
+    dispatch(solver, clock, observe_failures=False)
+    # 先完成订单前到期的宿舍补位，再推进订单的生产时间。
+    dispatch(solver, clock, observe_failures=False)
+    (order,) = [task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER]
+    config.conf.run_order_grandet_mode.enable = True
+    config.conf.run_order_grandet_mode.buffer_time = 1
+    solver.drone_room = "room_3_3"
+    solver.find = MagicMock(
+        side_effect=lambda name, **kwargs: True if name == "control_central" else None
+    )
+    solver.get_order_remaining_time = MagicMock(return_value=5)
+    solver.accept_order = MagicMock()
+    solver.drone = MagicMock()
+    clock.current = order.time
+    dispatch(solver, clock, observe_failures=False)
+    assert order not in solver.tasks
+    solver.tasks.append(
+        SchedulerTask(
+            clock.now() + timedelta(hours=3), task_type=TaskTypes.REFRESH_TIME
+        )
+    )
+    for method in (
+        "_refresh_workshop_inventory",
+        "_schedule_maintenance_backup_check",
+        "handle_idle_action",
+        "_idle_sleep",
+        "check_current_focus",
+    ):
+        monkeypatch.setattr(solver, method, MagicMock())
+    solver.task_count = 0
+    monkeypatch.setattr(base.task_template, "render", MagicMock(return_value=""))
+    solver.rest_until_next_task()
+    solver._idle_sleep.assert_not_called()
+    assert (
+        len(
+            [
+                pending
+                for pending in solver.tasks
+                if pending.type == TaskTypes.REFRESH_TIME
+                and pending.meta_data == "room_1_1"
+            ]
+        )
+        == 1
+    )
+    dispatch(solver, clock, observe_failures=False)
+    (following,) = [task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER]
+    assert following is not order
+    assert following.time > order.time
+    assert following.time > clock.now()
+    assert solver.get_run_order_time.call_count == 2
+    assert correction in solver.tasks and correction.execution_failure
+    assert correction.time == original_time
+    solver.accept_order.assert_called_once()
+    solver.drone.assert_not_called()
+
+
+@pytest.mark.parametrize("task_type", [TaskTypes.SELF_CORRECTION, TaskTypes.RE_ORDER])
+def test_full_card_completes_original_return_and_order_planning(replay, task_type):
+    solver, clock = replay
+    correction = start_unknown_recovery_return(solver, clock)
+    correction.type = task_type
+    original_time = correction.time
+    simulate_room_io(solver, clock, observed_moods={"黑键": 24})
+    assert solver.op_data.operators["黑键"].time_stamp is None
+    solver.op_data.dorm_mood_estimates["黑键"] = (24, clock.now())
+    dispatch(solver, clock, observe_failures=False)
+    assert correction not in solver.tasks
+    assert solver.op_data.operators["黑键"].current_room == "contact"
+    assert solver.op_data.operators["歌蕾蒂娅"].current_room == "central"
+    assert correction.time == original_time
+    assert not getattr(correction, "execution_failure", None)
+    if task_type == TaskTypes.RE_ORDER:
+        assert len(planning_tasks(solver, clock)) == 1
+        for _ in range(4):
+            dispatch(solver, clock, observe_failures=False)
+            if any(task.type == TaskTypes.RUN_ORDER for task in solver.tasks):
+                break
+    assert (
+        len([task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER]) == 1
+    ), [(task.type, task.plan) for task in solver.tasks]
+    solver.get_run_order_time.assert_called_once_with("room_1_1")
+
+
+@pytest.fixture
+def paused_empty_order(replay):
+    from arknights_mower.tests.run_order_product_tests import use_order_pages
+
+    solver, clock = replay
+    correction = start_unknown_recovery_return(solver, clock)
+    correction.plan["room_1_1"] = ["鸿雪"]
+    primary = solver.op_data.operators["鸿雪"]
+    primary.current_room, primary.current_index = "", -1
+    solver.op_data.update_facility_state("room_1_1", "trade", "lmd")
+    states = {"room_1_1": "empty"}
+    use_order_pages(solver, states)
+    solver.recog.img = MagicMock()
+    solver.recog.update = MagicMock()
+    solver.turn_on_room_detail = MagicMock()
+
+    def read_room(room, *args, **kwargs):
+        assert not solver._page["open"]
+        observed = [
+            {"agent": name, "mood": 24 if name else -1}
+            for name in solver.op_data.get_current_room(room, True)
+        ]
+        solver._reconcile_room_observation(room, observed)
+        return observed
+
+    solver.get_agent_from_room = MagicMock(side_effect=read_room)
+    dispatch(solver, clock, observe_failures=False)
+    assert correction.execution_failure
+    refresh = next(
+        task
+        for task in solver.tasks
+        if task.type == TaskTypes.REFRESH_TIME and task.meta_data == "room_1_1"
+    )
+    return solver, clock, correction, refresh, states
+
+
+def test_paused_empty_order_keeps_same_refresh_without_repeated_reads(
+    paused_empty_order,
+):
+    solver, clock, correction, refresh, _ = paused_empty_order
+    original_time = refresh.time
+    dispatch(solver, clock, observe_failures=False)
+    assert any(task is refresh for task in solver.tasks)
+    assert refresh.execution_failure
+    assert refresh.time == original_time
+    failure = copy.deepcopy(refresh.execution_failure)
+    revision = solver.op_data.room_observations["room_1_1"]
+    solver._read_room_mood("room_1_1", force_mood=True)
+    assert solver.op_data.room_observations["room_1_1"] > revision
+    solver.op_data.update_facility_state(
+        "room_1_1", "trade", "lmd", updated_at="2026-10-09T16:00:00"
+    )
+    solver.op_data.operators["冰酿"].time_stamp = clock.now()
+    clock.current += timedelta(minutes=20)
+    for _ in range(4):
+        dispatch(solver, clock, observe_failures=False)
+        solver.plan_run_order("room_1_1")
+        assert any(task is refresh for task in solver.tasks)
+        assert refresh.execution_failure == failure
+        assert refresh.time == original_time
+    solver.read_time.assert_called_once()
+    assert correction in solver.tasks
+
+
+def test_staffing_change_resumes_original_paused_order_refresh(paused_empty_order):
+    solver, clock, _, refresh, states = paused_empty_order
+    original_time = refresh.time
+    dispatch(solver, clock, observe_failures=False)
+    assert any(task is refresh for task in solver.tasks)
+    assert refresh.execution_failure
+    primary = solver.op_data.operators["鸿雪"]
+    primary.current_room, primary.current_index = "room_1_1", 0
+    primary.mood, primary.time_stamp = 24, clock.now()
+    states["room_1_1"] = "active"
+    solver._resume_failed_tasks()
+    assert not getattr(refresh, "execution_failure", None)
+    assert refresh.time == original_time
+    for _ in range(3):
+        dispatch(solver, clock, observe_failures=False)
+        if not any(task is refresh for task in solver.tasks):
+            break
+    assert not any(task is refresh for task in solver.tasks)
+    orders = [task for task in solver.tasks if task.type == TaskTypes.RUN_ORDER]
+    assert len(orders) == 1 and orders[0].meta_data == "room_1_1"
+    assert orders[0].time > clock.now()
+    assert solver.read_time.call_count == 2
+
+
+def test_saved_paused_refresh_remains_suspended_until_room_changes(
+    paused_empty_order, monkeypatch, tmp_path
+):
+    solver, clock, _, refresh, _ = paused_empty_order
+    original_time = refresh.time
+    dispatch(solver, clock, observe_failures=False)
+    assert refresh.execution_failure
+    monkeypatch.setattr(
+        record,
+        "get_path",
+        lambda path: tmp_path if path == "@app/tmp" else tmp_path / "record.db",
+    )
+    monkeypatch.setattr(record, "_tables_created", False)
+    assert record.save_state_to_db({"tasks": solver.tasks})
+    solver.tasks = record.load_state()["tasks"]
+    restored = next(
+        task
+        for task in solver.tasks
+        if task.type == TaskTypes.REFRESH_TIME and task.meta_data == "room_1_1"
+    )
+    assert restored is not refresh
+    for _ in range(3):
+        dispatch(solver, clock, observe_failures=False)
+        assert restored in solver.tasks and restored.execution_failure
+        assert restored.time == original_time
+    solver.read_time.assert_called_once()
+
+
+@pytest.mark.parametrize("change", ["replacements", "product", "maintenance"])
+def test_paused_refresh_is_removed_when_room_stops_running_orders(
+    paused_empty_order, change
+):
+    solver, clock, _, refresh, _ = paused_empty_order
+    dispatch(solver, clock, observe_failures=False)
+    assert refresh.execution_failure
+    if change == "replacements":
+        solver.op_data.plan["room_1_1"][0].replacement = []
+    elif change == "product":
+        solver.op_data.update_facility_state("room_1_1", "trade", "orundum")
+    else:
+        solver.op_data.maintenance_primary_slots.add(("room_1_1", 0))
+    solver._sync_run_order_tasks()
+    assert "room_1_1" not in solver.op_data.run_order_rooms
+    assert not any(task is refresh for task in solver.tasks)
+
+
+def test_initial_correction_projects_before_checking_provisional_full_return(replay):
+    solver, clock = replay
+    data = solver.op_data
+    data.backup_plans = []
+    data.plan_condition = []
+    worker = data.operators["歌蕾蒂娅"]
+    worker.current_room, worker.current_index = "dormitory_1", 3
+    worker.mood, worker.rest_in_full = 3, True
+    cover = data.operators["陈"]
+    cover.current_room, cover.current_index = "central", 0
+    data.dorm[1].name, data.dorm[1].time = worker.name, clock.now() + timedelta(hours=5)
+    task = SchedulerTask(
+        time=clock.now(),
+        task_type=TaskTypes.SELF_CORRECTION,
+        task_plan={"central": ["歌蕾蒂娅"]},
+    )
+    task.initial_staffing = task.derived_correction = True
+    solver.tasks, solver.task = [task], None
+    # 最终方案的心情检查仍真实执行；临时回班建议不应先读房或进入恢复等待。
+    solver._read_recovery_rooms = MagicMock(
+        side_effect=AssertionError("provisional read")
+    )
+    rooms = simulate_room_io(solver, clock)
+    dispatch(solver, clock)
+    assert not any(queued is task for queued in solver.tasks)
+    assert not getattr(task, "execution_failure", None)
+    assert not getattr(solver, "waiting_group_shifts", [])
+    assert solver.op_data.operators["歌蕾蒂娅"].is_resting()
+    assert solver.op_data.operators["陈"].current_room == "central"
+    solver._read_recovery_rooms.assert_not_called()
+    assert all(call.args[1] != "central" for call in rooms.call_args_list)

@@ -1037,6 +1037,8 @@ class TestBaseScheduler(unittest.TestCase):
     def test_get_agent_from_room_uses_train_slots_without_train_plan(self):
         solver = self._create_no_train_plan_solver()
         solver.task = None
+        solver.train_scene = MagicMock(return_value=base_schedule.Scene.INFRA_DETAILS)
+        solver.detect_room = MagicMock(return_value="train")
 
         with (
             patch.object(BaseSchedulerSolver, "turn_on_room_detail"),
@@ -1669,6 +1671,7 @@ class TestBaseScheduler(unittest.TestCase):
             state="training",
             panel=mastery_reader.RoomPanel(countdown_state="active"),
             read_failed=False,
+            slots_reliable=True,
             locked=True,
             support_slot="艾丽妮",
             train_slot="真言",
@@ -3515,17 +3518,37 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         solver.choose_agent.assert_called_once()
         solver.get_order_remaining_time.assert_not_called()
 
-    def test_observed_trade_operators_cancel_stale_insertion_before_countdown(self):
+    def test_observed_target_roster_skips_selection_and_countdown_calibration(self):
         solver, room, _ = self.make_solver()
         solver.op_data.get_current_room.return_value = ["但书"]
         solver.get_agent_from_room.side_effect = None
         solver.get_agent_from_room.return_value = [{"agent": "但书"}]
+        original_time = solver.task.time
+
+        result = solver.agent_arrange_room({}, room, solver.task.plan)
+
+        self.assertEqual(result, {})
+        self.assertEqual(solver.task.plan, {room: ["但书"]})
+        self.assertEqual(solver.task.time, original_time)
+        self.assertEqual(solver.tasks, [solver.task])
+        self.assertFalse(getattr(solver.task, "run_order_restore_pending", False))
+        solver.get_agent_from_room.assert_called_once_with(room)
+        solver.choose_agent.assert_not_called()
+        solver.tap_confirm.assert_not_called()
+        solver.get_order_remaining_time.assert_not_called()
+        solver.reset_room_time.assert_not_called()
+
+    def test_other_trade_operators_cancel_stale_insertion_before_countdown(self):
+        solver, room, _ = self.make_solver()
+        solver.op_data.get_current_room.return_value = ["龙舌兰"]
+        solver.get_agent_from_room.side_effect = None
+        solver.get_agent_from_room.return_value = [{"agent": "龙舌兰"}]
         result = solver.agent_arrange_room({}, room, solver.task.plan)
         self.assertIs(result, False)
-        self.assertEqual(solver.task.plan, {})
-        self.assertTrue(
-            any(task.type == TaskTypes.NOT_SPECIFIC for task in solver.tasks)
-        )
+        self.assertEqual(solver.task.plan, {room: ["但书"]})
+        self.assertTrue(solver.task.execution_failure)
+        self.assertTrue(solver.task.run_order_staffing_wait)
+        self.assertEqual(solver.tasks, [solver.task])
         solver.get_agent_from_room.assert_called_once_with(room)
         solver.choose_agent.assert_not_called()
         solver.get_order_remaining_time.assert_not_called()

@@ -248,11 +248,10 @@ async function save() {
     await sleep(500)
   }
   const browser = Bowser.getParser(window.navigator.userAgent)
-  let blob
   if (browser.getEngine().name == 'WebKit') {
-    blob = await toBlob(plan_editor.value.outer)
+    await toBlob(plan_editor.value.outer)
   }
-  blob = await toBlob(plan_editor.value.outer, {
+  const blob = await toBlob(plan_editor.value.outer, {
     pixelRatio: 3,
     backgroundColor: theme.value == 'light' ? '#ffffff' : '#000000',
     style: { margin: 0, padding: '8px 0' }
@@ -299,6 +298,8 @@ const sub_plan_options = computed(() => {
 function create_sub_plan() {
   if (!requireEditing()) return
   backup_plans.value.push({
+    group_ids: ['default'],
+    type: 'global',
     conf: {
       exhaust_require: [],
       free_blacklist: [],
@@ -448,6 +449,7 @@ async function validate_plan() {
   try {
     await nextTick()
     await plan_store.save_plan()
+    await plan_store.wait_for_plan_save()
     const { data } = await axios.post(
       `${import.meta.env.VITE_HTTP_URL}/${rescue ? 'rescue-plan/validate' : 'validate-plan'}`,
       {},

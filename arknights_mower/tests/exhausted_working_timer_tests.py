@@ -15,6 +15,7 @@ from arknights_mower.solvers import record  # noqa: E402
 from arknights_mower.solvers.base_schedule import BaseSchedulerSolver  # noqa: E402
 from arknights_mower.utils import config  # noqa: E402
 from arknights_mower.utils.operators import Operator, Operators  # noqa: E402
+from arknights_mower.utils.scene import Scene  # noqa: E402
 from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes  # noqa: E402
 
 
@@ -68,6 +69,7 @@ def room_reader():
         solver.turn_on_room_detail = MagicMock()
         solver.detect_product_complete = MagicMock(return_value=None)
         solver.detect_room = MagicMock(return_value=room)
+        solver.train_scene = MagicMock(return_value=Scene.INFRA_DETAILS)
 
         def find(resource, scope=None):
             if resource == "room_detail":
@@ -111,6 +113,17 @@ def test_zero_mood_outside_central_keeps_existing_countdown(room_reader, room):
         room, 0, ((1650, 270), (1780, 305))
     )
     solver.recog.update.assert_not_called()
+
+
+@pytest.mark.parametrize("room", ["central", "train", "room_1_1", "contact", "factory"])
+def test_confirmed_zero_working_mood_without_countdown_is_due(room_reader, room):
+    solver, _, _ = room_reader(room=room)
+    solver.read_operator_time = BaseSchedulerSolver.read_operator_time.__get__(solver)
+    solver.read_time = MagicMock(return_value=None)
+    before = datetime.now()
+    result = solver.get_agent_from_room(room, [0])[0]
+    assert result["mood"] == 0
+    assert before <= result["time"] <= datetime.now()
 
 
 @pytest.mark.parametrize("room", ["central", "factory", "train"])
@@ -651,7 +664,7 @@ def test_exhaust_task_uses_custom_lower_limit_with_original_preparation_margin(
         plan={},
         run_order_rooms={},
         exhaust_agent={op.name},
-        rest_in_full_group={op.name} if rest_in_full else set(),
+        rest_in_full_group=set(),
     )
     solver._sync_run_order_tasks = MagicMock()
     solver.check_fia = MagicMock(return_value=(None, None))

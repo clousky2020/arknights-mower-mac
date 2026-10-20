@@ -63,7 +63,7 @@
             :style="{ width: (expandChart[group.boardKey] ?? 100) + '%' }"
           >
             <Line
-              :key="group.boardKey + ':' + (hiddenLines[group.boardKey] || []).join('|')"
+              :key="group.boardKey"
               :ref="(instance) => setChartRef(group.boardKey, instance)"
               :data="group.moodData"
               :options="chartOptions"
@@ -325,13 +325,14 @@ async function refreshSeries() {
 }
 watch(
   () => JSON.stringify(board.views.map((view) => view.operators)),
-  () => refreshSeries()
+  () => refreshSeries(),
+  { immediate: true }
 )
 
 onMounted(async () => {
   board.load()
   try {
-    reportData.value = await getMoodRatios()
+    reportData.value = await getMoodRatios({ includeWorkRest: false })
   } catch {
     loadError.value = '心情报表读取失败，请检查本地 Mower 后端。'
     return
@@ -341,7 +342,6 @@ onMounted(async () => {
   } catch {
     historyLimited.value = true
   }
-  await refreshSeries()
 })
 
 function getMoodInterval(points, index) {

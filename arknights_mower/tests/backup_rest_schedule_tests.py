@@ -235,10 +235,13 @@ def test_unchanged_backup_preserves_dynamic_exhaust_deadline(solver, path):
 def test_failed_backup_commit_preserves_dynamic_exhaust_deadline(solver, path):
     old = SchedulerTask(task_type=TaskTypes.EXHAUST_OFF, meta_data="歌蕾蒂娅")
     solver.tasks = [old]
+    deadline = old.time
     swap = solver.op_data.swap_plan
     solver.op_data.swap_plan = MagicMock(
-        side_effect=lambda conditions, refresh=False: (
-            "invalid merged plan" if conditions == [True] else swap(conditions, refresh)
+        side_effect=lambda conditions, refresh=False, *, backup_group=None: (
+            "invalid merged plan"
+            if conditions == [True]
+            else swap(conditions, refresh, backup_group=backup_group)
         )
     )
     if path == "cached":
@@ -249,6 +252,14 @@ def test_failed_backup_commit_preserves_dynamic_exhaust_deadline(solver, path):
         with pytest.raises(ValueError, match="最终排班生效失败"):
             solver._activate_shift_backup(task)
     assert solver.tasks == [old]
+    solver.op_data.swap_plan.assert_any_call(
+        [True], refresh=True, backup_group="default" if path == "cached" else None
+    )
+    solver.op_data.swap_plan.assert_any_call(
+        [False], refresh=True, backup_group="default"
+    )
+    assert old.time == deadline
+    assert solver.op_data.backup_group == "default"
     assert solver.op_data.plan_condition == [False]
 
 
@@ -556,7 +567,10 @@ def test_pending_migration_release_uses_destination_and_preserves_other_returns(
     solver.tasks.append(migration)
     solver.plan_metadata()
 
-    assert not any(t.type == TaskTypes.RELEASE_DORM for t in solver.tasks)
+    assert not any(
+        t.type == TaskTypes.RELEASE_DORM and t.meta_data == "九色鹿"
+        for t in solver.tasks
+    )
     assert return_task(solver).plan == {"central": ["歌蕾蒂娅"]}
     assert return_task(solver).time < migration.time
     assert data.dorm[2].name == "九色鹿"
@@ -569,7 +583,11 @@ def test_pending_migration_release_uses_destination_and_preserves_other_returns(
         {"agent": bed.name, "time": migration.time + timedelta(hours=1)},
     )
     solver.plan_metadata()
-    release = next(t for t in solver.tasks if t.type == TaskTypes.RELEASE_DORM)
+    release = next(
+        t
+        for t in solver.tasks
+        if t.type == TaskTypes.RELEASE_DORM and t.meta_data == "九色鹿"
+    )
     assert release.meta_data == "九色鹿"
     assert release.plan == {
         "dormitory_1": ["Current", "Current", "Free", "Current", "Current"]
@@ -693,7 +711,7 @@ def test_backup_reorder_wakes_planning_even_with_existing_return(solver, monkeyp
     assert wakeups[0] in generated
 
 
-def test_backup_reorder_rebuilds_invalidated_run_order_on_next_planning_pass(
+def test_backup_reorder_preserves_and_consumes_invalidated_order_read(
     solver, monkeypatch
 ):
     solver.global_plan["default_plan"].plan["room_1_1"] = [
@@ -705,7 +723,7 @@ def test_backup_reorder_rebuilds_invalidated_run_order_on_next_planning_pass(
         solver.op_data.operators[name].current_room = "dormitory_1"
         solver.op_data.operators[name].current_index = index
     solver.plan_metadata()
-    # 时间较远的跑单仍沿用原版规则：换班时删除，常规规划负责重建。
+    # 换班作废旧估计后，独立刷新任务保留重新读取的责任。
     old_order = SchedulerTask(
         time=base.datetime.now() + timedelta(minutes=30),
         task_type=TaskTypes.RUN_ORDER,
@@ -715,7 +733,9 @@ def test_backup_reorder_rebuilds_invalidated_run_order_on_next_planning_pass(
     solver.tasks.append(old_order)
     solver.refresh_run_order_time("room_1_1")
     assert old_order not in solver.tasks
-    assert all(t.type != TaskTypes.REFRESH_TIME for t in solver.tasks)
+    (refresh,) = [t for t in solver.tasks if t.type == TaskTypes.REFRESH_TIME]
+    assert refresh.meta_data == "room_1_1"
+    refresh_time = refresh.time
 
     solver.op_data.backup_plans[0].config.dorm_order = ["dormitory_1"]
     monkeypatch.setattr(
@@ -741,6 +761,14 @@ def test_backup_reorder_rebuilds_invalidated_run_order_on_next_planning_pass(
     solver.skip = base.BaseSchedulerSolver.skip.__get__(solver)
     solver.infra_main()
     assert solver.planned  # 重排完成仍按原流程跳过本轮常规规划。
+    assert refresh in solver.tasks and refresh.time == refresh_time
+
+    solver.get_run_order_time = MagicMock(
+        return_value=base.datetime.now() + timedelta(hours=1)
+    )
+    solver.task = refresh
+    solver.infra_main()
+    assert refresh not in solver.tasks
 
     wakeup = next(t for t in solver.tasks if t.type == TaskTypes.NOT_SPECIFIC)
     # 下一次 run() 重置 planned；消费空任务后进入正常规划，无需等待回班。
@@ -750,9 +778,6 @@ def test_backup_reorder_rebuilds_invalidated_run_order_on_next_planning_pass(
     solver.plan_solver = MagicMock()
     solver.op_data.operators["歌蕾蒂娅"].mood = 24
     solver.op_data.operators["歌蕾蒂娅"].time_stamp = base.datetime.now()
-    solver.get_run_order_time = MagicMock(
-        return_value=base.datetime.now() + timedelta(hours=1)
-    )
     solver.infra_main()
 
     orders = [t for t in solver.tasks if t.type == TaskTypes.RUN_ORDER]

@@ -277,13 +277,24 @@ def test_backup_actions_can_trigger_another_backup_before_any_real_arrangement(s
 
 def test_cycle_keeps_live_state_queue_and_original_task_unchanged(solver):
     solver.op_data.backup_plans[0].task["central"] = ["薇薇安娜"]
+    solver.op_data.backup_plans.append(
+        Plan(
+            {},
+            PlanConfig("", "", ""),
+            trigger=LogicExpression(
+                "op_data.operators['薇薇安娜'].is_working()", "==", "True"
+            ),
+            task={"central": ["陈"]},
+        )
+    )
+    solver.op_data.plan_condition.append(False)
     task = downshift(solver)
     original = copy.deepcopy(task.plan)
     before = positions(solver.op_data)
     with pytest.raises(ValueError, match="循环"):
         solver._prepare_shift_backup(task)
     assert task.plan == original
-    assert solver.op_data.plan_condition == [False]
+    assert solver.op_data.plan_condition == [False, False]
     assert positions(solver.op_data) == before
     assert not hasattr(task, "backup_shift_active")
 
@@ -327,7 +338,16 @@ def test_product_delay_keeps_real_configuration_and_all_actions_pending(solver):
     solver.infra_main()
     assert not getattr(task, "backup_shift_active", False)
     assert task in solver.tasks
-    assert task.backup_shift_intent == intent
+    assert task.backup_shift_intent["central"] == intent["central"]
+    assert task.backup_shift_intent["dormitory_1"] == intent["dormitory_1"]
+    assert task.backup_shift_intent["room_1_2"] == ["乌尔比安", "安哲拉"]
+    assert task.backup_shift_intent["room_2_2"] == ["苍苔", "引星棘刺"]
+    assert task.backup_explicit_slots >= {
+        ("room_1_2", 0),
+        ("room_1_2", 1),
+        ("room_2_2", 0),
+        ("room_2_2", 1),
+    }
     assert task.time > datetime.now() + timedelta(minutes=4)
     assert solver.op_data.plan_condition == [False]
     assert positions(solver.op_data) == before
@@ -440,3 +460,60 @@ def test_due_fiammetta_defers_convergence_until_finished(solver):
     solver.tasks.pop()
     solver._prepare_shift_backup(task)
     assert hasattr(task, "backup_shift_conditions")
+
+
+def test_group_selection_is_committed_only_with_final_shift(solver):
+    backup = solver.op_data.backup_plans[0]
+    backup.group_ids = ["rest"]
+    solver.op_data.backup_groups = [
+        {
+            "id": "rest",
+            "name": "休息",
+            "trigger": {
+                "left": "op_data.operators['薇薇安娜'].is_resting()",
+                "operator": "==",
+                "right": "True",
+            },
+        }
+    ]
+    task = downshift(solver)
+    solver._prepare_shift_backup(task)
+    assert task.backup_shift_conditions == [True]
+    assert task.backup_group == "rest"
+    assert solver.op_data.backup_group == "default"
+    assert solver.op_data.plan_condition == [False]
+    solver._activate_shift_backup(task)
+    assert solver.op_data.backup_group == "rest"
+    assert solver.op_data.plan_condition == [True]
+
+
+def test_failed_group_transition_restores_selection_and_flags(solver):
+    solver.op_data.backup_groups = [
+        {
+            "id": "new",
+            "name": "新分组",
+            "trigger": {"left": "True", "operator": "==", "right": "True"},
+        }
+    ]
+    backup = solver.op_data.backup_plans[0]
+    backup.group_ids = ["new"]
+    backup.trigger = LogicExpression("True", "==", "True")
+    solver._backup_transition_plan = MagicMock(
+        side_effect=ValueError("injected transition failure")
+    )
+    assert not solver.backup_plan_solver()
+    assert solver.op_data.backup_group == "default"
+    assert solver.op_data.plan_condition == [False]
+
+
+def test_direct_selection_remembers_group_with_no_active_backup(solver):
+    solver.op_data.backup_groups = [
+        {
+            "id": "empty",
+            "name": "空分组",
+            "trigger": {"left": "True", "operator": "==", "right": "True"},
+        }
+    ]
+    assert not solver.backup_plan_solver()
+    assert solver.op_data.backup_group == "empty"
+    assert solver.op_data.plan_condition == [False]

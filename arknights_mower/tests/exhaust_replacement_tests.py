@@ -391,7 +391,11 @@ def test_residual_exhaust_off_requeues_run_order_after_coordination(
     )
     solver.tasks, solver.task = [residual, old_run_order], residual
     solver.refresh_run_order_time("room_1_1")
-    assert solver.tasks == [residual]
+    (refresh,) = [task for task in solver.tasks if task is not residual]
+    assert refresh.type == TaskTypes.REFRESH_TIME
+    assert refresh.meta_data == "room_1_1"
+    assert old_run_order not in solver.tasks
+    refresh_time = refresh.time
     solver.planned = solver.todo_task = solver.collect_notification = False
     solver.find = MagicMock(return_value=True)
     solver._refresh_deferred_product_reservations = MagicMock()
@@ -403,11 +407,50 @@ def test_residual_exhaust_off_requeues_run_order_after_coordination(
     monkeypatch.setattr(base_schedule, "scheduling", MagicMock(return_value=None))
     solver.infra_main()
     assert solver.task is None
-    assert solver.tasks == []
+    (replacement_check,) = [task for task in solver.tasks if task is not refresh]
+    assert refresh in solver.tasks and refresh.time == refresh_time
+    assert replacement_check.replacement_check == {
+        "owner": "苍苔",
+        "cover": "引星棘刺",
+        "room": "room_2_2",
+        "index": 0,
+    }
+    assert replacement_check.type == TaskTypes.NOT_SPECIFIC
+    assert replacement_check.plan == {}
     assert not solver.planned
+    solver.enter_room = MagicMock()
+    solver.back = MagicMock()
+    solver.get_agent_from_room = MagicMock(
+        return_value=[
+            {
+                "agent": "引星棘刺",
+                "mood": 12,
+                "time": datetime.now() + timedelta(hours=2),
+            }
+        ]
+    )
+    solver.task = replacement_check
     solver.infra_main()
-    assert len(solver.tasks) == 1
-    run_order = solver.tasks[0]
+    assert solver.task is None
+    assert len(solver.tasks) == 2
+    assert refresh in solver.tasks and replacement_check in solver.tasks
+    assert replacement_check.time > execute_time
+    solver.get_agent_from_room.assert_called_once_with(
+        "room_2_2",
+        [0],
+        force_mood=True,
+        strict_observation=True,
+        force_working_time=True,
+    )
+    assert not solver.planned
+    solver.task = refresh
+    solver.infra_main()
+    assert refresh not in solver.tasks
+    assert solver.task is None
+    solver.infra_main()
+    assert len(solver.tasks) == 2
+    assert any(task is replacement_check for task in solver.tasks)
+    (run_order,) = [task for task in solver.tasks if task is not replacement_check]
     assert run_order.type == TaskTypes.RUN_ORDER
     assert run_order.meta_data == "room_1_1"
     assert run_order.time == execute_time
@@ -416,9 +459,11 @@ def test_residual_exhaust_off_requeues_run_order_after_coordination(
     solver.get_run_order_time.assert_called_once_with("room_1_1")
     solver.plan_solver.assert_called_once()
     solver.run_order_solver()
-    assert solver.tasks == [run_order]
+    assert len(solver.tasks) == 2
+    assert any(task is replacement_check for task in solver.tasks)
+    assert any(task is run_order for task in solver.tasks)
     solver.get_run_order_time.assert_called_once()
-    solver.enter_room.assert_not_called()
+    solver.enter_room.assert_called_once_with("room_2_2")
     base_schedule.send_message.assert_not_called()
 
 

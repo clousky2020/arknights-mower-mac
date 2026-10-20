@@ -1,5 +1,6 @@
 import time
 from datetime import datetime
+from functools import partial
 from typing import List, Optional, Tuple
 
 import cv2
@@ -18,7 +19,7 @@ from arknights_mower.utils.image import (
     thres2,
 )
 from arknights_mower.utils.log import logger, save_screenshot_frame
-from arknights_mower.utils.matcher import Matcher
+from arknights_mower.utils.matcher import Matcher, resource_template_features
 from arknights_mower.utils.operation_timing import timed_step
 from arknights_mower.utils.scene import Scene, SceneComment
 from arknights_mower.utils.vector import va
@@ -91,6 +92,7 @@ class Recognizer:
                     self._img = bytes2img(screencap)
                     self._gray = bytes2img(screencap, True)
                 else:
+                    self.check_current_focus()
                     capture_started_at = datetime.now()
                     self._screencap, self._img, self._gray = self.device.screencap()
                 self.capture_started_at = capture_started_at
@@ -137,9 +139,11 @@ class Recognizer:
         logger.debug(result)
         return result < 0.31
 
-    def check_current_focus(self):
+    def check_current_focus(self) -> bool:
         if self.device.check_current_focus():
-            self.update()
+            self.reset_after_external_control()
+            return True
+        return False
 
     def check_loading_time(self):
         if self.scene == Scene.CONNECTING:
@@ -782,7 +786,7 @@ class Recognizer:
             "confirm": (0, 683),
             "control_central_assistants": (39, 560),
             "credit_shop_countdown": (1511, 1017),
-            "depot": (0, 955),
+            "depot": (0, 1000),
             "double_confirm/exit": (940, 464),
             "double_confirm/friend": (978, 465),
             "double_confirm/give_up": (574, 716),
@@ -870,6 +874,9 @@ class Recognizer:
 
         if not force_feature_match and res in color:
             res_img = loadres(res)
+            if res == "depot":
+                # 限时物品标签会遮住旧模板上沿，只匹配下方固定背景，兼容现有资源包。
+                res_img = res_img[45:]
             h, w, _ = res_img.shape
 
             pos_list = color[res]
@@ -1071,6 +1078,13 @@ class Recognizer:
             judge=judge,
             prescore=threshold,
             dpi_aware=dpi_aware,
+            query_features=partial(
+                resource_template_features,
+                res,
+                res_img,
+                thres=thres,
+                dpi_aware=dpi_aware,
+            ),
         )
         if strict and ret is None:
             raise RecognizeError(f"Can't find '{res}'")
@@ -1119,7 +1133,15 @@ class Recognizer:
             matcher = Matcher(thres2(gray_img, thres))
         else:
             matcher = self.matcher
-        score = matcher.score(res_img, draw=draw, scope=scope, only_score=True)
+        score = matcher.score(
+            res_img,
+            draw=draw,
+            scope=scope,
+            only_score=True,
+            query_features=partial(
+                resource_template_features, res, res_img, thres=thres
+            ),
+        )
         return score
 
     def template_match(

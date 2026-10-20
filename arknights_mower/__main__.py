@@ -26,7 +26,11 @@ from arknights_mower.utils.resource_pkg import (
     refresh_resource_at_boundary,
     resource_task_session,
 )
-from arknights_mower.utils.scheduler_task import find_next_task, protect_priority_tasks
+from arknights_mower.utils.scheduler_task import (
+    find_next_task,
+    merge_restored_waiting_shifts,
+    protect_priority_tasks,
+)
 
 base_scheduler = None
 device_control = create_device_control()
@@ -556,21 +560,41 @@ def simulate(saved):
                 saved.get("group_recovery_full_members"),
                 saved.get("group_recovery_return_time"),
             )
-            base_scheduler.waiting_group_shifts = saved.get("waiting_group_shifts", [])
+            base_scheduler.op_data.urgent_recovery_supporters = copy.deepcopy(
+                saved.get("urgent_recovery_supporters", {})
+            )
+            base_scheduler.waiting_group_shifts = merge_restored_waiting_shifts(
+                saved.get("waiting_group_shifts", [])
+            )
             from arknights_mower.utils.config.plan import migrate_backup_tasks
 
-            base_scheduler.tasks = migrate_backup_tasks(
-                tasks,
-                saved.get("backup_plan_names", []),
-                [backup.name for backup in base_scheduler.op_data.backup_plans],
-                config.retired_backup_indices,
-                retired=bool(saved.get("rescue_state"))
+            retired_backups = (
+                bool(saved.get("rescue_state"))
                 or config.retired_backup_migrated
                 or bool(
                     set(saved.get("backup_plan_names", []))
                     - {backup.name for backup in base_scheduler.op_data.backup_plans}
-                ),
+                )
             )
+            restored_tasks, restored_predecessors = [], {}
+            for task in tasks:
+                migrated = migrate_backup_tasks(
+                    [task],
+                    saved.get("backup_plan_names", []),
+                    [backup.name for backup in base_scheduler.op_data.backup_plans],
+                    config.retired_backup_indices,
+                    retired=retired_backups,
+                )
+                if migrated:
+                    restored_predecessors[id(task)] = migrated[0]
+                    restored_tasks.extend(migrated)
+            base_scheduler.tasks = restored_tasks
+            for task in base_scheduler.waiting_group_shifts:
+                if hasattr(task, "group_shift_predecessors"):
+                    task.group_shift_predecessors = tuple(
+                        restored_predecessors.get(id(previous), previous)
+                        for previous in task.group_shift_predecessors
+                    )
             base_scheduler.op_data.restore_dorm_state(
                 saved["dorm"],
                 group_transitions=base_scheduler._pending_group_transitions(),
@@ -656,6 +680,11 @@ def simulate(saved):
         from arknights_mower.utils.crash_recovery import reconcile_scheduler
 
         reconcile_scheduler(base_scheduler)
+    else:
+        from arknights_mower.utils import crash_recovery
+
+        if crash_recovery.reset_observation_pending():
+            crash_recovery.checkpoint_reset(base_scheduler)
     base_scheduler._state_restore_complete = True
     while True:
         try:
@@ -667,14 +696,20 @@ def simulate(saved):
                 _arm_maintenance_timer(maintenance)
                 if _handle_maintenance(maintenance, base_scheduler):
                     return
-            if find_next_task(base_scheduler.tasks) is not None:
+            if (
+                find_next_task(base_scheduler.tasks, op_data=base_scheduler.op_data)
+                is not None
+            ):
                 # 维护避让先于日常任务和等待预算，包含从存档恢复的专精换人。
                 protect_priority_tasks(
                     base_scheduler.tasks,
                     op_data=getattr(base_scheduler, "op_data", None),
                 )
                 remaining_time = (
-                    find_next_task(base_scheduler.tasks).time - datetime.now()
+                    find_next_task(
+                        base_scheduler.tasks, op_data=base_scheduler.op_data
+                    ).time
+                    - datetime.now()
                 ).total_seconds()
                 if remaining_time > 540:
                     from arknights_mower.solvers.trust_rotation import (
@@ -684,7 +719,9 @@ def simulate(saved):
                     run_trust_rotation(
                         base_scheduler.device,
                         base_scheduler.recog,
-                        find_next_task(base_scheduler.tasks).time,
+                        find_next_task(
+                            base_scheduler.tasks, op_data=base_scheduler.op_data
+                        ).time,
                     )
                     if base_scheduler.daily_visit_friend < get_server_time().date():
                         visit_day = (
@@ -766,15 +803,21 @@ def simulate(saved):
                             base_scheduler.tasks,
                             op_data=base_scheduler.op_data,
                         )
-                    if find_next_task(base_scheduler.tasks) is not None:
-                        base_scheduler.tasks.sort(
-                            key=lambda task: (
-                                bool(getattr(task, "execution_failure", None)),
-                                task.time,
-                            )
+                    if (
+                        find_next_task(
+                            base_scheduler.tasks, op_data=base_scheduler.op_data
+                        )
+                        is not None
+                    ):
+                        protect_priority_tasks(
+                            base_scheduler.tasks,
+                            op_data=getattr(base_scheduler, "op_data", None),
                         )
                         remaining_time = (
-                            find_next_task(base_scheduler.tasks).time - datetime.now()
+                            find_next_task(
+                                base_scheduler.tasks, op_data=base_scheduler.op_data
+                            ).time
+                            - datetime.now()
                         ).total_seconds()
                     else:
                         remaining_time = 0
@@ -782,37 +825,45 @@ def simulate(saved):
                     if remaining_time > 0 and config.conf.should_run_mower_stage_plan:
                         base_scheduler.mower_plan_solver()
 
-                    if find_next_task(base_scheduler.tasks) is not None:
-                        base_scheduler.tasks.sort(
-                            key=lambda task: (
-                                bool(getattr(task, "execution_failure", None)),
-                                task.time,
-                            )
+                    if (
+                        find_next_task(
+                            base_scheduler.tasks, op_data=base_scheduler.op_data
+                        )
+                        is not None
+                    ):
+                        protect_priority_tasks(
+                            base_scheduler.tasks,
+                            op_data=getattr(base_scheduler, "op_data", None),
                         )
                         remaining_time = (
-                            find_next_task(base_scheduler.tasks).time - datetime.now()
+                            find_next_task(
+                                base_scheduler.tasks, op_data=base_scheduler.op_data
+                            ).time
+                            - datetime.now()
                         ).total_seconds()
                     else:
                         remaining_time = 0
 
                     if remaining_time >= 540 and base_scheduler.has_maa_tasks():
-                        subject = f"下次任务在{find_next_task(base_scheduler.tasks).time.strftime('%H:%M:%S')}"
-                        context = (
-                            f"下一次任务:{find_next_task(base_scheduler.tasks).plan}"
-                        )
+                        subject = f"下次任务在{find_next_task(base_scheduler.tasks, op_data=base_scheduler.op_data).time.strftime('%H:%M:%S')}"
+                        context = f"下一次任务:{find_next_task(base_scheduler.tasks, op_data=base_scheduler.op_data).plan}"
                         logger.info(context)
                         logger.info(subject)
                         base_scheduler.maa_plan_solver()
 
-                if find_next_task(base_scheduler.tasks) is not None:
-                    base_scheduler.tasks.sort(
-                        key=lambda task: (
-                            bool(getattr(task, "execution_failure", None)),
-                            task.time,
-                        )
+                if (
+                    find_next_task(base_scheduler.tasks, op_data=base_scheduler.op_data)
+                    is not None
+                ):
+                    protect_priority_tasks(
+                        base_scheduler.tasks,
+                        op_data=getattr(base_scheduler, "op_data", None),
                     )
                     remaining_time = (
-                        find_next_task(base_scheduler.tasks).time - datetime.now()
+                        find_next_task(
+                            base_scheduler.tasks, op_data=base_scheduler.op_data
+                        ).time
+                        - datetime.now()
                     ).total_seconds()
                 else:
                     remaining_time = 0
@@ -841,11 +892,15 @@ def simulate(saved):
                                 base_scheduler.device, base_scheduler.recog
                             )
                             ra_solver.run(
-                                find_next_task(base_scheduler.tasks).time
+                                find_next_task(
+                                    base_scheduler.tasks, op_data=base_scheduler.op_data
+                                ).time
                                 - datetime.now()
                             )
                             remaining_time = (
-                                find_next_task(base_scheduler.tasks).time
+                                find_next_task(
+                                    base_scheduler.tasks, op_data=base_scheduler.op_data
+                                ).time
                                 - datetime.now()
                             ).total_seconds()
                         elif config.conf.SF:
@@ -855,11 +910,15 @@ def simulate(saved):
                                 base_scheduler.device, base_scheduler.recog
                             )
                             sf_solver.run(
-                                find_next_task(base_scheduler.tasks).time
+                                find_next_task(
+                                    base_scheduler.tasks, op_data=base_scheduler.op_data
+                                ).time
                                 - datetime.now()
                             )
                             remaining_time = (
-                                find_next_task(base_scheduler.tasks).time
+                                find_next_task(
+                                    base_scheduler.tasks, op_data=base_scheduler.op_data
+                                ).time
                                 - datetime.now()
                             ).total_seconds()
 

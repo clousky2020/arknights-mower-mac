@@ -1,6 +1,8 @@
+import {mowerDormCandidateMood} from './mowerAlphaCandidates'
+import {mowerUrgentRecallBlocked} from './mowerUrgentRecovery'
 import {alphaPosition,mowerMatchReplacements} from './mowerAlphaDorm'
 import {mowerGroupRecoveryDeadline,mowerRecoveryReady} from './mowerGroupRecovery'
-import {hasObservedFullMood,mowerReplacementCandidates,MowerOperatorState} from './mowerOperatorState'
+import {hasObservedFullMood,mowerReplacementCandidates,rescueMoodThreshold,MowerOperatorState} from './mowerOperatorState'
 import {projectMowerArrangements} from './mowerObservations'
 import type {MowerRestingOptions} from './mowerOrdinaryPlanning'
 import type {MowerSchedulingData} from './mowerSchedulingData'
@@ -19,7 +21,7 @@ export function mowerCoordinationPrimaryReplacement(data:MowerSchedulingData,own
 }
 function eligible(data:MowerSchedulingData,name:string,owner:MowerOperatorState,options:MowerRestingOptions,required:ReadonlySet<string>=new Set()):boolean {
  const cover=data.operators[name]
- return !!cover&&(!cover.isHigh()||mowerCoordinationPrimaryReplacement(data,owner,name,required))&&!data.busyRestingNames.has(name)&&!options.reservedNames?.has(name)&&!data.reservedProductReplacements.has(name)&&!data.excludedCandidates.has(name)&&!options.isMasteryBusy?.(name)&&!data.dormReplacementForSlot(name,cover.currentRoom,cover.currentIndex)&&!options.reservedSlots?.has(alphaPosition(cover.currentRoom,cover.currentIndex))&&(owner.room.startsWith('dorm')||!data.replacementExhausted(name))
+ return !!cover&&(!cover.isHigh()||mowerCoordinationPrimaryReplacement(data,owner,name,required))&&!data.busyRestingNames.has(name)&&!options.reservedNames?.has(name)&&!data.reservedProductReplacements.has(name)&&!data.excludedCandidates.has(name)&&!options.isMasteryBusy?.(name)&&!data.dormReplacementForSlot(name,cover.currentRoom,cover.currentIndex)&&!options.reservedSlots?.has(alphaPosition(cover.currentRoom,cover.currentIndex))&&(owner.room.startsWith('dorm')||!data.replacementExhausted(name,owner))
 }
 function coveredOwner(data:MowerSchedulingData,name:string):MowerOperatorState|undefined {
  const cover=data.operators[name]
@@ -90,14 +92,32 @@ export function mowerReplacementDependencyNames(data:MowerSchedulingData,seeds:I
  }
  return names
 }
+function recallMood(data:MowerSchedulingData,op:MowerOperatorState):number|undefined {
+ return mowerDormCandidateMood(data,op.name)
+}
+/** Ordinary recall starts at the requester's rescue line and requires observed target mood for its endurance forecast. */
+export function mowerRecallMoodAdmissible(data:MowerSchedulingData,recalled:ReadonlySet<string>,candidates:readonly string[]):boolean {
+ const anchor=(op:MowerOperatorState)=>op.isHigh()&&!op.room.startsWith('dorm')&&!op.workaholic&&!data.canStandby(op)&&(!op.multiGroup||candidates.length===1&&op.independentRest)
+ const requesters=candidates.map(name=>data.operators[name]).filter((op):op is MowerOperatorState=>!!op&&anchor(op)&&!!op.currentRoom&&!op.isResting())
+ const reached=(op:MowerOperatorState,limit:number)=>{const mood=recallMood(data,op);return mood!==undefined&&mood<=limit}
+ if(!requesters.some(op=>reached(op,rescueMoodThreshold(op,data.policy))))return false
+ return [...recalled].map(name=>data.operators[name]).every(op=>{
+  if(!op)return false
+  if(!anchor(op))return true
+  const mood=recallMood(data,op)
+  return mood!==undefined
+ })
+}
 /** Recall is admitted only with a complete post-admission recovery/depletion forecast. */
 export function mowerRecallCanSustain(original:MowerSchedulingData,admitted:MowerSchedulingData,recalled:ReadonlySet<string>,candidates:readonly string[],options:MowerRestingOptions):boolean {
+ if(recalled.size&&(mowerUrgentRecallBlocked(original,candidates,options.urgentRecoveryPendingSupporters)||[...recalled].some(name=>name in original.urgentRecoverySupporters)))return false
  for(const name of recalled){
   const op=original.operators[name];if(!op||!op.isResting())continue
   if(op.restInFull&&!mowerRecoveryReady(original,op,options.priorityScheduling))return false
   if(op.group){const recovery=mowerGroupRecoveryDeadline(projectMowerArrangements(original,[]),op.group);if(recovery.requiredNames.length&&(recovery.requiredNames.some(member=>(!options.urgentExhaust||original.operators[member]!.restInFull)&&!mowerRecoveryReady(original,original.operators[member],options.priorityScheduling))))return false}
  }
  if(options.urgentExhaust)return true
+ if(!mowerRecallMoodAdmissible(original,recalled,candidates))return false
  if(!options.coordinationRates)return false
  let connected=mowerReplacementDependencyNames(original,[...candidates,...recalled])
  // Beds are shared resources too; do not assume an unrelated resident releases a bed early.
@@ -106,8 +126,9 @@ export function mowerRecallCanSustain(original:MowerSchedulingData,admitted:Mowe
  const shadow=projectMowerArrangements(admitted,[])
  for(const op of Object.values(shadow.operators)){
   const source=original.operators[op.name]
-  if(op.currentRoom&&(!source||source.timeStampMicros===undefined||source.moodIsPrediction))return false
-  op.mood=source?Math.max(0,Math.min(24,source.mood-source.depletionRate*fromMowerMicros(original.nowMicros-(source.timeStampMicros??original.nowMicros)))):op.mood;op.timeStampMicros=shadow.nowMicros;op.depletionRate=0
+  const mood=source?mowerDormCandidateMood(original,source.name):undefined
+  if(op.currentRoom&&mood===undefined)return false
+  op.mood=mood??op.mood;op.timeStampMicros=shadow.nowMicros;op.depletionRate=0
  }
  const waiting=[...connected].map(name=>shadow.operators[name]).filter((op):op is MowerOperatorState=>!!op?.isHigh()&&op.isResting()&&!op.workaholic&&!op.room.startsWith('dorm'))
  if(!waiting.length)return false
@@ -137,9 +158,13 @@ export function mowerRecallCanSustain(original:MowerSchedulingData,admitted:Mowe
 }
 
 /** Active explicit arrangements and product reservations take precedence over coordination. */
-export function mowerReplacementReservations(data:MowerSchedulingData,tasks:readonly MowerTask[]):{reservedNames:Set<string>;reservedSlots:Set<string>}{
+export function mowerReplacementReservations(data:MowerSchedulingData,tasks:readonly MowerTask[],ownRecovery:readonly string[]=[]):{reservedNames:Set<string>;reservedSlots:Set<string>}{
  const reservedNames=new Set([...data.busyRestingNames,...data.reservedProductReplacements]),reservedSlots=new Set(data.reservedProductBeds.keys())
  for(const task of tasks){
+  if(!ownRecovery.length||task.urgentRecoveryRequestNames.length!==ownRecovery.length||!task.urgentRecoveryRequestNames.every(name=>ownRecovery.includes(name))){
+   task.urgentRecoveryReservedNames.forEach(name=>reservedNames.add(name))
+   task.urgentRecoveryReservedSlots.forEach(slot=>reservedSlots.add(slot))
+  }
   if(task.productShiftLocked){task.productLockNames.forEach(name=>reservedNames.add(name));task.productLockSlots.forEach(slot=>reservedSlots.add(slot))}
   if(task.backupShiftActive||task.dormRecoveryRestore.length){
    task.dormRecoveryRestore.forEach(name=>reservedNames.add(name))
