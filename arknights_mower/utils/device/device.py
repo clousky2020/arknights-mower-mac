@@ -924,13 +924,8 @@ class Device:
     def tap(self, point: tuple[int, int]) -> None:
         """tap"""
         logger.debug(f"tap: {point}")
-    def tap(self, point: tuple[int, int]) -> None:
-        """tap"""
-        logger.debug(f"tap: {point}")
         self._input_once(
-            lambda prepared: self._tap(
-                prepared.points[0], prepared.display_frames
-            ),
+            lambda prepared: self._tap(prepared.points[0], prepared.display_frames),
             prepare=lambda: self._prepare_touch([point]),
         )
 
@@ -1017,9 +1012,7 @@ class Device:
         elif self.is_avd_like:
             self._control_with_retry("swipe", start, end, duration)
         else:
-            self.control.swipe(
-                start, end, duration, display_frames=display_frames
-            )
+            self.control.swipe(start, end, duration, display_frames=display_frames)
 
     def _swipe_ext(
         self,
@@ -1059,7 +1052,11 @@ class Device:
                 durations,
                 up_wait,
                 display_frames=display_frames,
-                **({"before_release": before_release} if before_release is not None else {}),
+                **(
+                    {"before_release": before_release}
+                    if before_release is not None
+                    else {}
+                ),
             )
 
     def _prepare_touch(self, points, durations=None, up_wait=0):
@@ -1260,7 +1257,6 @@ class Device:
                 raise failure
             self._adb_capture = None
             self._recovery_error = None
-
 
     def close(self) -> None:
         """Release completed resources once and retain failed cleanup owners."""

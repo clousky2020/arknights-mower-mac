@@ -985,9 +985,7 @@ class DeviceSession:
         if not package:
             return False
         logger.info("未获取到游戏画面，正在启动游戏...")
-        return launch(
-            self.adb_path, serial, package, config.APP_ACTIVITY_NAME, timeout
-        )
+        return launch(self.adb_path, serial, package, config.APP_ACTIVITY_NAME, timeout)
 
     def _wait_local(self, deadline, *, until=None, frame_probe=None):
         if until is None:
@@ -1016,7 +1014,9 @@ class DeviceSession:
         ):
             raise SessionFailure(observation, observation.message or observation.code)
 
-    def _action(self, operation, deadline, *, required=True, starting=False, label=None):
+    def _action(
+        self, operation, deadline, *, required=True, starting=False, label=None
+    ):
         self._remaining(deadline)
         if self.actions >= self.policy.attempts:
             raise SessionFailure(self.last, "设备恢复次数预算已耗尽")

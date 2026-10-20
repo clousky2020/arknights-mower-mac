@@ -14,7 +14,6 @@ from arknights_mower.utils.device.touch_backend import TouchFailure
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.recognize import RecognizeError
 from arknights_mower.utils.scene import Scene, SceneComment
-from arknights_mower.utils.simulator import restart_simulator
 from arknights_mower.utils.solver import (
     AVD_LOGIN_QUICKLY_TAP,
     AVD_LOGIN_START_TAP,

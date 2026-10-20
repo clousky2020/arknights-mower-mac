@@ -2727,7 +2727,6 @@ class TestDormShiftOffMerge(unittest.TestCase):
             {}, None, solver.op_data, [order, fill_task], empty_only=True
         )
 
-
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
     def test_plan_primary_recovery_without_assigned_task_uses_task_list_only(self):
         """run() 主循环赋值 self.task 之前触发的恢复规划不得直接崩溃。
@@ -2768,6 +2767,8 @@ class TestDormShiftOffMerge(unittest.TestCase):
         self.assertIs(op_data, solver.op_data)
         self.assertEqual(tasks, [None])
         solver._scan_card_moods.assert_called_once()
+
+
 class TestDroneAccelerate(unittest.TestCase):
     """#907：无人机加速面板首次点击未生效时不应误消费跑单任务。
 

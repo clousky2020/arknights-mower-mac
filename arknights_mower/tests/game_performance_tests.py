@@ -37,6 +37,8 @@ def solver(monkeypatch):
     result.trials = []
     result.entered_room = False
     result.recog = SimpleNamespace(w=1920, h=1080, update=MagicMock())
+    # 场景图登录分支会读取 device.is_avd_like，桩显式给 False 走通用分支
+    result.device = SimpleNamespace(is_avd_like=False)
     result.check_current_focus = MagicMock()
     result.sleep = MagicMock()
     result.checkpoint = MagicMock()

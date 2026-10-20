@@ -79,9 +79,7 @@ def test_other_account_credential_is_never_reused(syncer, monkeypatch):
         module.config,
         "conf",
         SimpleNamespace(
-            skland_info=[
-                SimpleNamespace(cultivate_select=True, account="15067703927")
-            ]
+            skland_info=[SimpleNamespace(cultivate_select=True, account="15067703927")]
         ),
     )
     # 缓存里存的是本账号的会话
@@ -92,7 +90,9 @@ def test_other_account_credential_is_never_reused(syncer, monkeypatch):
     )
     # 全局 header 里残留的是「另一个账号」上一次留下的凭据
     monkeypatch.setattr(module, "header", {"cred": "cred-130"})
-    monkeypatch.setattr(module, "get_cred_by_token", lambda _: pytest.fail("不应重新登录"))
+    monkeypatch.setattr(
+        module, "get_cred_by_token", lambda _: pytest.fail("不应重新登录")
+    )
     monkeypatch.setattr(module, "get_sign_header", fake_sign_header)
 
     # 响应已带 building，按当前契约不再发起第二次设施查询。
@@ -120,9 +120,7 @@ def test_missing_or_expired_cache_relogins_instead_of_using_blank_token(
         module.config,
         "conf",
         SimpleNamespace(
-            skland_info=[
-                SimpleNamespace(cultivate_select=True, account="15067703927")
-            ]
+            skland_info=[SimpleNamespace(cultivate_select=True, account="15067703927")]
         ),
     )
     monkeypatch.setattr(module, "restore_cached_session", lambda account: None)
