@@ -370,6 +370,7 @@ def _sort_dispatch_tasks(tasks, now, op_data=None):
                 and getattr(task, "advance_support_swap", False)
                 and task.time <= now
             ),
+            not (getattr(task, "strict_mood_limit", False) and task.time <= now),
             task.time,
         )
     )
@@ -422,11 +423,13 @@ def _advance_mood_limit_releases(
         for task in blockers:
             if (
                 task.type in (TaskTypes.RUN_ORDER, TaskTypes.SWAP_SUPPORT)
-                and task.time <= now
-            ):
+                or getattr(task, "run_order_window_observation", False)
+            ) and task.time <= now:
                 # 已到期的关键任务先执行，不再尝试把清退塞到它前面。
                 continue
-            if task.type == TaskTypes.RUN_ORDER:
+            if task.type == TaskTypes.RUN_ORDER or getattr(
+                task, "run_order_window_observation", False
+            ):
                 # 跑单时间已扣除进站提前量，还需预留确认、收单和归位。
                 minutes = (
                     max(run_order_delay, config.conf.run_order_delay)
@@ -438,9 +441,10 @@ def _advance_mood_limit_releases(
                 minutes = sum(estimate_dorm_minutes(room, 1.5) for room in task.plan)
             else:
                 minutes = _ordinary_task_minutes(task, execution_time)
-            end = max(now, task.time) + timedelta(minutes=minutes)
-            if start <= end and max(now, start) + duration >= task.time:
-                start = min(start, task.time - duration - timedelta(seconds=1))
+            blocker_start = max(now, task.time)
+            end = blocker_start + timedelta(minutes=minutes)
+            if start <= end and max(now, start) + duration >= blocker_start:
+                start = min(start, blocker_start - duration - timedelta(seconds=1))
         if start < release.time:
             logger.info(
                 f"心情上限离宿提前至 {start:%H:%M:%S}，"
@@ -474,7 +478,10 @@ def _advance_swap_before_orders(tasks, swap, now, execution_time, op_data=None):
         (
             t
             for t in tasks
-            if t.type == TaskTypes.RUN_ORDER
+            if (
+                t.type == TaskTypes.RUN_ORDER
+                or getattr(t, "run_order_window_observation", False)
+            )
             and t.meta_data
             and not getattr(t, "run_order_restore_pending", False)
             and id(t) not in blocked_orders
@@ -602,6 +609,7 @@ def _priority_tasks(tasks, op_data=None):
             task
             for task in task_view(tasks, TaskScope.DISPATCH, op_data)
             if task.type == TaskTypes.RUN_ORDER
+            or getattr(task, "run_order_window_observation", False)
             or config.conf.enable_mastery
             and task.type == TaskTypes.SWAP_SUPPORT
         ),
@@ -1087,7 +1095,10 @@ def _schedule_priority_tasks(tasks, execution_time=None, time_now=None, op_data=
         # 未来普通任务仅在跑单前十分钟延期；到期任务仍按实际操作预算保护跑单。
         # 宿舍保留提前规划；只有确认独立的后续任务保留原时间。
         if (
-            priority.type == TaskTypes.RUN_ORDER
+            (
+                priority.type == TaskTypes.RUN_ORDER
+                or getattr(priority, "run_order_window_observation", False)
+            )
             and priority.time - now > timedelta(minutes=10)
             and task.time > now
         ):
@@ -1162,7 +1173,10 @@ def _schedule_priority_tasks(tasks, execution_time=None, time_now=None, op_data=
                 continue
             duration = batch_cursor - start
         protected = fixed | (
-            adjusted if priority.type == TaskTypes.RUN_ORDER else set()
+            adjusted
+            if priority.type == TaskTypes.RUN_ORDER
+            or getattr(priority, "run_order_window_observation", False)
+            else set()
         )
         if id(task) in protected or (
             batch_fits is not False
@@ -2875,8 +2889,10 @@ def plan_dorm_isolation(op_data, plan, reserved_slots=(), *, reserved_names=()):
     return result
 
 
-def try_reorder(op_data, new_plan, *, tasks=()):
-    reserved_names, reserved_slots = retained_task_reservations(op_data, tasks)
+def try_reorder(op_data, new_plan, *, tasks=(), reserved_names=(), reserved_slots=()):
+    retained_names, retained_slots = retained_task_reservations(op_data, tasks)
+    reserved_names = set(reserved_names) | retained_names
+    reserved_slots = set(reserved_slots) | retained_slots
     # 移除被拉去上班的替班
     assigned_names = {name for names in new_plan.values() for name in names}
     for d in op_data.dorm:
@@ -3022,7 +3038,16 @@ def try_workshop_tasks(op_data, tasks, *, minimum_mood=22):
             logger.info("尚无仓库读数，无法核验加工原料及成品库存，跳过任务生成")
 
 
-def try_add_release_dorm(plan, time, op_data, tasks, *, empty_only=False):
+def try_add_release_dorm(
+    plan,
+    time,
+    op_data,
+    tasks,
+    *,
+    empty_only=False,
+    reserved_names=(),
+    reserved_slots=(),
+):
     """共用空床与层级接管；不养闲人只控制满心情清退任务创建。"""
     if plan:
         for names in plan.values():
@@ -3041,11 +3066,14 @@ def try_add_release_dorm(plan, time, op_data, tasks, *, empty_only=False):
 
     try:
         now = datetime.now()
-        reserved_names, reserved_slots = dorm_task_reservations(op_data, tasks)
+        task_names, task_slots = dorm_task_reservations(op_data, tasks)
+        reserved_names = set(reserved_names)
+        candidate_reserved_names = reserved_names | task_names
+        reserved_slots = set(reserved_slots) | task_slots
         vacancies = vacant_dorm_slots(op_data, reserved_slots)
         priority_only = empty_only and not vacancies
         logger.info("检查宿舍空床与恢复接管")
-        candidates = dorm_candidates(op_data, reserved_names, now=now)
+        candidates = dorm_candidates(op_data, candidate_reserved_names, now=now)
         recovery_names = sorted(
             candidates.recovering
             + [
@@ -3190,9 +3218,11 @@ def try_add_release_dorm(plan, time, op_data, tasks, *, empty_only=False):
         if filling_vacancies:
             simplify_dorm_fill(task, tasks, now, op_data)
         if not getattr(task, "simple_dorm_fill", False):
-            task.plan = prioritize_new_dorm_recovery(op_data, task.plan, reserved_slots)
+            task.plan = prioritize_new_dorm_recovery(
+                op_data, task.plan, reserved_slots, reserved_names=reserved_names
+            )
         isolated = plan_dorm_isolation(
-            op_data, task.plan, reserved_slots, reserved_names=reserved_names
+            op_data, task.plan, reserved_slots, reserved_names=candidate_reserved_names
         )
         if isolated != task.plan:
             fill_names = {
