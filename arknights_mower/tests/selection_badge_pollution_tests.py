@@ -1,8 +1,13 @@
 """右上角徽章污染选中蓝框判定的离线回归。
 
-现象：未选中且带右上角徽章的卡片（如古米），徽章的青蓝色
-落入检测窗口的上/下条带，密度落在 0.20 与 0.45 之间，
-agent_card_selected 返回 None，调用方无限重读。
+徽章是青蓝色圆角矩形，落在检测窗口上沿的右半，把上沿密度从约 0
+抬到 0.2 出头：未达 0.45 的选中阈值，却足以越过「一条横边缺失」
+所需的 0.20 以下。因此同一帧里会出现两种结果——徽章本身由「两条
+竖边及下沿前段均缺失」兜成未选中（另一枚现场帧见
+selection_border_geometry_tests），而右邻同时被选中时，右邻的蓝色
+左边框会擦进本卡窗口最右 8 列，该判定要求两条竖边都干净，于是只剩
+None。调用方把 None 当「边框不清晰」：记 debug 后抛
+AgentSelectionNotReady 返回房间重试，不会误点。
 """
 
 from pathlib import Path
@@ -26,9 +31,14 @@ def badge_frame():
     return cv2.cvtColor(cv2.imread(str(path)), cv2.COLOR_BGR2RGB)
 
 
-def test_badge_on_unselected_card_is_false_not_none(badge_frame):
+def test_badge_with_selected_right_neighbor_stays_unknown(badge_frame):
+    # 古米未选中、右上角带徽章，且右邻芬被选中：窗口 69..294，
+    # 芬的蓝框左边落在 285，于是本卡窗口最右 8 列被邻框占满。
+    # 上沿（0.214）与下沿（0.254）都被徽章和下排选中卡抬离 0，
+    # 右竖边（0.875）来自邻框，可用证据既不足以判未选中，也不能
+    # 判选中，因此返回 None 交由调用方重读。
     gumi = ((91, 428), (280, 460))
-    assert agent_card_selected(badge_frame, gumi) is False
+    assert agent_card_selected(badge_frame, gumi) is None
 
 
 def test_badge_on_selected_card_stays_true(badge_frame):
