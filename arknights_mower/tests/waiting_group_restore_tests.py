@@ -5,7 +5,6 @@ import pickle
 import sys
 from datetime import datetime, timedelta
 from threading import Event
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -193,7 +192,7 @@ def test_simulate_restoration_coalesces_waiting_before_dispatch(
     mower = mower_module
     from arknights_mower.utils import config, crash_recovery
 
-    class Restored(Exception):
+    class Restored(BaseException):
         pass
 
     previous = predecessor()
@@ -216,13 +215,13 @@ def test_simulate_restoration_coalesces_waiting_before_dispatch(
     )
     operators = MagicMock(operators={}, backup_plans=[])
     operators.validate_backup_plans.return_value = {"success": True}
-    instance = SimpleNamespace(
-        op_data=operators,
-        initialize_operators=lambda: None,
-        _pending_group_transitions=lambda: {},
-    )
+    instance = object.__new__(mower.BaseSchedulerSolver)
+    instance.op_data = operators
+    instance.initialize_operators = lambda: None
+    instance._pending_group_transitions = lambda: {}
     monkeypatch.setattr(config, "conf", config.Conf())
     monkeypatch.setattr(config, "stop_mower", Event())
+    monkeypatch.setattr(crash_recovery, "notice_path", lambda: None)
     monkeypatch.setattr(mower, "base_scheduler", None)
     monkeypatch.setattr(mower, "initialize", lambda *a, **kw: instance)
     monkeypatch.setattr(mower.NewsChecker, "get_maintenance", lambda: None)
@@ -233,7 +232,7 @@ def test_simulate_restoration_coalesces_waiting_before_dispatch(
     def after_restoration():
         raise Restored
 
-    monkeypatch.setattr(crash_recovery, "reset_observation_pending", after_restoration)
+    monkeypatch.setattr(mower, "refresh_resource_at_boundary", after_restoration)
     with pytest.raises(Restored):
         mower.simulate(saved)
     assert len(instance.waiting_group_shifts) == 1

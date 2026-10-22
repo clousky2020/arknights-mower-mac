@@ -119,7 +119,7 @@ def exit_if_webview_backend_missing():
 # 若当成立即写回配置，下次打开就缩成一团——下限钳制挡住这些残留事件。
 MIN_WINDOW_SIZE = 100
 # 仅在 gui.yml 缺失或内容损坏（极小/零/非数字）时兜底，避免坏尺寸被读进创建
-# 并再次持久化。窗口尺寸唯一落在 GUI 进程专属的 gui.yml，不再进共享的 conf.yml。
+# 并再次持久化。窗口尺寸落在实例 gui.yml，与界面偏好共用锁后更新。
 DEFAULT_WINDOW_SIZE = (1450, 850)
 
 
@@ -874,9 +874,16 @@ def _run_desktop():
     resume = (
         resume_mode in ("0", "1")
         or resume_run
-        or (resume_mode != "preserve" and conf.start_automatically)
+        or (
+            not os.environ.get("MOWER_RESTART_JOB")
+            and resume_mode != "preserve"
+            and conf.start_automatically
+        )
     )
-    child_ready(registration, desired_running=resume)
+    start_type = (
+        resume_mode if resume_mode in ("0", "1") else "2" if resume_run else "0"
+    )
+    child_ready(registration, desired_running=resume, start_type=start_type)
     crash_notice = crash_recovery.status()
     if crash_recovery.notice_path() is not None:
         recovery = crash_recovery.AutomaticRecovery(
@@ -1003,7 +1010,7 @@ def _run_desktop():
                     sleep(0.5)
                     continue
                 with server.app.test_request_context(headers={"token": runtime_token}):
-                    stopped = server.stop() == "true"
+                    stopped = server.stop(user_requested=False) == "true"
                 if stopped and registration.shutdown_requested():
                     shutdown.request("runtime_request")
                     break

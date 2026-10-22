@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -41,7 +42,7 @@ def state_dir(root=None):
 
 
 @contextmanager
-def supervision_lock(directory, timeout=15.0, *, child=False):
+def supervision_lock(directory, timeout=15.0, *, child=False, cancelled=None):
     """Lock configuration-space ownership without importing the installation."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -52,6 +53,8 @@ def supervision_lock(directory, timeout=15.0, *, child=False):
             stream.flush()
         deadline = time.monotonic() + timeout
         while True:
+            if cancelled is not None and cancelled():
+                raise InterruptedError("启动已取消，保留现有实例")
             try:
                 stream.seek(0)
                 if sys.platform == "win32":
@@ -83,6 +86,33 @@ def wait_for_supervisor_release(record, deadline):
     if directory:
         with supervision_lock(directory, timeout=max(0, deadline - time.monotonic())):
             pass
+
+
+def recovery_failure_details(previous, *, reason, message, exit_code=None):
+    """Keep the first fault of an active recovery and report its latest failure."""
+    now = datetime.now(timezone.utc).isoformat()
+    details = {
+        "occurred_at": now,
+        "reason": reason,
+        "trigger_message": message,
+        "last_failure_at": now,
+        "last_failure_reason": reason,
+        "last_failure_message": message,
+        "last_exit_code": exit_code,
+    }
+    if exit_code is not None:
+        details["exit_code"] = exit_code
+    if (
+        isinstance(previous, dict)
+        and previous.get("active") is True
+        and previous.get("startup") is not True
+    ):
+        details.pop("exit_code", None)
+        for key in ("occurred_at", "reason", "trigger_message", "exit_code"):
+            if key in previous:
+                details[key] = previous[key]
+        details["trigger_message"] = previous.get("trigger_message")
+    return details
 
 
 def read_json(path, default=None):
@@ -177,6 +207,47 @@ def active_job(directory=None):
     directory = Path(directory or state_dir())
     owner = read_json(directory / "active/owner.json", {})
     return bool(owner and process_alive(owner.get("pid")))
+
+
+def record_task_stop():
+    """Keep a user Stop effective across an already accepted replacement job."""
+    directory = state_dir()
+    owner = read_json(directory / "active/owner.json", {})
+    if not owner or not process_alive(owner.get("pid")):
+        return
+    current = next(
+        (
+            record
+            for record in instances(directory)
+            if record.get("pid") == os.getpid() and record.get("kind") == "instance"
+        ),
+        None,
+    )
+    if (
+        current is not None
+        and isinstance(current.get("id"), str)
+        and current["id"]
+        and Path(current["id"]).name == current["id"]
+    ):
+        write_json(
+            directory / "active/task-stops" / f"{current['id']}.json",
+            {"job": owner["id"]},
+            sync=True,
+        )
+
+
+def task_stop_requested(record, job_id, directory):
+    instance_id = record.get("id")
+    if (
+        not isinstance(instance_id, str)
+        or not instance_id
+        or Path(instance_id).name != instance_id
+    ):
+        return False
+    stopped = read_json(
+        Path(directory) / "active/task-stops" / f"{instance_id}.json", {}
+    )
+    return stopped.get("job") == job_id
 
 
 class LockBusyError(ValueError):
@@ -479,6 +550,7 @@ def hidden_console_options():
 
 def launch_environment(record, job_id="", background=False):
     env = os.environ.copy()
+    env.pop("MOWER_RECOVERY_RUN", None)
     # A frozen child must initialize its own bootloader/runtime, including after
     # replacement of the bundle. System subprocesses must not inherit private libs.
     env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"

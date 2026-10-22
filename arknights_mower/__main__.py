@@ -413,8 +413,7 @@ def _resume_device_dispatch(scheduler=None, failure=None):
             scheduler.device = device
             scheduler.recog.device = device
             if uncertain or getattr(scheduler, "_idle_observation_pending", False):
-                scheduler.recog.reset_after_external_control()
-                scheduler._idle_observation_pending = False
+                BaseSchedulerSolver._complete_idle_observation(scheduler)
             else:
                 scheduler.recog.update()
         return device
@@ -676,16 +675,28 @@ def simulate(saved):
                 room for room in base_scheduler.op_data.plan if room in base_room_list
             }
         base_scheduler.tasks.insert(0, SchedulerTask(time=datetime.now()))
-    if saved and saved.get("_process_crash_recovery"):
-        from arknights_mower.utils.crash_recovery import reconcile_scheduler
+    while True:
+        try:
+            if saved and saved.get("_process_crash_recovery"):
+                from arknights_mower.utils.crash_recovery import reconcile_scheduler
 
-        reconcile_scheduler(base_scheduler)
-    else:
-        from arknights_mower.utils import crash_recovery
+                reconcile_scheduler(base_scheduler)
+            else:
+                from arknights_mower.utils import crash_recovery
 
-        if crash_recovery.reset_observation_pending():
-            crash_recovery.checkpoint_reset(base_scheduler)
+                crash_recovery.checkpoint_start(base_scheduler)
+            break
+        except RECOVERABLE_DEVICE_ERRORS as exc:
+            # 恢复前的房间读取也由原设备会话处理，保留已还原的任务和调度器。
+            try:
+                _resume_device_dispatch(base_scheduler, exc)
+            except MowerExit:
+                return
+        except MowerExit:
+            return
     base_scheduler._state_restore_complete = True
+    if saved:
+        base_scheduler._request_run_order_restoration_observations()
     while True:
         try:
             config.maintenance_recheck.clear()

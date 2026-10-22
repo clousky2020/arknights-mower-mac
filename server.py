@@ -34,7 +34,7 @@ from arknights_mower.utils.config.plan_advanced import (
     apply_advanced_settings,
     export_advanced_settings,
 )
-from arknights_mower.utils.config_backup import backup_lock
+from arknights_mower.utils.config_backup import MAX_BACKUP_BYTES, backup_lock
 from arknights_mower.utils.csv_utils import parse_cell_num
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.diagnostics import (
@@ -83,6 +83,9 @@ app.config["AI_ASSISTANT_ENABLED"] = config.conf.assistant_enabled_for_launch(
 sock = Sock(app)
 CORS(app)
 network_settings.start_proxy_sync()
+
+MAX_PLAN_IMPORT_BYTES = MAX_BACKUP_BYTES
+MAX_MULTIPART_OVERHEAD = 65536
 
 
 @app.errorhandler(500)
@@ -1446,7 +1449,7 @@ def load_plan_from_json():
 @require_token
 def rescue_plan_route():
     if request.method == "GET":
-        return config.conf.automatic_rescue_plan.model_dump(exclude_none=True)
+        return config.rescue_plan.model_dump(exclude_none=True)
     try:
         plan = config.PlanModel(**request.json)
     except (ValueError, TypeError):
@@ -1459,12 +1462,12 @@ def _save_rescue_plan(plan):
     from arknights_mower.utils.workshop_config import workshop_lock
 
     with workshop_lock:
-        previous = config.conf.automatic_rescue_plan
-        config.conf.automatic_rescue_plan = plan
+        previous = config.rescue_plan
+        config.rescue_plan = plan
         try:
-            config.save_conf()
+            config.save_rescue_plan()
         except Exception:
-            config.conf.automatic_rescue_plan = previous
+            config.rescue_plan = previous
             raise
 
 
@@ -1481,14 +1484,14 @@ def validate_rescue_plan_route():
         error = data.init_and_validate()
         if error:
             return {"success": False, "message": str(error)}
-        validate_rescue_schedule(data, config.conf.automatic_rescue_plan)
-        if data.backup_plans or config.conf.automatic_rescue_plan.backup_plans:
+        validate_rescue_schedule(data, config.rescue_plan)
+        if data.backup_plans or config.rescue_plan.backup_plans:
             return {
                 "success": True,
                 "status": "incomplete",
                 "message": "救急表自身校验通过；排班含副表条件，设施类型、等级及产物仍需在初始化实测后按双方生效排班核验。",
             }
-        effective_rescue_plan(data, config.conf.automatic_rescue_plan)
+        effective_rescue_plan(data, config.rescue_plan)
     except (ValueError, TypeError) as exc:
         return {"success": False, "message": str(exc)}
     return {"success": True, "message": "救急排班验证通过"}
@@ -1838,8 +1841,8 @@ def _start_mower(
             or resource_update.running()
         ):
             return False
-        if crash_recovery.reset_observation_pending():
-            start_type = "2"
+        if start_type != "2":
+            start_type = crash_recovery.pending_start_type() or start_type
         if crash_recovery.status()["active"] and recovery_state is None:
             if automatic:
                 if not crash_recovery.status().get("automatic"):
@@ -1970,7 +1973,14 @@ def scheduled_start():
 @app.route("/stop")
 @require_token
 @save_state
-def stop():
+def stop(*, user_requested=True):
+    if user_requested:
+        from arknights_mower.utils.update_runtime import record_task_stop
+
+        try:
+            record_task_stop()
+        except Exception:
+            logger.exception("记录进程替换期间的停止选择失败，继续停止当前任务")
     return str(_stop_mower()).lower()
 
 
@@ -2334,28 +2344,33 @@ def _upload_matches(upload, extension, mimetype):
 @app.route("/import", methods=["POST"])
 @require_token
 def import_from_image():
+    if (
+        request.content_length
+        and request.content_length > MAX_PLAN_IMPORT_BYTES + MAX_MULTIPART_OVERHEAD
+    ):
+        abort(413)
     img = request.files["img"]
+    raw = img.stream.read(MAX_PLAN_IMPORT_BYTES + 1)
+    if len(raw) > MAX_PLAN_IMPORT_BYTES:
+        abort(413)
     try:
         from arknights_mower.utils.config.plan import parse_plan_document
 
         if _upload_matches(img, ".zip", "application/zip"):
             from arknights_mower.utils.config_backup import (
-                MAX_BACKUP_BYTES,
                 plan_from_archive,
                 read_archive,
             )
 
-            imported_plan = plan_from_archive(
-                read_archive(img.stream.read(MAX_BACKUP_BYTES + 1))
-            )
+            imported_plan = plan_from_archive(read_archive(raw))
         elif _upload_matches(img, ".json", "application/json"):
-            imported_plan = parse_plan_document(json.load(img))
+            imported_plan = parse_plan_document(json.loads(raw))
         else:
             from PIL import Image
 
             from arknights_mower.utils import qrcode
 
-            img = Image.open(img)
+            img = Image.open(BytesIO(raw))
             imported_plan = parse_plan_document(qrcode.decode(img))
     except (ValueError, TypeError, RecursionError, OSError, ZlibError):
         return "排班表导入失败：请选择有效的排班 JSON、排班图片或包含 config 文件夹的 ZIP 备份"
@@ -2451,7 +2466,7 @@ def save_file_dialog():
         except (ValueError, TypeError):
             return {"error": "导出排班快照格式无效"}, 400
     elif request.args.get("rescue") == "1":
-        plan_data = config.conf.automatic_rescue_plan.model_dump(exclude_none=True)
+        plan_data = config.rescue_plan.model_dump(exclude_none=True)
     else:
         plan_data = config.plan.model_dump(exclude_none=True)
         plan_data["advanced_settings"] = export_advanced_settings(config.conf)
@@ -3320,6 +3335,7 @@ def export_recycling_history():
 
 
 @app.route("/record/clear-data", methods=["DELETE"])
+@require_token
 def clear_data_route():
     date_time_str = request.json.get("date_time")
     logger.info(date_time_str)
@@ -3944,10 +3960,11 @@ def mastery_t3_debug():
 
 
 @app.route("/workshop-preset", methods=["GET"])
+@require_token
 def workshop_preset():
     import json as _json
 
-    preset_path = get_path("@app/tmp/workshop_preset.json")
+    preset_path = get_path("@app/config/workshop_preset.json")
     if request.method == "GET":
         if os.path.exists(preset_path):
             try:

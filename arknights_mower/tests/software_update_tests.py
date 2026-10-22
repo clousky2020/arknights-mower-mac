@@ -871,7 +871,7 @@ class ManualPackageTests(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(staged.read_bytes()).hexdigest(), job["asset"]["sha256"]
         )
-        self.assertTrue(runtime.read_json(self.state / "settings.json")["background"])
+        self.assertTrue(runtime.read_json(update.settings_path())["background"])
         self.assertEqual(list((self.state / "uploads").iterdir()), [])
 
 
@@ -1628,7 +1628,7 @@ class ArchiveAndLauncherTests(unittest.TestCase):
             patch.object(runtime, "state_dir", return_value=Path(temporary)),
         ):
             registration = runtime.RuntimeRegistration(
-                "instance", name="test", running=lambda: True
+                "instance", name="test", running=lambda: True, maintenance=False
             )
             self.assertTrue(runtime.instances()[0]["running"])
             registration.close()

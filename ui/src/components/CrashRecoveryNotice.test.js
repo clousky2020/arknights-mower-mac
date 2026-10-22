@@ -180,6 +180,74 @@ it('shows active recovery once, updates its content and refreshes through the no
   expect(client.post).not.toHaveBeenCalled()
 })
 
+it('describes an ordinary start with pending observations as startup progress', async () => {
+  client.get.mockResolvedValue({ data: recoveryStatus({ startup: true }) })
+  await mount()
+  const entry = state.create.mock.results[0].value
+  expect(entry.title).toBe('正在启动')
+  expect(contents(entry.content())).toContain('启动前正在重新读取设备、驻员和心情')
+  expect(contents(entry.content())).not.toContain('程序发生异常')
+
+  entry.onClose()
+  entry.onAfterLeave()
+  await vi.advanceTimersByTimeAsync(3000)
+  await settle()
+  expect(state.create).toHaveBeenCalledOnce()
+
+  client.get.mockResolvedValue({
+    data: recoveryStatus({ startup: false, occurred_at: secondOccurrence })
+  })
+  await vi.advanceTimersByTimeAsync(3000)
+  await settle()
+  expect(state.create).toHaveBeenCalledTimes(2)
+  expect(state.create.mock.results[1].value.title).toBe('正在自动恢复')
+  expect(client.post).not.toHaveBeenCalled()
+})
+
+it('shows the first trigger and latest failure separately from current progress', async () => {
+  client.get.mockResolvedValue({
+    data: recoveryStatus({
+      trigger_message: '首次工作线程故障',
+      last_failure_message: '训练室读取失败',
+      message: '等待重新观察'
+    })
+  })
+  await mount()
+  const entry = state.create.mock.results[0].value
+  expect(contents(entry.content())).toContain('触发原因：首次工作线程故障')
+  expect(contents(entry.content())).toContain('最近一次失败：训练室读取失败')
+  expect(contents(entry.content())).toContain('等待重新观察')
+
+  client.get.mockResolvedValue({
+    data: recoveryStatus({
+      trigger_message: '首次工作线程故障',
+      last_failure_message: '房间心情读取失败',
+      message: '重新读取房间'
+    })
+  })
+  await vi.advanceTimersByTimeAsync(3000)
+  await settle()
+  expect(state.create).toHaveBeenCalledOnce()
+  expect(contents(entry.content())).toContain('触发原因：首次工作线程故障')
+  expect(contents(entry.content())).toContain('最近一次失败：房间心情读取失败')
+})
+
+it('does not present historical fault details as a failure during ordinary startup', async () => {
+  client.get.mockResolvedValue({
+    data: recoveryStatus({
+      startup: true,
+      trigger_message: '上一次进程退出',
+      last_failure_message: '上一次读取失败',
+      message: '启动前重新观察'
+    })
+  })
+  await mount()
+  const entry = state.create.mock.results[0].value
+  expect(contents(entry.content())).toContain('启动前重新观察')
+  expect(contents(entry.content())).not.toContain('触发原因')
+  expect(contents(entry.content())).not.toContain('最近一次失败')
+})
+
 it('retains recovery progress while disconnected and closes it after resolution', async () => {
   client.get.mockResolvedValueOnce({
     data: recoveryStatus({ message: '正在重新读取驻员' })

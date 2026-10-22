@@ -67,6 +67,23 @@ def growth_case():
     return {"characters": [char], "items": []}, skills
 
 
+def test_goal_write_uses_current_instance_config(growth_case, tmp_path, monkeypatch):
+    from arknights_mower.utils import path
+
+    monkeypatch.setattr(path, "_data_dir", tmp_path)
+    monkeypatch.setattr(path, "global_space", "first")
+    box, skills = growth_case
+    growth.set_goal("char_test", "elite1", True, box, skills)
+    target = tmp_path / "first/config/growth_plan.json"
+    assert json.loads(target.read_text()) == [
+        {"char_id": "char_test", "module_id": "elite1"}
+    ]
+    assert not (tmp_path / "first/tmp/growth_plan.json").exists()
+    monkeypatch.setattr(path, "global_space", "second")
+    assert growth.load_goals() == []
+    assert not (tmp_path / "second/config/growth_plan.json").exists()
+
+
 def counts(entries):
     result = Counter()
     for _, materials in entries:
@@ -408,12 +425,26 @@ def test_level_choices_are_mutually_exclusive_in_persistent_goals(
 ):
     box, skills = growth_case
     monkeypatch.setattr(growth, "get_path", lambda _: tmp_path / "goals.json")
-    for goal in ("elite2", "elite2_max", "elite2_module"):
+    for goal in ("elite1", "elite2", "elite2_max", "elite2_module"):
         goals = growth.set_goal("char_test", goal, True, box, skills)
         assert goals == [{"char_id": "char_test", "module_id": goal}]
     result = counts(growth.material_entries(box, skills, [], goals))
     assert result["growth_exp"] == 6100
     assert "book" not in result
+
+
+def test_elite_one_goal_for_mastery_capable_operator_stops_before_elite_two(
+    tmp_path, growth_case, monkeypatch
+):
+    box, skills = growth_case
+    monkeypatch.setattr(growth, "get_path", lambda _: tmp_path / "goals.json")
+    goals = growth.set_goal("char_test", "elite1", True, box, skills)
+    assert growth.load_goals() == goals
+    assert counts(growth.material_entries(box, skills, [], goals)) == {
+        "small": 2,
+        "4001": 25,
+        "growth_exp": 100,
+    }
 
 
 def test_module_upgrade_targets_charge_only_unfinished_levels(growth_case):
