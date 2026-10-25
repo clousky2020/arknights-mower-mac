@@ -1,5 +1,6 @@
 """替班检查通过真实调度入口保留期限、观察岗位并安排既有纠错。"""
 
+import pickle
 from datetime import timedelta
 from unittest.mock import MagicMock
 
@@ -17,6 +18,59 @@ from arknights_mower.utils.scheduler_task import (
     TaskTypes,
     find_next_task,
 )
+
+
+@pytest.mark.parametrize("room", ["central", "recycle"])
+def test_missing_timing_yields_without_error_and_resumes_on_measured_floor(
+    dispatch_solver, clock, monkeypatch, room
+):
+    solver = dispatch_solver
+    data = solver.op_data
+    cover = data.operators["薇薇安娜"]
+    if room == "recycle":
+        data.plan[room] = data.plan.pop("central")
+        data.operators["歌蕾蒂娅"].room = room
+        cover.current_room = room
+    cover.depletion_rate = 0
+    solver.reading.update(mood=23, time=None)
+    errors = MagicMock()
+    monkeypatch.setattr(base.logger, "error", errors)
+    sync_replacement_checks(solver)
+    check = solver.tasks[0]
+    original_time = check.time
+    solver.task = check
+    solver.infra_main()
+
+    assert check.execution_failure and check.time == original_time
+    errors.assert_not_called()
+    solver.tasks = pickle.loads(pickle.dumps(solver.tasks))
+    check = solver.tasks[0]
+    assert check.time == original_time and check.execution_failure
+    calls = solver.get_agent_from_room.call_count
+    independent = SchedulerTask(time=clock.now(), task_type=TaskTypes.DEPOT)
+    solver.tasks.append(independent)
+    for _ in range(3):
+        clock.current += timedelta(minutes=5)
+        sync_replacement_checks(solver)
+        solver._resume_failed_tasks()
+        assert find_next_task(solver.tasks) is independent
+        assert check.time == original_time and check.execution_failure
+    assert solver.get_agent_from_room.call_count == calls
+
+    solver.仓库扫描 = MagicMock()
+    solver.task = independent
+    solver.infra_main()
+    solver.仓库扫描.assert_called_once()
+    assert independent not in solver.tasks and check in solver.tasks
+
+    clock.current += timedelta(minutes=30)
+    data.update_detail(cover.name, 0, room, 0, True)
+    solver.reading.update(mood=0, time=None)
+    solver.task = check
+    solver.infra_main()
+    assert check.time == original_time and check not in solver.tasks
+    assert any(task.plan == {room: ["赫默"]} for task in solver.tasks)
+    errors.assert_not_called()
 
 
 @pytest.fixture
@@ -87,7 +141,7 @@ def test_due_dispatch_observes_before_generating_replacement_correction(
     assert correction.type == TaskTypes.SELF_CORRECTION
     assert correction.plan == {"central": ["赫默"]}
     assert solver.op_data.operators["歌蕾蒂娅"].current_room == "dormitory_1"
-    assert solver.get_agent_from_room.call_count == 2
+    assert solver.get_agent_from_room.call_count == 1
     sync_replacement_checks(solver)
     assert solver.tasks == [correction]
 
@@ -96,6 +150,7 @@ def test_failed_check_yields_to_independent_work_and_reopens_after_new_observati
     dispatch_solver, clock
 ):
     solver = dispatch_solver
+    solver.op_data.operators["薇薇安娜"].mood = 0
     sync_replacement_checks(solver)
     check = solver.tasks[0]
     solver.reading.update(mood=0, time=clock.now())

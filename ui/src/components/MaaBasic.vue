@@ -4,7 +4,9 @@ import SoftwareComponentUpdates from './SoftwareComponentUpdates.vue'
 import { useUpdateProgress } from '@/composables/useUpdateProgress'
 const axios = inject('axios')
 
-const mobile = inject('mobile')
+defineProps({
+  showTitle: { type: Boolean, default: true }
+})
 
 import { useConfigStore } from '@/stores/config'
 import { useMowerStore } from '@/stores/mower'
@@ -12,8 +14,10 @@ const store = useConfigStore()
 
 import { storeToRefs } from 'pinia'
 const { updates_enabled } = storeToRefs(useMowerStore())
-const updatesAllowed = computed(() => updates_enabled.value === true)
+const managerOwned = computed(() => manager_owned_device.value === true)
+const updatesAllowed = computed(() => !managerOwned.value && updates_enabled.value === true)
 const {
+  manager_owned_device,
   runtime_platform,
   maa_path,
   maa_mirrorchyan_token,
@@ -34,8 +38,9 @@ import { getMaaThemeOptions } from '@/utils/maa_theme_options'
 const maa_theme_options = computed(() => getMaaThemeOptions(maa_restore_theme.value))
 
 async function select_maa_dir() {
+  if (managerOwned.value) return
   const folder_path = await folder_dialog()
-  if (folder_path) {
+  if (folder_path && !managerOwned.value) {
     maa_path.value = folder_path
   }
 }
@@ -48,7 +53,7 @@ function sleep(ms) {
 }
 
 async function test_maa() {
-  if (maa_testing.value) return
+  if (managerOwned.value || maa_testing.value) return
   maa_testing.value = true
   maa_msg.value = '正在测试……'
   try {
@@ -58,9 +63,10 @@ async function test_maa() {
       maa_msg.value = data
       return
     }
-    while (data.status === 'running') {
+    while (!managerOwned.value && data.status === 'running') {
       maa_msg.value = data.message || '正在测试……'
       await sleep(1000)
+      if (managerOwned.value) return
       response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/check-maa/status`)
       data = response.data
       if (typeof data === 'string') {
@@ -79,8 +85,10 @@ async function test_maa() {
 const maa_conn_presets = ref([])
 
 async function get_maa_conn_presets() {
+  if (managerOwned.value || disposed) return
   try {
     const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/maa-conn-preset`)
+    if (managerOwned.value || disposed) return
     if (Array.isArray(response.data)) {
       maa_conn_presets.value = response.data.map((x) => ({ label: x, value: x }))
     } else {
@@ -308,6 +316,7 @@ function versions_are_equal(left, right, normalizer = (value) => String(value ||
 watch(
   maa_mirrorchyan_token,
   (token, previousToken = '') => {
+    if (managerOwned.value) return
     if (runtime_platform.value !== 'android' && token.trim() && !previousToken.trim())
       maa_update_source.value = 'mirrorchyan'
     if (token !== previousToken) {
@@ -323,7 +332,7 @@ watch(
 )
 
 watch(maa_update_channel, async (channel, previous_channel) => {
-  if (channel === previous_channel) return
+  if (managerOwned.value || channel === previous_channel) return
   reset_maa_update_check()
   if (maa_update_supported.value) {
     schedule_mirrorchyan_cdk_check(maa_mirrorchyan_token.value)
@@ -333,25 +342,28 @@ watch(maa_update_channel, async (channel, previous_channel) => {
 })
 
 watch(maa_update_source, async (source, previous_source) => {
-  if (source === previous_source) return
+  if (managerOwned.value || source === previous_source) return
   reset_maa_update_check()
   await get_maa_update_info()
   schedule_auto_check_updates()
 })
 
 watch(maa_resource_source, async () => {
+  if (managerOwned.value) return
   reset_maa_resource_update_check()
   await get_maa_resource_update_info()
   schedule_auto_check_updates()
 })
 
 watch([maa_auto_check_update, maa_auto_update], ([check, install]) => {
+  if (managerOwned.value) return
   if (install && !check) maa_auto_check_update.value = true
   reset_maa_update_check()
   schedule_auto_check_updates(0)
 })
 
 watch([maa_resource_auto_check_update, maa_resource_auto_update], ([check, install]) => {
+  if (managerOwned.value) return
   if (install && !check) maa_resource_auto_check_update.value = true
   reset_maa_resource_update_check()
   schedule_auto_check_updates(0)
@@ -519,7 +531,7 @@ async function poll_maa_update() {
   if (maa_update_timer) window.clearTimeout(maa_update_timer)
   try {
     const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/maa-update/status`)
-    if (disposed) return
+    if (disposed || !updatesAllowed.value) return
     apply_maa_update_job(response.data.job, false)
     if (maa_update_job.value.status === 'running') {
       maa_update_timer = window.setTimeout(poll_maa_update, 800)
@@ -596,7 +608,7 @@ async function poll_maa_resource_update() {
   if (maa_resource_update_timer) window.clearTimeout(maa_resource_update_timer)
   try {
     const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/maa-resource-update/status`)
-    if (disposed) return
+    if (disposed || !updatesAllowed.value) return
     apply_maa_resource_update_job(response.data.job)
     if (maa_resource_update_job.value.status === 'running') {
       maa_resource_update_timer = window.setTimeout(poll_maa_resource_update, 800)
@@ -910,7 +922,7 @@ async function start_maa_resource_update() {
 }
 
 watch(maa_path, (value, previous_value) => {
-  if (value === previous_value) return
+  if (managerOwned.value || value === previous_value) return
   reset_maa_update_check()
   reset_maa_resource_update_check()
   if (maa_path_refresh_timer) window.clearTimeout(maa_path_refresh_timer)
@@ -925,12 +937,12 @@ watch(maa_path, (value, previous_value) => {
 })
 
 onMounted(async () => {
+  if (managerOwned.value) return
   await Promise.all([get_maa_conn_presets(), get_maa_update_info(), get_maa_resource_update_info()])
   schedule_auto_check_updates()
 })
 
-onUnmounted(() => {
-  disposed = true
+function stop_maa_background_tasks() {
   if (maa_update_timer) window.clearTimeout(maa_update_timer)
   if (maa_resource_update_timer) window.clearTimeout(maa_resource_update_timer)
   if (maa_path_refresh_timer) window.clearTimeout(maa_path_refresh_timer)
@@ -941,27 +953,41 @@ onUnmounted(() => {
   maa_resource_update_info_request_id++
   maa_update_check_request_id++
   maa_resource_check_request_id++
+}
+
+watch(managerOwned, (managed) => {
+  if (managed) stop_maa_background_tasks()
+})
+
+onUnmounted(() => {
+  disposed = true
+  stop_maa_background_tasks()
 })
 </script>
 
 <template>
-  <n-card title="日常设置">
-    <template #header>日常设置<help-text>刷理智、信用相关、领奖励、肉鸽保全等</help-text></template>
+  <n-card class="maa-basic" content-class="maa-basic-content">
+    <template v-if="showTitle" #header
+      >MAA 核心<help-text>{{
+        managerOwned ? '游戏主题恢复' : '连接、触控、游戏主题恢复和 MAA 更新'
+      }}</help-text></template
+    >
     <n-form
-      :label-placement="mobile ? 'top' : 'left'"
+      class="maa-basic-form"
+      label-placement="left"
       :show-feedback="false"
-      label-width="96"
+      label-width="128"
       label-align="left"
     >
-      <n-alert v-if="runtime_platform === 'android'" :show-icon="false"
+      <n-alert v-if="!managerOwned && runtime_platform === 'android'" :show-icon="false"
         >设备连接与 MAA 路径由 Android 应用管理。</n-alert
       >
-      <div v-if="runtime_platform === 'android'" style="margin-bottom: 16px">
+      <div v-if="!managerOwned && runtime_platform === 'android'" style="margin-bottom: 16px">
         <SessionLink to="/mowersettings#software-update"
           >导入官方 Android MAA 核心 / 兼容 Python 接口包</SessionLink
         >
       </div>
-      <template v-else>
+      <template v-else-if="!managerOwned">
         <n-form-item label="MAA目录">
           <template #label>
             MAA目录
@@ -970,12 +996,16 @@ onUnmounted(() => {
               时保留。也可以选择自定义目录。</help-text
             >
           </template>
-          <n-input v-model:value="maa_path" />
-          <n-button @click="select_maa_dir" class="dialog-btn">...</n-button>
+          <div class="maa-field-with-action">
+            <n-input v-model:value="maa_path" :input-props="{ 'aria-label': 'MAA目录' }" />
+            <n-button @click="select_maa_dir">浏览</n-button>
+          </div>
         </n-form-item>
         <n-form-item label="连接配置">
-          <n-select :options="maa_conn_presets" v-model:value="maa_conn_preset" />
-          <n-button @click="get_maa_conn_presets" class="dialog-btn">刷新</n-button>
+          <div class="maa-field-with-action">
+            <n-select :options="maa_conn_presets" v-model:value="maa_conn_preset" />
+            <n-button @click="get_maa_conn_presets">刷新</n-button>
+          </div>
         </n-form-item>
         <n-form-item label="触控模式">
           <n-select v-model:value="maa_touch_option" :options="maa_touch_options" />
@@ -1004,12 +1034,12 @@ onUnmounted(() => {
         />
       </n-form-item>
     </n-form>
-    <n-divider />
-    <div class="misc-container">
+    <n-divider v-if="!managerOwned" />
+    <div v-if="!managerOwned" class="maa-connection-test">
       <n-button :loading="maa_testing" :disabled="maa_testing" @click="test_maa">
         测试连接
       </n-button>
-      <div>{{ maa_msg }}</div>
+      <p v-if="maa_msg" class="maa-connection-result" role="status">{{ maa_msg }}</p>
     </div>
     <template v-if="updatesAllowed && maa_update_supported">
       <n-divider />
@@ -1134,8 +1164,9 @@ onUnmounted(() => {
           {{ maa_backup_path }}。
         </div>
         <div v-else-if="maa_backup_path" class="update-hint">
-          更新成功后原目录保存在 {{ maa_backup_path }}；下一次成功更新时替换该备份，更新失败时保留。
-          cache 与 config 会复制到新目录继续使用。
+          更新成功后原目录保存在
+          {{ maa_backup_path }}；下一次成功更新时替换该备份，更新失败时保留。 cache 与 config
+          会复制到新目录继续使用。
         </div>
         <n-progress
           v-if="show_maa_update_progress && maa_update_job.progress !== null"
@@ -1189,7 +1220,11 @@ onUnmounted(() => {
         />
       </div>
     </template>
-    <template v-else-if="['linux', 'android'].includes(maa_update_platform) && maa_update_info_msg">
+    <template
+      v-else-if="
+        !managerOwned && ['linux', 'android'].includes(maa_update_platform) && maa_update_info_msg
+      "
+    >
       <n-divider />
       <div class="maa-updater">
         <div class="update-title">
@@ -1301,16 +1336,85 @@ onUnmounted(() => {
   </n-card>
 </template>
 
-<style scoped lang="scss">
-p {
-  margin: 0 0 10px 0;
+<style scoped>
+.maa-basic {
+  min-width: 0;
+  container: maa-basic / inline-size;
 }
 
-.misc-container {
-  margin-top: 12px;
+.maa-basic :deep(> .maa-basic-content) {
+  min-width: 0;
+  max-width: 760px;
+}
+
+.maa-basic .maa-basic-form :deep(> .n-form-item) {
+  margin: 0;
+  padding: 12px 0;
+  grid-template-columns: 128px minmax(0, 480px);
+  grid-template-areas: 'label blank' 'label feedback';
+  grid-template-rows: auto auto;
+  gap: 0 16px;
+  align-items: center;
+}
+
+.maa-basic .maa-basic-form :deep(> .n-form-item:first-child) {
+  padding-top: 0;
+}
+
+.maa-basic .maa-basic-form :deep(> .n-form-item:last-child) {
+  padding-bottom: 0;
+}
+
+.maa-basic .maa-basic-form :deep(> .n-form-item > .n-form-item-label) {
+  min-width: 0;
+  min-height: 0;
+  width: auto;
+  padding: 0;
+  justify-content: flex-start;
+}
+
+.maa-basic .maa-basic-form :deep(> .n-form-item > .n-form-item-blank) {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.maa-basic .maa-basic-form :deep(.n-form-item-blank > .n-select) {
+  max-width: none;
+}
+
+.maa-field-with-action {
   display: flex;
   align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.maa-field-with-action :deep(> .n-input),
+.maa-field-with-action :deep(> .n-select) {
+  flex: 1;
+  min-width: 0;
+}
+
+.maa-field-with-action :deep(> .n-button) {
+  flex: none;
+}
+
+.maa-connection-test {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 12px;
+}
+
+.maa-connection-result {
+  flex-basis: 100%;
+  margin: 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .maa-updater {
@@ -1362,5 +1466,13 @@ p {
 
 .update-success {
   color: var(--n-color-success);
+}
+
+@container maa-basic (max-width: 480px) {
+  .maa-basic .maa-basic-form :deep(> .n-form-item) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'label' 'blank' 'feedback';
+    gap: 8px 0;
+  }
 }
 </style>

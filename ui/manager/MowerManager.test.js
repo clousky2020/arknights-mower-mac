@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { effectScope, nextTick } from 'vue'
+import { readFileSync } from 'node:fs'
+import { parse } from '@vue/compiler-sfc'
+import { renderToString } from 'vue/server-renderer'
+import { compile, createSSRApp, effectScope, nextTick } from 'vue'
 import MowerManager from './MowerManager.vue'
 import { managerCall } from './bridge.js'
 
-const hooks = vi.hoisted(() => ({ mounted: [], unmounted: [] }))
+const hooks = vi.hoisted(() => ({ mounted: [], unmounted: [], axios: null }))
 vi.mock('vue', async (original) => ({
   ...(await original()),
   useSSRContext: () => ({ modules: new Set() }),
+  inject: (key, fallback) => (key === 'axios' ? hooks.axios : fallback),
   onMounted: (callback) => hooks.mounted.push(callback),
   onUnmounted: (callback) => hooks.unmounted.push(callback)
 }))
@@ -22,18 +26,22 @@ describe('manager instance controls', () => {
     editable: true,
     can_start: true,
     ai_assistant_enabled: false,
-    updates_enabled: false,
-    can_stop: false
+    can_stop: false,
+    can_open_browser: false
   })
 
   beforeEach(() => {
     vi.useFakeTimers()
     hooks.mounted = []
     hooks.unmounted = []
+    hooks.axios = null
     rows = [stopped()]
     api = {
       get_instances: vi.fn(async () => structuredClone(rows)),
+      get_common_settings: vi.fn(async () => ({ values: {}, fields: [] })),
+      select_common_path: vi.fn(async () => null),
       mark_ready: vi.fn(async () => {}),
+      add: vi.fn(async () => ({ ok: true })),
       start: vi.fn(async () => {
         rows[0] = {
           ...rows[0],
@@ -50,6 +58,8 @@ describe('manager instance controls', () => {
       }),
       start_all: vi.fn(async () => ({ ok: true })),
       stop_all: vi.fn(async () => ({ ok: true })),
+      open_instance_page: vi.fn(async () => ({ ok: true })),
+      open_instance_pages: vi.fn(async () => ({ ok: true, results: [] })),
       rename: vi.fn(async () => {}),
       select_path: vi.fn(async () => null),
       remove: vi.fn(async () => {}),
@@ -82,6 +92,61 @@ describe('manager instance controls', () => {
     vi.unstubAllGlobals()
   })
 
+  it('keeps a directly opened browser manager unavailable without reading or changing instances', async () => {
+    vi.stubGlobal('window', { addEventListener() {}, removeEventListener() {} })
+    hooks.axios = {
+      get: vi.fn(async () => ({ data: structuredClone(rows) })),
+      post: vi.fn(async () => ({ data: { ok: true } }))
+    }
+    const mounting = mount()
+    await vi.advanceTimersByTimeAsync(15000)
+    await mounting
+    expect(component.initializationError.value).toContain('加载实例列表超时，请重试')
+    expect(component.instances.value).toEqual([])
+    expect(component.unavailable.value).toBe(true)
+    await component.addInstance()
+    component.selectPath(0)
+    component.confirmBulk('start')
+    expect(component.editing.value).toBeNull()
+    expect(component.confirmation.value).toBeNull()
+    expect(hooks.axios.get).not.toHaveBeenCalled()
+    expect(hooks.axios.post).not.toHaveBeenCalled()
+
+    window.pywebview = { api }
+    await component.initialize()
+    expect(component.unavailable.value).toBe(false)
+    await component.addInstance()
+    expect(api.add).toHaveBeenCalledWith('新实例', '')
+    expect(hooks.axios.get).not.toHaveBeenCalled()
+    expect(hooks.axios.post).not.toHaveBeenCalled()
+  })
+
+  it.each(['settings', 'batch', 'deletion'])(
+    'invalidates an obsolete %s dialog when the instance menu reloads the list',
+    async (kind) => {
+      await mount()
+      if (kind === 'settings') {
+        component.edit(0, 'settings')
+        await component.changeAssistant(true)
+      } else if (kind === 'batch') {
+        component.editBatch()
+        await component.changeBatchAssistant(true)
+      } else component.confirmDelete(0)
+      rows[0].name = 'replaced elsewhere'
+
+      await component.initialize()
+
+      expect(component.editing.value).toBeNull()
+      expect(component.deleting.value).toBeNull()
+      expect(component.assistantConfirmation.value).toBeNull()
+      await component.save()
+      await component.applyDelete()
+      expect(api.update_settings).not.toHaveBeenCalled()
+      expect(api.update_all_settings).not.toHaveBeenCalled()
+      expect(api.remove).not.toHaveBeenCalled()
+    }
+  )
+
   it('changes start to stop and suppresses repeat clicks while dispatch is pending', async () => {
     await mount()
     component.lifecycle(0)
@@ -97,12 +162,386 @@ describe('manager instance controls', () => {
     expect(api.stop).toHaveBeenCalledOnce()
   })
 
+  it('saves public launch settings with no instances and does not change row permissions', async () => {
+    rows = []
+    await mount()
+    await component.editBatch()
+    component.commonDraft.value = {
+      maa_path: 'C:/MAA',
+      account: 'sender@example.com',
+      startup_mode: 'background'
+    }
+    await component.save()
+    expect(api.update_all_settings).toHaveBeenCalledExactlyOnceWith([], [], {
+      original: {},
+      values: {
+        maa_path: 'C:/MAA',
+        account: 'sender@example.com',
+        startup_mode: 'background'
+      }
+    })
+    expect(component.editing.value).toBeNull()
+  })
+
+  it('opens a ready instance using the saved mode with its captured name and directory', async () => {
+    rows[0] = { ...stopped(), state: 'running', can_open_browser: true }
+    await mount()
+    await component.openInstancePage(0)
+    expect(api.open_instance_page).toHaveBeenCalledExactlyOnceWith(0, {
+      name: 'first',
+      path: '/first'
+    })
+    expect(api.start).not.toHaveBeenCalled()
+  })
+
+  it('asks for the first page opening mode without saving or starting the instance', async () => {
+    rows[0] = { ...stopped(), state: 'running', can_open_browser: true }
+    api.open_instance_page.mockResolvedValue({ ok: false, needs_mode: true })
+    await mount()
+    await component.openInstancePage(0)
+    expect(component.pageOpening.value).toEqual({
+      kind: 'one',
+      idx: 0,
+      target: { name: 'first', path: '/first' }
+    })
+    expect(component.pageMode.value).toBe('browser')
+    expect(component.rememberPageMode.value).toBe(false)
+    expect(component.error.value).toBe('')
+    component.pageOpening.value = null
+    expect(component.confirmPageMode()).toBe(false)
+    expect(api.open_instance_page).toHaveBeenCalledTimes(1)
+    expect(api.update_all_settings).not.toHaveBeenCalled()
+    expect(api.start).not.toHaveBeenCalled()
+  })
+
+  it('submits the chosen page mode only on confirmation and subsequently opens directly', async () => {
+    rows[0] = { ...stopped(), state: 'running', can_open_browser: true }
+    api.open_instance_page.mockResolvedValueOnce({ ok: false, needs_mode: true })
+    await mount()
+    await component.openInstancePage(0)
+    component.pageMode.value = 'webview'
+    component.rememberPageMode.value = true
+    component.confirmPageMode()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(api.open_instance_page).toHaveBeenLastCalledWith(
+      0,
+      { name: 'first', path: '/first' },
+      'webview',
+      true
+    )
+    expect(component.pageOpening.value).toBeNull()
+    await component.openInstancePage(0)
+    expect(api.open_instance_page).toHaveBeenLastCalledWith(0, { name: 'first', path: '/first' })
+    expect(component.pageOpening.value).toBeNull()
+  })
+
+  it('keeps an unremembered mode local to one request and resets the checkbox for the next prompt', async () => {
+    rows[0] = { ...stopped(), state: 'running', can_open_browser: true }
+    api.open_instance_page.mockImplementation(async (_idx, _target, mode) =>
+      mode ? { ok: true } : { ok: false, needs_mode: true }
+    )
+    await mount()
+    await component.openInstancePage(0)
+    component.pageMode.value = 'webview'
+    component.confirmPageMode()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(api.open_instance_page).toHaveBeenLastCalledWith(
+      0,
+      { name: 'first', path: '/first' },
+      'webview',
+      false
+    )
+    await component.openInstancePage(0)
+    expect(component.pageOpening.value).not.toBeNull()
+    expect(component.rememberPageMode.value).toBe(false)
+    expect(api.update_all_settings).not.toHaveBeenCalled()
+  })
+
+  it('discards a page mode prompt when the captured instance is replaced or stops', async () => {
+    rows[0] = { ...stopped(), state: 'running', can_open_browser: true }
+    api.open_instance_page.mockResolvedValue({ ok: false, needs_mode: true })
+    await mount()
+    await component.openInstancePage(0)
+    rows[0] = { ...stopped(), name: 'replacement' }
+    await component.refresh()
+    expect(component.pageOpening.value).toBeNull()
+    component.confirmPageMode()
+    expect(api.open_instance_page).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens all pages using a captured list and reports skipped and failed instances', async () => {
+    rows[0] = { ...stopped(), state: 'running', can_open_browser: true }
+    rows.push({ ...stopped(), name: 'second', path: '/second' })
+    api.open_instance_pages.mockResolvedValue({
+      ok: false,
+      message: '部分页面未能打开',
+      results: [
+        { idx: 0, name: 'first', status: 'opened' },
+        { idx: 1, name: 'second', status: 'failed', message: '通道关闭' }
+      ]
+    })
+    await mount()
+    await component.openAllInstancePages()
+    expect(api.open_instance_pages).toHaveBeenCalledExactlyOnceWith([
+      { name: 'first', path: '/first' },
+      { name: 'second', path: '/second' }
+    ])
+    expect(component.pageSummary.value).toBe('已派发 1 个页面，跳过 0 个，失败 1 个')
+    expect(component.error.value).toBe('部分页面未能打开')
+    expect(api.start_all).not.toHaveBeenCalled()
+  })
+
+  it('uses one first-use prompt for all pages and cancels it if the list changes', async () => {
+    rows[0] = { ...stopped(), state: 'running', can_open_browser: true }
+    api.open_instance_pages.mockResolvedValueOnce({ ok: false, needs_mode: true })
+    await mount()
+    await component.openAllInstancePages()
+    component.pageMode.value = 'browser'
+    component.confirmPageMode()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(api.open_instance_pages).toHaveBeenLastCalledWith(
+      [{ name: 'first', path: '/first' }],
+      'browser',
+      false
+    )
+    api.open_instance_pages.mockResolvedValueOnce({ ok: false, needs_mode: true })
+    await component.openAllInstancePages()
+    rows.push({ ...stopped(), name: 'added', path: '/added' })
+    await component.refresh()
+    expect(component.pageOpening.value).toBeNull()
+    component.confirmPageMode()
+    expect(api.open_instance_pages).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not dispatch bulk pages without a ready instance or while a prompt is pending', async () => {
+    await mount()
+    await component.openAllInstancePages()
+    expect(api.open_instance_pages).not.toHaveBeenCalled()
+    rows[0] = { ...stopped(), state: 'running', can_open_browser: true }
+    await component.refresh()
+    api.open_instance_page.mockResolvedValue({ ok: false, needs_mode: true })
+    await component.openInstancePage(0)
+    await component.openAllInstancePages()
+    await component.openInstancePage(0)
+    expect(api.open_instance_pages).not.toHaveBeenCalled()
+    expect(api.open_instance_page).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['stopped', 'starting', 'stopping'])(
+    'does not send browser commands while an instance is %s',
+    async (state) => {
+      rows[0] = { ...stopped(), state }
+      await mount()
+      await component.openInstancePage(0)
+      expect(api.open_instance_page).not.toHaveBeenCalled()
+    }
+  )
+
+  it('reports browser dispatch failure and refreshes the current state', async () => {
+    rows[0] = { ...stopped(), state: 'running', can_open_browser: true }
+    api.open_instance_page.mockResolvedValue({ ok: false, message: '实例正在停止，无法打开网页' })
+    await mount()
+    await component.openInstancePage(0)
+    expect(component.error.value).toBe('实例正在停止，无法打开网页')
+    expect(component.busy.value).toBe(false)
+    expect(api.get_instances).toHaveBeenCalledTimes(2)
+  })
+
+  it('changes automatic start only for editable rows and sends changed cells', async () => {
+    rows.push({
+      ...stopped(),
+      name: 'running',
+      path: '/running',
+      editable: false,
+      state: 'running'
+    })
+    await mount()
+    await component.editBatch()
+    component.changeBatchAutomatic(true)
+    expect(component.batchDraft.value.map((row) => row.start_automatically)).toEqual([true, false])
+    await component.save()
+    expect(api.update_all_settings).toHaveBeenCalledWith(
+      [{ idx: 0, settings: { start_automatically: true } }],
+      [
+        { name: 'first', path: '/first' },
+        { name: 'running', path: '/running' }
+      ]
+    )
+  })
+
+  it('discards a late preview after common values change', async () => {
+    let resolve
+    api.preview_common_settings = vi.fn(
+      () =>
+        new Promise((done) => {
+          resolve = done
+        })
+    )
+    await mount()
+    await component.editBatch()
+    const request = component.previewCommon()
+    await vi.advanceTimersByTimeAsync(0)
+    component.commonDraft.value.account = 'changed'
+    await nextTick()
+    resolve({ rows: [{ name: 'old' }] })
+    await request
+    expect(component.preview.value).toBeNull()
+  })
+
+  it('loads saved public choices on reopening and discards cancelled drafts', async () => {
+    api.get_common_settings.mockResolvedValue({ values: { screenshot: 2 }, fields: [] })
+    await mount()
+    await component.editBatch()
+    component.commonDraft.value.screenshot = 3
+    component.editing.value = null
+    await component.editBatch()
+    expect(component.commonDraft.value).toEqual({ screenshot: 2 })
+    expect(component.commonChanged.value).toBe(false)
+    delete component.commonDraft.value.screenshot
+    await component.save()
+    expect(api.update_all_settings).toHaveBeenCalledWith([], [{ name: 'first', path: '/first' }], {
+      original: { screenshot: 2 },
+      values: {}
+    })
+  })
+
+  it('keeps waiting scene drafts separate from the backend and snapshot and saves only real value changes', async () => {
+    const values = { waiting_scene: { LOADING: [2, 30], UNKNOWN: [1, 10] } }
+    api.get_common_settings.mockResolvedValue({ values, fields: [] })
+    await mount()
+    await component.editBatch()
+    expect(component.commonChanged.value).toBe(false)
+    component.commonDraft.value.waiting_scene.LOADING[0] = 7
+    expect(component.commonOriginal.value).toEqual(values)
+    expect(values.waiting_scene.LOADING).toEqual([2, 30])
+    expect(component.commonChanged.value).toBe(true)
+    component.commonDraft.value.waiting_scene.LOADING[0] = 2
+    expect(component.commonChanged.value).toBe(false)
+    await component.save()
+    expect(api.update_all_settings).not.toHaveBeenCalled()
+    component.commonDraft.value.waiting_scene.LOADING[1] = 40
+    await component.save()
+    expect(api.update_all_settings).toHaveBeenCalledExactlyOnceWith(
+      [],
+      [{ name: 'first', path: '/first' }],
+      {
+        original: values,
+        values: { waiting_scene: { LOADING: [2, 40], UNKNOWN: [1, 10] } }
+      }
+    )
+  })
+
+  it('does not allow a failed public read to overwrite configuration with defaults', async () => {
+    api.get_common_settings.mockRejectedValue(new Error('unreadable'))
+    await mount()
+    await component.editBatch()
+    component.batchDraft.value[0].token = 'new'
+    await component.save()
+    expect(component.commonError.value).toBe('unreadable')
+    expect(api.update_all_settings).not.toHaveBeenCalled()
+  })
+
+  it('does not use a late public settings read in another editor', async () => {
+    let resolve
+    api.get_common_settings.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done
+        })
+    )
+    await mount()
+    const opening = component.editBatch()
+    await vi.advanceTimersByTimeAsync(0)
+    component.editing.value = null
+    component.edit(0, 'settings')
+    resolve({ values: { account: 'stale' }, fields: [] })
+    await opening
+    expect(component.commonDraft.value).toEqual({})
+    expect(component.editing.value.kind).toBe('settings')
+  })
+
+  it('blocks cached instance actions while a reopened menu reloads the list', async () => {
+    await mount()
+    const snapshot = structuredClone(rows)
+    let finishReload
+    api.get_instances.mockImplementationOnce(
+      () => new Promise((resolve) => (finishReload = resolve))
+    )
+    const reload = component.initialize()
+    await vi.advanceTimersByTimeAsync(0)
+
+    component.lifecycle(0)
+    component.edit(0, 'name')
+    component.confirmDelete(0)
+    await vi.advanceTimersByTimeAsync(0)
+    const startsDuringReload = api.start.mock.calls.length
+    const editorDuringReload = component.editing.value
+    const deletionDuringReload = component.deleting.value
+    finishReload(snapshot)
+    await reload
+
+    expect(startsDuringReload).toBe(0)
+    expect(editorDuringReload).toBeNull()
+    expect(deletionDuringReload).toBeNull()
+    component.lifecycle(0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(api.start).toHaveBeenCalledOnce()
+  })
+
+  it('ignores an old status refresh superseded by an explicit list reload', async () => {
+    await mount()
+    const oldRows = structuredClone(rows)
+    let finishOldRefresh
+    api.get_instances.mockImplementationOnce(
+      () => new Promise((resolve) => (finishOldRefresh = resolve))
+    )
+    const refresh = component.refresh()
+    await vi.advanceTimersByTimeAsync(0)
+    rows[0].name = 'renamed elsewhere'
+    await component.initialize()
+    finishOldRefresh(oldRows)
+    await refresh
+
+    expect(component.instances.value[0].name).toBe('renamed elsewhere')
+  })
+
+  it.each(['start', 'stop', 'select_path', 'remove', 'rename'])(
+    'sends the displayed instance identity with %s',
+    async (action) => {
+      if (action === 'stop') {
+        Object.assign(rows[0], {
+          state: 'running',
+          editable: false,
+          can_start: false,
+          can_stop: true
+        })
+      }
+      await mount()
+      if (action === 'start' || action === 'stop') {
+        component.lifecycle(0)
+        await vi.advanceTimersByTimeAsync(0)
+      } else if (action === 'select_path') await component.selectPath(0)
+      else if (action === 'remove') {
+        component.confirmDelete(0)
+        await component.applyDelete()
+      } else {
+        component.edit(0, 'name')
+        component.draft.value.name = 'new name'
+        await component.save()
+      }
+      const target = { name: 'first', path: '/first' }
+      expect(api[action]).toHaveBeenCalledExactlyOnceWith(
+        ...(action === 'rename' ? [0, 'new name', target] : [0, target])
+      )
+    }
+  )
+
   it.each(['name', 'settings', 'batch'])(
     'retains the %s editor presentation until its closing transition finishes',
     async (kind) => {
       await mount()
       if (kind === 'batch') {
-        component.editBatch()
+        await component.editBatch()
         component.batchDraft.value[0].token = 'draft-token'
       } else {
         component.edit(0, kind)
@@ -130,7 +569,7 @@ describe('manager instance controls', () => {
 
   it('does not clear a reopened editor when an earlier closing transition finishes', async () => {
     await mount()
-    component.editBatch()
+    await component.editBatch()
     component.editing.value = null
     component.edit(0, 'settings')
     component.clearClosedEditor()
@@ -144,7 +583,7 @@ describe('manager instance controls', () => {
     async (kind) => {
       await mount()
       if (kind === 'batch') {
-        component.editBatch()
+        await component.editBatch()
         component.batchDraft.value[0].token = 'saved-token'
       } else {
         component.edit(0, kind)
@@ -197,7 +636,7 @@ describe('manager instance controls', () => {
     expect(api.remove).not.toHaveBeenCalled()
     component.confirmDelete(0)
     await component.applyDelete()
-    expect(api.remove).toHaveBeenCalledExactlyOnceWith(0)
+    expect(api.remove).toHaveBeenCalledExactlyOnceWith(0, { name: 'first', path: '/first' })
     expect(component.deleting.value).toBeNull()
   })
 
@@ -416,58 +855,69 @@ describe('manager instance controls', () => {
 
   it('opens a batch draft with no selected changes and does not write it', async () => {
     await mount()
-    component.editBatch()
+    await component.editBatch()
     expect(component.editing.value).toMatchObject({
       kind: 'batch',
       targets: [{ name: 'first', path: '/first' }]
     })
     expect(component.batchChanges.value).toEqual([])
     expect(component.batchDraft.value).toEqual([
-      { token: '', port: null, ai_assistant_enabled: false, updates_enabled: false }
+      {
+        token: '',
+        port: null,
+        ai_assistant_enabled: false,
+        start_automatically: false,
+        extra_settings_visible: false
+      }
     ])
     await component.save()
     expect(api.update_all_settings).not.toHaveBeenCalled()
     expect(api.update_settings).not.toHaveBeenCalled()
   })
 
-  it('keeps the enabled update default and disabled AI in individual and batch drafts', async () => {
-    rows[0].updates_enabled = true
-    await mount()
-    component.edit(0, 'settings')
-    expect(component.draft.value.updates_enabled).toBe(true)
-    expect(component.draft.value.ai_assistant_enabled).toBe(false)
-    await component.save()
-    expect(api.update_settings.mock.calls[0][1]).toEqual({ token: '', port: null })
-    component.editBatch()
-    expect(component.batchDraft.value[0].updates_enabled).toBe(true)
-    expect(component.batchDraft.value[0].ai_assistant_enabled).toBe(false)
-    expect(component.batchChanges.value).toEqual([])
-    expect(component.assistantConfirmation.value).toBeNull()
-    await component.save()
-    expect(api.update_all_settings).not.toHaveBeenCalled()
-  })
+  it.each([true, false])(
+    'keeps the maintenance choice %s and disabled AI in individual and batch drafts',
+    async (enabled) => {
+      rows[0].extra_settings_visible = enabled
+      await mount()
+      component.edit(0, 'settings')
+      expect(component.draft.value.extra_settings_visible).toBe(enabled)
+      expect(component.draft.value.ai_assistant_enabled).toBe(false)
+      await component.save()
+      expect(api.update_settings.mock.calls[0][1]).toEqual({ token: '', port: null })
+      await component.editBatch()
+      expect(component.batchDraft.value[0].extra_settings_visible).toBe(enabled)
+      expect(component.batchDraft.value[0].ai_assistant_enabled).toBe(false)
+      expect(component.batchChanges.value).toEqual([])
+      expect(component.assistantConfirmation.value).toBeNull()
+      await component.save()
+      expect(api.update_all_settings).not.toHaveBeenCalled()
+    }
+  )
 
-  it('saves update permission separately without triggering the AI notice', async () => {
+  it('saves the maintenance choice without triggering the AI notice', async () => {
     await mount()
     component.edit(0, 'settings')
-    component.draft.value.updates_enabled = true
+    expect(component.draft.value.extra_settings_visible).toBe(false)
+    component.draft.value.extra_settings_visible = true
+    expect(component.draft.value.ai_assistant_enabled).toBe(false)
     expect(component.assistantConfirmation.value).toBeNull()
     expect(api.update_settings).not.toHaveBeenCalled()
     await component.save()
     expect(api.update_settings).toHaveBeenCalledExactlyOnceWith(
       0,
-      { token: '', port: null, updates_enabled: true },
+      { token: '', port: null, extra_settings_visible: true },
       { name: 'first', path: '/first' }
     )
   })
 
   it.each([true, false])(
-    'does not overwrite an untouched update choice %s after external changes',
+    'does not overwrite an untouched maintenance choice %s after external changes',
     async (original) => {
-      rows[0].updates_enabled = original
+      rows[0].extra_settings_visible = original
       await mount()
       component.edit(0, 'settings')
-      rows[0].updates_enabled = !original
+      rows[0].extra_settings_visible = !original
       component.draft.value.token = 'edited'
       await component.refresh()
       await component.save()
@@ -475,16 +925,16 @@ describe('manager instance controls', () => {
     }
   )
 
-  it('changes all editable update drafts and saves only changed cells', async () => {
+  it('changes all editable maintenance drafts and saves only changed cells', async () => {
     rows.push(
       { ...stopped(), name: 'second', path: '/second' },
       { ...stopped(), name: 'live', path: '/live', editable: false, state: 'running' },
       { ...stopped(), name: 'missing', path: '' }
     )
     await mount()
-    component.editBatch()
-    component.changeBatchUpdates(true)
-    expect(component.batchDraft.value.map((row) => row.updates_enabled)).toEqual([
+    await component.editBatch()
+    component.changeBatchExtraSettings(true)
+    expect(component.batchDraft.value.map((row) => row.extra_settings_visible)).toEqual([
       true,
       true,
       false,
@@ -493,24 +943,131 @@ describe('manager instance controls', () => {
     expect(component.batchDraft.value.every((row) => row.ai_assistant_enabled === false)).toBe(true)
     expect(component.assistantConfirmation.value).toBeNull()
     expect(api.update_all_settings).not.toHaveBeenCalled()
-    component.changeBatchUpdates(false, 1)
+    component.changeBatchExtraSettings(false, 1)
     await component.save()
     expect(api.update_all_settings).toHaveBeenCalledExactlyOnceWith(
-      [{ idx: 0, settings: { updates_enabled: true } }],
+      [{ idx: 0, settings: { extra_settings_visible: true } }],
       rows.map(({ name, path }) => ({ name, path }))
     )
   })
 
-  it('can cancel a bulk update choice or turn it all off before saving', async () => {
-    rows[0].updates_enabled = true
+  it('can cancel a bulk maintenance choice or turn it all off before saving', async () => {
+    rows[0].extra_settings_visible = true
     await mount()
-    component.editBatch()
-    component.changeBatchUpdates(false)
-    expect(component.batchChanges.value).toEqual([{ idx: 0, settings: { updates_enabled: false } }])
+    await component.editBatch()
+    component.changeBatchExtraSettings(false)
+    expect(component.batchChanges.value).toEqual([
+      { idx: 0, settings: { extra_settings_visible: false } }
+    ])
     component.editing.value = null
-    component.editBatch()
-    expect(component.batchDraft.value[0].updates_enabled).toBe(true)
+    await component.editBatch()
+    expect(component.batchDraft.value[0].extra_settings_visible).toBe(true)
     expect(component.batchChanges.value).toEqual([])
+    expect(api.update_all_settings).not.toHaveBeenCalled()
+  })
+
+  it.each(['start_automatically', 'extra_settings_visible'])(
+    'keeps the %s table header in sync with editable row choices',
+    async (key) => {
+      rows[0][key] = true
+      rows.push(
+        { ...stopped(), name: 'second', path: '/second' },
+        { ...stopped(), name: 'live', path: '/live', editable: false, state: 'running' }
+      )
+      await mount()
+      await component.editBatch()
+      const column = component.batchBooleanColumns.find((item) => item.key === key)
+      expect(component.batchSelection.value[key]).toEqual({
+        checked: false,
+        indeterminate: true,
+        disabled: false
+      })
+      column.change(true)
+      expect(component.batchDraft.value.map((row) => row[key])).toEqual([true, true, false])
+      expect(component.batchSelection.value[key]).toEqual({
+        checked: true,
+        indeterminate: false,
+        disabled: false
+      })
+      component.batchDraft.value[1][key] = false
+      expect(component.batchSelection.value[key].indeterminate).toBe(true)
+      column.change(false)
+      expect(component.batchSelection.value[key]).toEqual({
+        checked: false,
+        indeterminate: false,
+        disabled: false
+      })
+      expect(component.batchChanges.value).toEqual([{ idx: 0, settings: { [key]: false } }])
+      expect(api.update_all_settings).not.toHaveBeenCalled()
+      rows[0].editable = false
+      rows[1].editable = false
+      await component.refresh()
+      expect(component.batchSelection.value[key].disabled).toBe(true)
+      column.change(true)
+      expect(component.batchDraft.value.every((row) => !row[key])).toBe(true)
+    }
+  )
+
+  it('handles the checkbox metadata argument through the production table header binding', async () => {
+    rows[0].extra_settings_visible = true
+    await mount()
+    await component.editBatch()
+    const { descriptor } = parse(
+      readFileSync(new URL('./MowerManager.vue', import.meta.url), 'utf8')
+    )
+    const header = descriptor.template.content.match(
+      /<th v-for="column in batchBooleanColumns"[\s\S]+?<\/th>/
+    )[0]
+    const controls = []
+    const app = createSSRApp({
+      setup: () => ({ ...component }),
+      render: compile(`<table><thead><tr>${header}</tr></thead></table>`),
+      components: {
+        NCheckbox: {
+          emits: ['update:checked'],
+          setup(_props, { attrs, emit }) {
+            controls.push({ label: attrs['aria-label'], emit })
+            return () => null
+          }
+        }
+      }
+    })
+    await renderToString(app)
+    controls
+      .find(({ label }) => label === '批量设置更新与维护')
+      .emit('update:checked', false, { label: '更新与维护' })
+    expect(component.batchDraft.value[0].extra_settings_visible).toBe(false)
+    expect(component.batchSelection.value.extra_settings_visible.checked).toBe(false)
+    expect(component.batchChanges.value).toEqual([
+      { idx: 0, settings: { extra_settings_visible: false } }
+    ])
+  })
+
+  it('keeps the AI header unchanged until reading is confirmed and then follows individual cells', async () => {
+    rows.push({ ...stopped(), name: 'second', path: '/second' })
+    await mount()
+    await component.editBatch()
+    const column = component.batchBooleanColumns.find(({ key }) => key === 'ai_assistant_enabled')
+    await column.change(true)
+    expect(component.batchSelection.value.ai_assistant_enabled).toEqual({
+      checked: false,
+      indeterminate: false,
+      disabled: true
+    })
+    expect(component.batchDraft.value.every((row) => !row.ai_assistant_enabled)).toBe(true)
+    await vi.advanceTimersByTimeAsync(5000)
+    component.riskAcknowledged.value = true
+    component.confirmAssistantChange()
+    expect(component.batchSelection.value.ai_assistant_enabled).toEqual({
+      checked: true,
+      indeterminate: false,
+      disabled: false
+    })
+    await component.changeBatchAssistant(false, 1)
+    expect(component.batchSelection.value.ai_assistant_enabled.indeterminate).toBe(true)
+    await column.change(false)
+    expect(component.batchChanges.value).toEqual([])
+    expect(component.assistantConfirmation.value).toBeNull()
     expect(api.update_all_settings).not.toHaveBeenCalled()
   })
 
@@ -520,7 +1077,7 @@ describe('manager instance controls', () => {
       { ...stopped(), name: 'live', path: '/live', editable: false, state: 'running' }
     )
     await mount()
-    component.editBatch()
+    await component.editBatch()
     const targets = rows.map(({ name, path }) => ({ name, path }))
     await component.changeBatchAssistant(true)
     expect(component.assistantConfirmation.value.kind).toBe('batch')
@@ -569,7 +1126,7 @@ describe('manager instance controls', () => {
       { ...stopped(), name: 'live', path: '/live', editable: false, state: 'running' }
     )
     await mount()
-    component.editBatch()
+    await component.editBatch()
     await component.changeBatchAssistant(true, 0)
     await vi.advanceTimersByTimeAsync(5000)
     component.riskAcknowledged.value = true
@@ -600,7 +1157,7 @@ describe('manager instance controls', () => {
   it('submits only changed cells and does not replace untouched values refreshed elsewhere', async () => {
     rows.push({ ...stopped(), name: 'second', path: '/second', token: 'other', port: 58001 })
     await mount()
-    component.editBatch()
+    await component.editBatch()
     component.batchDraft.value[0].token = 'first-new'
     rows[1].port = 59000
     await component.refresh()
@@ -616,7 +1173,7 @@ describe('manager instance controls', () => {
 
   it('restoring a cell to its original value removes the pending change', async () => {
     await mount()
-    component.editBatch()
+    await component.editBatch()
     component.batchDraft.value[0].port = 59000
     expect(component.batchChanges.value).toEqual([{ idx: 0, settings: { port: 59000 } }])
     component.batchDraft.value[0].port = null
@@ -628,7 +1185,7 @@ describe('manager instance controls', () => {
   it('batch disables without reading and leaves Token and port unchanged', async () => {
     rows[0].ai_assistant_enabled = true
     await mount()
-    component.editBatch()
+    await component.editBatch()
     await component.changeBatchAssistant(false)
     expect(component.assistantConfirmation.value).toBeNull()
     await component.save()
@@ -642,7 +1199,7 @@ describe('manager instance controls', () => {
     rows[0].token = 'old'
     rows[0].port = 59000
     await mount()
-    component.editBatch()
+    await component.editBatch()
     component.batchDraft.value[0].token = ''
     component.batchDraft.value[0].port = null
     await component.save()
@@ -654,7 +1211,7 @@ describe('manager instance controls', () => {
 
   it('cancelled batch reading retains the earlier choice and other drafts', async () => {
     await mount()
-    component.editBatch()
+    await component.editBatch()
     component.batchDraft.value[0].token = 'draft'
     await component.changeBatchAssistant(true)
     await vi.advanceTimersByTimeAsync(5000)
@@ -669,13 +1226,13 @@ describe('manager instance controls', () => {
 
   it('cancelling the batch editor discards its acknowledgement and draft', async () => {
     await mount()
-    component.editBatch()
+    await component.editBatch()
     await component.changeBatchAssistant(true)
     await vi.advanceTimersByTimeAsync(5000)
     component.riskAcknowledged.value = true
     component.confirmAssistantChange()
     component.editing.value = null
-    component.editBatch()
+    await component.editBatch()
     expect(component.batchDraft.value[0].ai_assistant_enabled).toBe(false)
     expect(component.batchChanges.value).toEqual([])
     expect(component.batchAiRead.value).toBe(false)
@@ -686,7 +1243,7 @@ describe('manager instance controls', () => {
     'cancels batch editing and reading if a target is %s',
     async (change) => {
       await mount()
-      component.editBatch()
+      await component.editBatch()
       await component.changeBatchAssistant(true)
       if (change === 'added') rows.push({ ...stopped(), name: 'second', path: '/second' })
       else if (change === 'renamed') rows[0].name = 'other'
@@ -702,7 +1259,7 @@ describe('manager instance controls', () => {
 
   it('keeps batch editing on process state changes so the backend can report skipped instances', async () => {
     await mount()
-    component.editBatch()
+    await component.editBatch()
     component.batchDraft.value[0].token = 'edited-before-start'
     rows[0].editable = false
     rows[0].state = 'running'
@@ -715,7 +1272,7 @@ describe('manager instance controls', () => {
 
   it('reports per-instance write failures without hiding completed updates', async () => {
     await mount()
-    component.editBatch()
+    await component.editBatch()
     component.batchDraft.value[0].token = 'edit'
     api.update_all_settings.mockResolvedValueOnce({
       ok: true,
@@ -734,7 +1291,7 @@ describe('manager instance controls', () => {
     'retains batch drafts after %s failure',
     async (failure) => {
       await mount()
-      component.editBatch()
+      await component.editBatch()
       component.batchDraft.value[0].token = 'edit'
       if (failure === 'bridge')
         api.update_all_settings.mockRejectedValueOnce(new Error('bridge failed'))
@@ -750,7 +1307,7 @@ describe('manager instance controls', () => {
 
   it('clears a pending batch reading timer on unmount', async () => {
     await mount()
-    component.editBatch()
+    await component.editBatch()
     await component.changeBatchAssistant(true)
     hooks.unmounted.forEach((callback) => callback())
     expect(vi.getTimerCount()).toBe(0)
@@ -858,7 +1415,7 @@ describe('manager instance controls', () => {
       expect(component.unavailable.value).toBe(false)
       expect(component.error.value).toBe('')
       expect(component.instances.value[0].path).toBe(outcome === 'confirm' ? '/selected' : '/first')
-      expect(api.select_path).toHaveBeenCalledExactlyOnceWith(0)
+      expect(api.select_path).toHaveBeenCalledExactlyOnceWith(0, { name: 'first', path: '/first' })
     }
   )
 
@@ -898,5 +1455,32 @@ describe('manager instance controls', () => {
     const result = expect(pending).rejects.toThrow('操作超时')
     await vi.advanceTimersByTimeAsync(50)
     await result
+  })
+  it('does not offer device configuration when the native bridge lacks device capabilities', async () => {
+    await mount()
+    expect(component.deviceSettingsAvailable()).toBe(false)
+    component.edit(0, 'settings')
+    const editor = component.editing.value
+    component.editDevice(0)
+    expect(component.deviceEditor.value).toBeNull()
+    expect(component.editing.value).toBe(editor)
+  })
+
+  it('opens connection settings from the instance dialog and restores its unsaved basic draft', async () => {
+    api.get_device_settings = vi.fn()
+    api.update_device_settings = vi.fn()
+    api.discover_device_settings = vi.fn()
+    await mount()
+    component.edit(0, 'settings')
+    component.draft.value.token = 'unsaved-token'
+    const editor = component.editing.value
+    component.editDevice(0)
+    expect(component.editing.value).toBeNull()
+    expect(component.deviceEditor.value.target).toEqual({ name: 'first', path: '/first' })
+    component.closeDevice()
+    expect(component.deviceEditor.value).toBeNull()
+    expect(component.editing.value).toBe(editor)
+    expect(component.draft.value.token).toBe('unsaved-token')
+    expect(api.update_settings).not.toHaveBeenCalled()
   })
 })

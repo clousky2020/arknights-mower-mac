@@ -2,11 +2,9 @@ import copy
 import os
 from datetime import datetime, timedelta
 from threading import Lock, Timer
+from typing import TYPE_CHECKING
 
 from arknights_mower.data import base_room_list
-from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
-from arknights_mower.solvers.reclamation_algorithm import ReclamationAlgorithm
-from arknights_mower.solvers.secret_front import SecretFront
 from arknights_mower.utils import config, path, rapidocr
 from arknights_mower.utils.csleep import MowerExit, csleep
 from arknights_mower.utils.csv_utils import EmptyDataError, read_csv_rows
@@ -31,6 +29,9 @@ from arknights_mower.utils.scheduler_task import (
     merge_restored_waiting_shifts,
     protect_priority_tasks,
 )
+
+if TYPE_CHECKING:
+    from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
 
 base_scheduler = None
 device_control = create_device_control()
@@ -206,15 +207,19 @@ def _handle_maintenance(info: MaintenanceInfo, scheduler, now=None):
         _stop_for_major_update(info)
         return True
 
-    flash_probe_at = min(info.end, info.start + timedelta(minutes=5))
-    if info.is_flash_update and info.announcement_id not in _flash_probe_ids:
+    flash_probe_at = min(info.end, info.start + timedelta(minutes=2))
+    flash_probe_pending = False
+    if info.is_flash_update:
+        if info.announcement_id in _flash_probe_ids:
+            return False
         probe_reference = max(now, flash_probe_at)
         if _has_recent_task(scheduler, probe_reference):
-            _flash_probe_ids.add(info.announcement_id)
             if now >= flash_probe_at:
-                logger.info("闪断更新已进行 5 分钟且有近期任务，尝试进入游戏一次")
+                _flash_probe_ids.add(info.announcement_id)
+                logger.info("闪断更新已进行 2 分钟且有近期任务，尝试进入游戏一次")
                 return False
             resume_at = flash_probe_at
+            flash_probe_pending = True
         else:
             resume_at = info.end
     else:
@@ -235,12 +240,14 @@ def _handle_maintenance(info: MaintenanceInfo, scheduler, now=None):
     scheduler.handle_idle_action(remaining_time)
     # 服务器维护期间 mower 完全空闲，同样走休眠收口点，让 /status 显示休眠
     scheduler._idle_sleep(remaining_time, allow_wakeup=False)
+    if flash_probe_pending:
+        _flash_probe_ids.add(info.announcement_id)
     logger.info("时间开始流动了……DIO大人贴心为你重启时间！")
     return False
 
 
 def _wait_before_early_login_retry(now=None):
-    """Retry early entry every five minutes until the announced maintenance end."""
+    """Wait out a failed flash probe or retry early downtime entry in five minutes."""
     now = now or datetime.now()
     info = NewsChecker.get_maintenance()
     if (
@@ -250,7 +257,7 @@ def _wait_before_early_login_retry(now=None):
         and now < info.end
     ):
         delay = (info.end - now).total_seconds()
-        logger.warning("闪断更新第 5 分钟试探未成功，等待公告结束后恢复")
+        logger.warning("闪断更新提前尝试未成功，等待公告结束后恢复")
         try:
             csleep(delay)
         except MowerExit:
@@ -308,6 +315,9 @@ def main(saved_state, *, preparation_serial=None):
 
 def _main(saved_state):
     logger.info("开始运行Mower")
+    from arknights_mower.utils.recycling_report import start_recycling_reports
+
+    start_recycling_reports()
     maintenance = NewsChecker.get_maintenance()
     if maintenance is not None:
         _arm_maintenance_timer(maintenance)
@@ -324,10 +334,10 @@ def _main(saved_state):
 
 def initialize(
     tasks: list,
-    scheduler: BaseSchedulerSolver | None = None,
+    scheduler: "BaseSchedulerSolver | None" = None,
     *,
     connection_retries: int = 3,
-) -> BaseSchedulerSolver:
+) -> "BaseSchedulerSolver":
     if scheduler:
         scheduler.handle_error(True)
         return scheduler
@@ -343,6 +353,8 @@ def initialize(
 
 
 def _initialize_scheduler(tasks, device):
+    from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
+
     base_scheduler = BaseSchedulerSolver(device=device)
     base_scheduler._state_restore_complete = False
     from arknights_mower.utils.operators import build_global_plan
@@ -413,6 +425,8 @@ def _resume_device_dispatch(scheduler=None, failure=None):
             scheduler.device = device
             scheduler.recog.device = device
             if uncertain or getattr(scheduler, "_idle_observation_pending", False):
+                from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
+
                 BaseSchedulerSolver._complete_idle_observation(scheduler)
             else:
                 scheduler.recog.update()
@@ -467,6 +481,7 @@ def simulate(saved):
                 or bool(saved.get("_process_crash_recovery"))
                 or bool(saved.get("initial_mood_pending", False))
                 or config.conf.automatic_rescue_enable
+                or config.conf.test_mood_calculation
                 or bool(saved and saved.get("automatic_rescue_state"))
             )
             base_scheduler._initial_staffing_pending = (
@@ -477,6 +492,11 @@ def simulate(saved):
             base_scheduler._initial_mood_refresh_rooms = set(
                 saved.get("initial_mood_refresh_rooms", ()) if saved else ()
             ) | set(saved.get("initial_mood_probe_layout", {}) if saved else {})
+            if config.conf.test_mood_calculation:
+                # 重启及首次启用都先核实实际驻员，计算快照不能替代启动实读。
+                base_scheduler._initial_mood_refresh_rooms.update(
+                    room for room in base_room_list if not room.startswith("gaming")
+                )
             success = True
         except RECOVERABLE_DEVICE_ERRORS as exc:
             try:
@@ -554,6 +574,15 @@ def simulate(saved):
                 base_scheduler.op_data.operators[k].dorm_recovery_fixed = getattr(
                     v, "dorm_recovery_fixed", ()
                 )
+            if saved.get("calculated_mood") is not None:
+                from arknights_mower.utils.calculated_mood import CalculatedMood
+
+                restored_mood = CalculatedMood()
+                restored_mood.__dict__.update(copy.deepcopy(saved["calculated_mood"]))
+                base_scheduler.op_data.mood_model = restored_mood.restore()
+            if base_scheduler.op_data.mood_calculation_enabled:
+                for operator in base_scheduler.op_data.operators.values():
+                    operator._mood_model = base_scheduler.op_data.mood_model
             base_scheduler.op_data.restore_group_shift_state(
                 saved.get("group_shift_state"),
                 saved.get("group_recovery_full_members"),
@@ -662,6 +691,7 @@ def simulate(saved):
         ]
     if (
         config.conf.automatic_rescue_enable
+        or config.conf.test_mood_calculation
         or isinstance(base_scheduler.emergency_state, dict)
         or bool(saved and saved.get("initial_mood_pending"))
     ):
@@ -671,9 +701,9 @@ def simulate(saved):
             task for task in base_scheduler.tasks if task.meta_data != RESUME_META
         ]
         if not (saved and saved.get("initial_mood_pending")):
-            base_scheduler._initial_mood_refresh_rooms = {
-                room for room in base_scheduler.op_data.plan if room in base_room_list
-            }
+            base_scheduler._initial_mood_refresh_rooms.update(
+                {room for room in base_scheduler.op_data.plan if room in base_room_list}
+            )
         base_scheduler.tasks.insert(0, SchedulerTask(time=datetime.now()))
     while True:
         try:
@@ -897,6 +927,10 @@ def simulate(saved):
 
                     if not rg_sleep:
                         if config.conf.RA:
+                            from arknights_mower.solvers.reclamation_algorithm import (
+                                ReclamationAlgorithm,
+                            )
+
                             base_scheduler.recog.update()
                             base_scheduler.back_to_index()
                             ra_solver = ReclamationAlgorithm(
@@ -915,6 +949,8 @@ def simulate(saved):
                                 - datetime.now()
                             ).total_seconds()
                         elif config.conf.SF:
+                            from arknights_mower.solvers.secret_front import SecretFront
+
                             base_scheduler.recog.update()
                             base_scheduler.back_to_index()
                             sf_solver = SecretFront(

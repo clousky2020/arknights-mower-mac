@@ -50,6 +50,11 @@ if __name__ == "__main__" and sys.argv[1:2] == ["--maa-check-worker"]:
     worker_main(sys.argv[2])
     sys.exit()
 
+if __name__ == "__main__" and sys.argv[1:] == ["--preview"]:
+    from arknights_mower.utils.desktop_preview import run_preview
+
+    sys.exit(run_preview())
+
 # Linux 版独立包运行期需要宿主提供 GTK/WebKit2 原生库与 typelib，PyInstaller 只把
 # pywebview 的 Python 依赖打进包。这份提示在窗口后端初始化失败时展示，直接给出
 # 三个发行版的安装命令，避免用户对着裸 ImportError 无从下手。
@@ -342,6 +347,7 @@ def webview_window(
         return
     windows_native = backend == "winforms"
     shell_enabled = backend in SUPPORTED_BACKENDS
+    managed = os.environ.get("MOWER_MANAGED") == "1"
     theme = config.conf.theme
     ratio = load_window_ratio()
     if ratio:
@@ -429,12 +435,15 @@ def webview_window(
         window_title(instance_name, port),
         window_url,
         text_select=True,
-        confirm_close=not tray,
+        confirm_close=not (tray or managed),
         width=width,
         height=height,
         min_size=min_size,
         resizable=True,
         frameless=shell_enabled,
+        # Preserve page link drag/drop. easy_drag=False separately disables
+        # whole-page window dragging.
+        draggable=True,
         easy_drag=False,
         shadow=True,
         background_color=window_background_color(theme),
@@ -443,8 +452,9 @@ def webview_window(
     bridge = attach_window_shell(
         window,
         initial_size=WindowSize(width, height),
-        tray_enabled=tray,
+        tray_enabled=tray and not managed,
         backend=backend,
+        managed=managed,
     )
 
     def on_closing():
@@ -515,6 +525,10 @@ def webview_window(
                 continue
             if msg == "title":
                 window.set_title(window_title(instance_name, port))
+                continue
+            if msg == "show":
+                window.restore()
+                window.show()
                 continue
             if msg == "file":
                 result = window.create_file_dialog(
@@ -780,6 +794,7 @@ def _run_desktop():
         close_mp_logging,
         close_screenshot_store,
         init_file_logging,
+        logger,
         start_mp_listener,
     )
 
@@ -800,9 +815,42 @@ def _run_desktop():
         splash_process, splash_queue = start_desktop_child("splash")
         splash_queue.put({"type": "text", "data": "加载配置文件"})
     from arknights_mower.utils import config
+    from arknights_mower.utils.config_backup import LocalConfigError, backup_lock
+    from arknights_mower.utils.config_profiles import (
+        ProfileConflict,
+        check_generation,
+        current_generation,
+    )
     from arknights_mower.utils.network import is_port_in_use
 
-    conf = config.conf
+    with backup_lock:
+        conf = config.conf
+        try:
+            startup_generation = current_generation()
+        except (LocalConfigError, OSError):
+            startup_generation = None
+        resume_mode = os.environ.pop("MOWER_RESUME_MODE", "")
+        resume_run = (
+            bool(os.environ.get("MOWER_RESTART_JOB"))
+            and os.environ.get("MOWER_RESUME_RUN") == "1"
+        )
+        resume = (
+            resume_mode in ("0", "1")
+            or resume_run
+            or (
+                not os.environ.get("MOWER_RESTART_JOB")
+                and resume_mode != "preserve"
+                and conf.start_automatically
+            )
+        )
+        start_type = (
+            resume_mode if resume_mode in ("0", "1") else "2" if resume_run else "0"
+        )
+        auto_resource = (
+            config.updates_enabled
+            and conf.resource_update.enable
+            and conf.resource_update.auto_update
+        )
     tray = conf.webview.tray or background or managed
     keep_running = tray or sys.platform == "darwin"
     # Keep the single file writer on every platform. macOS uses a pipe instead
@@ -866,23 +914,6 @@ def _run_desktop():
     from arknights_mower.utils import crash_recovery
     from arknights_mower.utils.instance_supervisor import child_ready
 
-    resume_mode = os.environ.pop("MOWER_RESUME_MODE", "")
-    resume_run = (
-        bool(os.environ.get("MOWER_RESTART_JOB"))
-        and os.environ.get("MOWER_RESUME_RUN") == "1"
-    )
-    resume = (
-        resume_mode in ("0", "1")
-        or resume_run
-        or (
-            not os.environ.get("MOWER_RESTART_JOB")
-            and resume_mode != "preserve"
-            and conf.start_automatically
-        )
-    )
-    start_type = (
-        resume_mode if resume_mode in ("0", "1") else "2" if resume_run else "0"
-    )
     child_ready(registration, desired_running=resume, start_type=start_type)
     crash_notice = crash_recovery.status()
     if crash_recovery.notice_path() is not None:
@@ -951,18 +982,19 @@ def _run_desktop():
     if config.updates_enabled:
         request_auto_check()
 
-    auto_resource = (
-        config.updates_enabled
-        and conf.resource_update.enable
-        and conf.resource_update.auto_update
-    )
-
     def startup_cancelled():
-        return (
+        if (
             registration.shutdown_requested()
             or shutdown.closing
             or config.stop_mower.is_set()
-        )
+        ):
+            return True
+        try:
+            check_generation(startup_generation, allow_legacy=False)
+        except (ProfileConflict, LocalConfigError, OSError) as exc:
+            logger.warning("启动时自动操作已取消：%s", exc)
+            return True
+        return False
 
     def resume_after_update():
         while not startup_cancelled() and runtime.active_job():
@@ -970,31 +1002,33 @@ def _run_desktop():
         if startup_cancelled():
             return
         with server.app.test_request_context(
-            method="POST", headers={"token": runtime_token}
+            method="POST", headers={"token": runtime_token}, json={"background": True}
         ):
             if auto_resource:
                 try:
                     info = server.get_resource_version()
-                    if info.get("update_available") is True and not startup_cancelled():
-                        server.install_resource()
+                    if info.get("update_available") is True:
+                        with backup_lock:
+                            if startup_cancelled():
+                                return
+                            server.install_resource()
                 except Exception:
-                    from arknights_mower.utils.log import logger
-
                     logger.exception("启动时自动更新资源失败")
                 # A cached page or manual request can already own the install.
                 if server.resource_update.running():
                     server.resource_update.thread.join()
-        if resume and not crash_notice["active"] and not startup_cancelled():
-            with server.app.test_request_context(
-                method="GET", headers={"token": runtime_token}
-            ):
-                if resume_mode in ("0", "1"):
-                    server.start(resume_mode, automatic=True)
-                else:
-                    server.start(
-                        "2" if resume_run else "0",
-                        automatic=True,
-                    )
+        with backup_lock:
+            if resume and not crash_notice["active"] and not startup_cancelled():
+                with server.app.test_request_context(
+                    method="GET", headers={"token": runtime_token}
+                ):
+                    if resume_mode in ("0", "1"):
+                        server.start(resume_mode, automatic=True)
+                    else:
+                        server.start(
+                            "2" if resume_run else "0",
+                            automatic=True,
+                        )
 
     if resume and not crash_notice["active"] or auto_resource:
         Thread(target=resume_after_update, daemon=True).start()
@@ -1060,6 +1094,14 @@ def _run_desktop():
                     import webbrowser
 
                     webbrowser.open(url)
+                elif msg == "show":
+                    if config.webview_process and config.webview_process.is_alive():
+                        try:
+                            config.parent_conn.send("show")
+                            continue
+                        except (EOFError, OSError):
+                            pass
+                    open_window()
             if "exit" in messages:
                 shutdown.request("tray")
                 break

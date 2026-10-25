@@ -674,7 +674,11 @@ class BaseMixin:
         )
 
     def require_agent_selection_page(self):
-        """名单异常时，用同帧入住信息页签区分页面退出与卡片识别失败。"""
+        """同帧房间页签或二次确认表明选人页面已变化。"""
+        if self.find("double_confirm/main"):
+            raise AgentSelectionPageChanged(
+                "选人页面出现二次确认，停止选人并返回房间实读重试"
+            )
         if self.find("arrange_check_in_on") or self.find("recycle/dashboard"):
             raise AgentSelectionPageChanged(
                 "选人页面已退出到当前房间入住信息，停止选人并返回房间实读重试"
@@ -1316,6 +1320,7 @@ class BaseMixin:
         for attempt in range(max_attempts):
             if attempt:
                 self.sleep(poll_interval)
+            self.require_agent_selection_page()
             if self.get_color(position)[2] >= 240:
                 self.record_operation_feedback(attempt)
                 return
@@ -1335,6 +1340,7 @@ class BaseMixin:
         for attempt in range(max_attempts + 1):
             if config.stop_mower.is_set():
                 raise MowerExit
+            self.require_agent_selection_page()
             buttons = tuple(
                 (resource, button[0][0], button[0][1])
                 for resource in ("confirm_blue", "confirm_train")
@@ -1508,9 +1514,9 @@ class BaseMixin:
     def enter_room(self, room, *, max_attempts=3):
         """从基建首页进入房间"""
 
+        profile = self.performance_profile
+        poll_interval = profile.screenshot_interval / 1000
         for enter_times in range(max_attempts):
-            pending = False
-            entry_source = False
             actions = 0
             for retry_times in range(9):
                 if self.find("connecting"):
@@ -1518,11 +1524,8 @@ class BaseMixin:
                 elif pos := self.find("control_central"):
                     # 地图观测参与场景计时，避免跨房换班只累计房间结束页。
                     if self.scene() != Scene.INFRA_MAIN:
-                        self.sleep(0.2)
-                        continue
-                    if pending:
-                        # 地图可能仍是点击前的旧画面，先等一帧反馈再重发点击。
-                        pending = False
+                        if self.detect_room() == room:
+                            return
                         self.sleep(0.2)
                         continue
                     if actions >= 5:
@@ -1537,34 +1540,41 @@ class BaseMixin:
                         f"进入房间 {room}，第{enter_times + 1}轮第{retry_times + 1}次尝试"
                     )
                     visible_room = self.adjust_room(_room)
-                    if visible_room is not None:
-                        self.tap(visible_room, interval=0.2)
-                        pending = True
-                        entry_source = True
-                elif entry_source and self._handle_room_entry_reward(room):
-                    pending = False
-                elif self.detect_room() == room:
-                    return
-                else:
-                    # 上一个房间的返回键可能没有生效。确认仍在房间页时，
-                    # 先回基建地图；只等待会在错误房间里耗尽全部进房次数。
+                    if visible_room is None:
+                        continue
+                    self.tap(visible_room, interval=0.2)
+                    room_deadline = perf_counter() + profile.transition_timeout
+                    while True:
+                        # 点击后的地图、连接中和未知画面共用同一确认期限。
+                        if not self.find("connecting"):
+                            self._handle_room_entry_reward(room)
+                            if self.detect_room() == room:
+                                return
+                        # 先识别再检查期限，保留超时后的首帧；截图耗时计入等待。
+                        if perf_counter() >= room_deadline:
+                            break
+                        self.sleep(poll_interval)
+                    if self.find("connecting"):
+                        break
                     if self.scene() in (
                         Scene.INFRA_DETAILS,
                         Scene.CTRLCENTER_ASSISTANT,
                     ):
                         logger.info("仍在其他房间，返回基建地图后进入 %s", room)
                         self.back_to_infrastructure()
-                    else:
-                        self.sleep()
-            # 最后一次点击也可能成功，检查其刷新后的画面再决定是否重试。
-            if entry_source:
-                self._handle_room_entry_reward(room)
-            if (
-                not self.find("connecting")
-                and not self.find("control_central")
-                and self.detect_room() == room
-            ):
-                return
+                    elif self.scene() != Scene.INFRA_MAIN:
+                        break
+                elif self.detect_room() == room:
+                    return
+                elif self.scene() in (
+                    Scene.INFRA_DETAILS,
+                    Scene.CTRLCENTER_ASSISTANT,
+                ):
+                    # 上一个房间的返回键可能没有生效，先回基建地图再点击。
+                    logger.info("仍在其他房间，返回基建地图后进入 %s", room)
+                    self.back_to_infrastructure()
+                else:
+                    self.sleep()
             if enter_times < max_attempts - 1:
                 # 仍停在全局视角时，原逻辑会一直点击同一位置；退出基建
                 # 再重新进入，重新定位房间。此处不重启或关闭游戏。

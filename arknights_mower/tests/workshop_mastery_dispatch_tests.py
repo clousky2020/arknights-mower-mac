@@ -90,7 +90,11 @@ def crafting(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(workshop_automation, "restore_if_no_plans", lambda: None)
     monkeypatch.setattr(workshop_limits, "blocked_workshop_recipes", lambda _: set())
-    monkeypatch.setattr(workshop_mood, "operator_mood_rules", lambda _: ([], True))
+    monkeypatch.setattr(
+        workshop_mood,
+        "operator_mood_rules",
+        lambda _, *, assume_maximum=False: ([], True),
+    )
     monkeypatch.setattr(
         "arknights_mower.utils.workshop_recommendation.scope_workshop_items",
         lambda _, items, __: items,
@@ -200,6 +204,15 @@ def test_disabled_mastery_keeps_confirmed_output_without_dispatch(crafting):
     crafting.run()
     assert record.get_inventory_counts()["技巧概要·卷3"] == 2
     assert upgrades(crafting) == []
+
+
+def test_confirmed_output_does_not_dispatch_during_existing_training(crafting):
+    mastery_db.update_plan_status(crafting.plan_id, "training")
+    before = mastery_db.get_plan_by_id(crafting.plan_id)
+    crafting.run()
+    assert record.get_inventory_counts()["技巧概要·卷3"] == 2
+    assert upgrades(crafting) == []
+    assert mastery_db.get_plan_by_id(crafting.plan_id) == before
 
 
 def test_unconfirmed_batch_never_dispatches_or_retains_predicted_output(crafting):

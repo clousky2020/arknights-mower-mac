@@ -167,6 +167,8 @@ Use the entries relevant to changed call paths. Follow each owning contract for 
 
 ### 2.3 Presentation Layer (UI)
 
+- [ ] **Single Navigation Definition**: Do the desktop sidebar, mobile tab bar and mobile page drawer render each page from the shared navigation definition, with safe external links and route-derived highlighting? See the [navigation rules](../../../../ui/AGENTS.md#2-navigation-shell).
+
 - [ ] **Read Only Base Groups**: Do immutable preset browsing and filters preserve browser storage, Scheduling Plans and unknown ownership? See the [group boundary](../../../../docs/subsystems/base-scheduler.md#read-only-base-groups).
 - [ ] **Isolated Group Estimates**: Do selected skill mode, average-output choice, manual Jaye stage and accessory conditions remain page-local, with facility outputs separated and invalid staffing withheld? Do roster and normalized facility conditions come from one cached snapshot? See the [estimate boundary](../../../../docs/subsystems/base-scheduler.md#isolated-group-estimates).
 
@@ -246,7 +248,7 @@ Use the entries relevant to changed call paths. Follow each owning contract for 
 - [ ] **Release Artifact Scope**: Do changed publication workflows cover the permitted platform set and preserve the channel index when Android archive validation fails? See the [artifact scope contract](../../../../docs/subsystems/software-update.md#10-published-artifact-scope).
 
 - [ ] **Shared Skill Data Packaging**: Do backend reads and frontend imports share the catalog under `arknights_mower/data`, do Android and desktop archives include it without frontend sources or build output, and do generated resource packages preserve historical path compatibility and selected-package priority? See the [complete contract](../../../../docs/subsystems/software-update.md#shared-skill-data-packaging).
-- [ ] **Nightly Direction Evidence**: Do same-alpha Nightly updates use publication times or upstream commit ancestry when index history is missing, preserve genuine rollback confirmation, and retain confirmation when direction cannot be verified? See the [complete contract](../../../../docs/subsystems/software-update.md#nightly-direction-evidence).
+- [ ] **Online Channel Targets**: Do ordinary online checks offer any different channel target without direction lookup or rollback prompts, avoid reinstalling an identical version, and retain confirmation for explicit historical Release selection and offline packages? See the [software update description](../../../../docs/subsystems/software-update.md#online-channel-targets).
 - [ ] **Owned Command Completion**: Does each Windows update command own descendants before execution, verify completion within its budget, and preserve other instances when preparation is cancelled? See the [complete contract](../../../../docs/subsystems/software-update.md#owned-command-completion).
 - [ ] **Complete Registration Scan**: Do strict registration scans retry within one shared monotonic budget, preserve unverified registrations and raise `InstanceScanError` instead of returning an incomplete snapshot after budget exhaustion? See the [complete contract](../../../../docs/subsystems/software-update.md#complete-registration-scan).
 

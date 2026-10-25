@@ -2,6 +2,7 @@
 defineOptions({ name: 'MowerPlanPage' })
 
 import { useConfigStore } from '@/stores/config'
+import { useResolvedTheme } from '@/composables/theme'
 import { usePlanStore, useRescuePlanStore } from '@/stores/plan'
 import { useMowerStore } from '@/stores/mower'
 import PlanFacilityLevels from '@/components/PlanFacilityLevels.vue'
@@ -17,10 +18,12 @@ import {
   collect_plan_operators
 } from '@/utils/plan_edit'
 import { createSaveCoordinator, drainConfigurationSaves } from '@/utils/configPersistence'
+import { CONFIG_GENERATION_HEADER } from '@/composables/configProfiles'
 
 const router = useRouter()
 const config_store = useConfigStore()
-const { free_blacklist: normal_free_blacklist, theme } = storeToRefs(config_store)
+const { free_blacklist: normal_free_blacklist, theme: themePreference } = storeToRefs(config_store)
+const theme = useResolvedTheme(themePreference)
 
 const { rescue = false } = defineProps({ rescue: Boolean })
 const plan_store = rescue ? useRescuePlanStore() : usePlanStore()
@@ -154,7 +157,7 @@ async function returnToSettings() {
   if (!requireEditing()) return
   try {
     await drainConfigurationSaves(config_store, plan_store)
-    await router.push('/mowersettings')
+    await router.push('/maasettings')
   } catch (error) {
     message.error(error.message || '保存排班失败，请重试')
   }
@@ -251,15 +254,17 @@ async function save() {
   if (browser.getEngine().name == 'WebKit') {
     await toBlob(plan_editor.value.outer)
   }
+  const imageTheme = theme.value
   const blob = await toBlob(plan_editor.value.outer, {
     pixelRatio: 3,
-    backgroundColor: theme.value == 'light' ? '#ffffff' : '#000000',
+    backgroundColor: imageTheme == 'light' ? '#ffffff' : '#000000',
     style: { margin: 0, padding: '8px 0' }
   })
   generating_image.value = false
   loading_bar.finish()
   const form_data = new FormData()
   form_data.append('img', blob)
+  form_data.append('theme', imageTheme)
   const { data } = await axios.post(
     `${import.meta.env.VITE_HTTP_URL}/dialog/save/img${rescue ? '?rescue=1' : ''}`,
     form_data,
@@ -537,18 +542,18 @@ function apply_replace() {
   do_replace()
 }
 
-import DocumentExport from '@vicons/carbon/DocumentExport'
-import DocumentImport from '@vicons/carbon/DocumentImport'
-import IosArrowBack from '@vicons/ionicons4/IosArrowBack'
-import IosArrowForward from '@vicons/ionicons4/IosArrowForward'
-import CodeSlash from '@vicons/ionicons5/CodeSlash'
-import Help from '@vicons/ionicons5/Help'
-import TrashOutline from '@vicons/ionicons5/TrashOutline'
-import AddTaskRound from '@vicons/material/AddTaskRound'
-import RefreshRound from '@vicons/material/RefreshRound'
-import PlusRound from '@vicons/material/PlusRound'
-import Pencil from '@vicons/tabler/Pencil'
-import UndoRound from '@vicons/material/UndoRound'
+import DocumentExport from '@vicons/carbon/es/DocumentExport'
+import DocumentImport from '@vicons/carbon/es/DocumentImport'
+import IosArrowBack from '@vicons/ionicons4/es/IosArrowBack'
+import IosArrowForward from '@vicons/ionicons4/es/IosArrowForward'
+import CodeSlash from '@vicons/ionicons5/es/CodeSlash'
+import Help from '@vicons/ionicons5/es/Help'
+import TrashOutline from '@vicons/ionicons5/es/TrashOutline'
+import AddTaskRound from '@vicons/material/es/AddTaskRound'
+import RefreshRound from '@vicons/material/es/RefreshRound'
+import PlusRound from '@vicons/material/es/PlusRound'
+import Pencil from '@vicons/tabler/es/Pencil'
+import UndoRound from '@vicons/material/es/UndoRound'
 
 async function import_plan({ event }) {
   try {
@@ -718,7 +723,7 @@ function movePlanForward() {
             <template #trigger>
               <n-button
                 class="plan-restore-button"
-                :aria-label="rescue ? '返回' : '还原为当前运行排班表及高级设置'"
+                :aria-label="rescue ? '返回全部设置' : '还原为当前运行排班表及高级设置'"
                 :disabled="edit_locked || (!rescue && !running)"
                 :loading="restoring_running_plan"
                 @click="rescue ? returnToSettings() : restoreRunningPlan()"
@@ -730,7 +735,7 @@ function movePlanForward() {
             </template>
             {{
               rescue
-                ? '返回'
+                ? '返回全部设置'
                 : running
                   ? '还原为当前运行排班表及高级设置'
                   : 'Mower 运行时可还原排班表及高级设置'
@@ -851,7 +856,12 @@ function movePlanForward() {
             :on-before-upload="beforeImport"
             style="width: auto"
             :action="import_url"
-            :headers="{ token: token }"
+            :headers="
+              () => ({
+                token,
+                [CONFIG_GENERATION_HEADER]: axios.defaults.headers.common[CONFIG_GENERATION_HEADER]
+              })
+            "
             :show-file-list="false"
             name="img"
             @finish="import_plan"
@@ -945,6 +955,9 @@ function movePlanForward() {
             <p>
               只影响分床和单回，不改变下班顺序。更高排名的新入住者可重分单回，已有普通床位保持不动。
             </p>
+            <p>
+              动态选择的干员达到或超过个人心情上限后，按普通空闲级参与分床和保床；固定宿舍岗位及宿舍保留干员除外。
+            </p>
           </help-text>
         </template>
         <PlanOperatorSelect
@@ -986,9 +999,11 @@ function movePlanForward() {
         <template #label>
           <span>宿舍休息候补干员</span>
           <help-text>
-            有床休息，无床或被更高优接管后待命；需有正常优先级主班在休息。绑组随组回班，未绑组随下一批回班。低于急救线升为低优并保床。
+            任意干员均可填写，恢复优先级低于高优替班、高于普通替班，不随心情临时升为低优。
 
-            <p>待命不恢复心情；用尽、回满、固定宿舍和零心情工作干员不适用。</p>
+            <p>
+              符合待命条件的工作主班有床休息，无床或被更高优接管后待命；需有正常优先级主班在休息，绑组随组回班，未绑组随下一批回班。待命不恢复心情；固定宿舍、用尽、回满和零心情工作规则独立生效。
+            </p>
           </help-text>
         </template>
         <PlanOperatorSelect
@@ -1025,7 +1040,8 @@ function movePlanForward() {
         <template #label>
           <span>宿舍保留干员</span>
           <help-text>
-            名单内干员保留 Free 宿舍床位，不因满心情而离宿，仍按正常回班及个人心情上限规则离宿。
+            名单内干员保留 Free
+            宿舍床位，不因满心情而离宿或降低恢复优先级，仍按正常回班及个人心情上限规则离宿。
           </help-text>
         </template>
         <PlanOperatorSelect

@@ -8,7 +8,7 @@ import type {MowerDateTimeValue} from './mowerSchedulingData'
 import {toMowerMicros} from './mowerTaskQueue'
 
 type Value = string | number | boolean | null | MowerDateTimeValue
-type Expression = (state: RuntimeState) => Value
+type Expression = ((state: RuntimeState) => Value) & { integerLiteral?: number }
 type Token = { text: string; kind: 'operator' | 'value' | 'worker' | 'external' | 'query'; value?: Value; name?: string; member?: string }
 const roomName = /^(?:room_[1-3]_[1-3]|dormitory_[1-4]|central|meeting|factory|contact|train|recycle)$/
 // Inventory queries: Mower 3de2b2ac; facility-product counts: 3ad69f15 Operators (MIT).
@@ -32,6 +32,16 @@ function serialize(source: unknown, depth = 0, budget = { nodes: 0 }): string {
   if (typeof source === 'number' && Number.isFinite(source)) return String(source)
   if (!source || typeof source !== 'object' || Array.isArray(source)) return fail('条件必须为表达式树')
   const node = source as Record<string, unknown>
+  if ('function' in node) {
+    const name = String(node.function)
+    if (!['max', 'min', 'sum', 'any', 'all', 'abs'].includes(name) || !Array.isArray(node.args) || !node.args.length) return fail('不支持的函数或参数为空')
+    if (name === 'abs' && node.args.length !== 1) return fail('abs 条件只接受一项参数')
+    let args = node.args.map(arg => serialize(arg, depth + 1, budget)).join(', ')
+    if (['sum', 'any', 'all'].includes(name) || (['max', 'min'].includes(name) && node.args.length === 1)) args = `[${args}]`
+    const text = `${name}(${args})`
+    if (text.length > 20000) return fail('条件文本超过限制')
+    return text
+  }
   const text = `(${serialize(node.left ?? '', depth + 1, budget)} ${serialize(node.operator ?? '', depth + 1, budget)} ${serialize(node.right ?? '', depth + 1, budget)})`
   if (text.length > 20000) return fail('条件文本超过限制')
   return text
@@ -47,7 +57,8 @@ function tokenize(text: string): Token[] {
     const quoted = /^(['"])((?:\\.|(?!\1)[^\\])*)\1/.exec(rest)
     const number = /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.exec(rest)
     const word = /^(?:and|or|not|is|in|True|False|None)\b/.exec(rest)
-    const symbol = /^(?:==|!=|<=|>=|[<>+*/()\-])/.exec(rest)
+    const symbol = /^(?:==|!=|<=|>=|\*\*|[<>+*/(),\[\]\-])/.exec(rest)
+    const aggregate = /^(?:max|min|sum|any|all|abs)\b/.exec(rest)
     const room = /^(?:room_[1-3]_[1-3]|dormitory_[1-4]|gaming_[1-3]|central|meeting|factory|contact|train|recycle)\b/.exec(rest)
     const product = /^(?:orirock_device|orirock|orundum|gold|exp3|lmd)\b/.exec(rest)
     let token: Token
@@ -60,6 +71,7 @@ function tokenize(text: string): Token[] {
       ? { text: word[0], kind: 'value', value: word[0] === 'None' ? null : word[0] === 'True' }
       : { text: word[0], kind: 'operator' }
     else if (symbol) token = { text: symbol[0], kind: 'operator' }
+    else if (aggregate) token = { text: aggregate[0], kind: 'operator' }
     else if (product) token = { text: product[0], kind: 'value', value: product[0] }
     else if (room) token = { text: room[0], kind: 'value', value: room[0] }
     else return fail(`不支持的条件 ${rest.slice(0, 120)}`)
@@ -95,23 +107,47 @@ export function compileBackupExpression(source: unknown, participants: Set<strin
     if (op === '<=') return x <= y
     if (op === '>') return x > y
     if (op === '>=') return x >= y
-    const value = op === '+' ? x + y : op === '-' ? x - y : op === '*' ? x * y : x / y
+    const value = op === '+' ? x + y : op === '-' ? x - y : op === '*' ? x * y : op === '**' ? x ** y : x / y
     if (!Number.isFinite(value)) return fail('条件运算结果不是有限数')
     return value
   }
   function atom(): Expression {
     if (++nesting > 64) return fail('条件嵌套超过限制')
     try {
+      if (['max', 'min', 'sum', 'any', 'all', 'abs'].includes(peek() ?? '')) {
+        const name = tokens[cursor++]!.text
+        if (!take('(')) return fail(`${name} 缺少参数括号`)
+        const list = ['sum', 'any', 'all'].includes(name) || (['max', 'min'].includes(name) && peek() === '[')
+        if (list && !take('[')) return fail(`${name} 需要参数列表`)
+        const args = [logicalOr()]
+        while (take(',')) args.push(logicalOr())
+        if (list && !take(']')) return fail(`${name} 参数列表不完整`)
+        if (['max', 'min'].includes(name) && !list && args.length < 2) return fail(`${name} 需要至少两项参数`)
+        if (name === 'abs' && args.length !== 1) return fail('abs 条件只接受一项参数')
+        if (!take(')')) return fail(`${name} 参数括号不完整`)
+        if (name === 'abs') return state => Math.abs(numeric(args[0]!(state)))
+        if (['sum', 'any', 'all'].includes(name)) return state => {
+          const values = args.map(arg => arg(state))
+          if (name === 'any') return values.some(Boolean)
+          if (name === 'all') return values.every(Boolean)
+          const result = values.reduce<number>((sum, value) => sum + numeric(value), 0)
+          if (!Number.isFinite(result)) return fail('条件运算结果不是有限数')
+          return result
+        }
+        return state => args.map(arg => arg(state)).reduce((a, b) => {
+          if (typeof a === 'string' && typeof b === 'string') return (name === 'max' ? a >= b : a <= b) ? a : b
+          const x = numeric(a), y = numeric(b)
+          return (name === 'max' ? x >= y : x <= y) ? a : b
+        })
+      }
       if (take('(')) {
         if (take(')')) return () => false // Mower's empty tuple is false.
         const expr = logicalOr()
         if (!take(')')) return fail('条件括号不完整')
         return expr
       }
-      if (take('+')) { const expr = atom(); return state => numeric(expr(state)) }
-      if (take('-')) { const expr = atom(); return state => -numeric(expr(state)) }
       const token = tokens[cursor++]
-      if (token?.kind === 'value') return () => token.value!
+      if (token?.kind === 'value') return Object.assign(() => token.value!, {integerLiteral: typeof token.value === 'number' && /^\d+$/.test(token.text) ? token.value : undefined})
       if (token?.kind === 'query') {
         if (!take('(')) return fail(`${token.member} 缺少参数括号`)
         if (token.member === 'facility_product_type_count') {
@@ -201,9 +237,26 @@ export function compileBackupExpression(source: unknown, participants: Set<strin
       return fail(`不支持的条件 ${token?.text ?? '空操作数'}`)
     } finally { nesting-- }
   }
+  function power(): Expression {
+    const base = atom()
+    if (!take('**')) return base
+    const exponent = unary(), value = exponent.integerLiteral
+    if (value === undefined || value < 0 || value > 64) return fail('幂运算指数必须是 0 到 64 的整数常量')
+    return binary(base, exponent, '**')
+  }
+  function unary(): Expression {
+    if (++nesting > 64) return fail('条件嵌套超过限制')
+    try {
+      if (peek() !== '+' && peek() !== '-') return power()
+      const sign = tokens[cursor++]!.text === '+' ? 1 : -1, literalStart = cursor, expr = unary()
+      // Native validation admits one signed integer literal, not a computed exponent.
+      const literal = cursor === literalStart + 1 && expr.integerLiteral !== undefined ? sign * expr.integerLiteral : undefined
+      return Object.assign((state: RuntimeState) => sign * numeric(expr(state)), {integerLiteral: literal})
+    } finally { nesting-- }
+  }
   function product(): Expression {
-    let expr = atom()
-    while (peek() === '*' || peek() === '/') { const op = tokens[cursor++]!.text; expr = binary(expr, atom(), op) }
+    let expr = unary()
+    while (peek() === '*' || peek() === '/') { const op = tokens[cursor++]!.text; expr = binary(expr, unary(), op) }
     return expr
   }
   function sum(): Expression {

@@ -2,6 +2,7 @@
 
 import shutil
 import sqlite3
+import sys
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from datetime import datetime
@@ -14,11 +15,22 @@ import cv2
 import numpy as np
 import pytest
 
-from arknights_mower.solvers import base_mixin, base_schedule, record
-from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
+with pytest.MonkeyPatch.context() as import_patch:
+    import_patch.setitem(sys.modules, "arknights_mower.utils.skland", Mock())
+    from arknights_mower.solvers import base_mixin, base_schedule, record
+    from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
 from arknights_mower.utils import recycling
 from arknights_mower.utils.recognize import Recognizer
 from arknights_mower.utils.scene import Scene
+
+
+@pytest.fixture(autouse=True)
+def report_submission(monkeypatch):
+    from arknights_mower.utils import recycling_report
+
+    submit = Mock()
+    monkeypatch.setattr(recycling_report, "report_recycling_collection", submit)
+    return submit
 
 
 @pytest.fixture
@@ -184,7 +196,7 @@ def test_unknown_name_and_inexact_quantity_reject(monkeypatch):
     assert recycling.read_recycling_materials(reward_frame()) is None
 
 
-def collection_solver():
+def collection_solver(monkeypatch=None):
     solver = BaseSchedulerSolver.__new__(BaseSchedulerSolver)
     solver.op_data = SimpleNamespace(recycle_capacity=2)
     solver.recog = SimpleNamespace(
@@ -192,6 +204,20 @@ def collection_solver():
     )
     solver.tap = Mock()
     solver.sleep = Mock()
+    if monkeypatch is not None:
+        monkeypatch.setattr(base_mixin.config.conf, "screenshot_interval", 100)
+        monkeypatch.setattr(base_mixin.config.conf, "selection_transition_timeout", 2.5)
+        monkeypatch.setattr(
+            base_mixin,
+            "perf_counter",
+            lambda: round(
+                sum(
+                    call.args[0] if call.args else 1
+                    for call in solver.sleep.call_args_list
+                ),
+                6,
+            ),
+        )
     solver.scene_graph_navigation = Mock()
     solver._read_recycling_operators = Mock(return_value=["旅骨"])
     return solver
@@ -416,7 +442,7 @@ def test_cancellation_during_reward_confirmation_preserves_pending_collection(
 
 
 def test_popup_retry_records_once_before_dismissal_and_reads_actual_staff(
-    db, monkeypatch
+    db, monkeypatch, report_submission
 ):
     solver = collection_solver()
     solver._recycling_pending = {"id": "popup"}
@@ -428,12 +454,33 @@ def test_popup_retry_records_once_before_dismissal_and_reads_actual_staff(
     )
     solver._finish_recycling_collection()
     assert solver._recycling_pending["recorded"]
+    report_submission.assert_not_called()
     solver._finish_recycling_collection()
     assert solver._recycling_pending is None
     result = record.get_recycling_history("2000-01-01", "2100-01-01")
     assert result["total"] == 1
     assert result["records"][0]["operators"] == ["旅骨"]
     assert result["materials"][0]["count"] == 1
+    report_submission.assert_called_once_with("popup")
+
+
+@pytest.mark.parametrize("names", [None, [], ["旅骨"]])
+def test_collection_hands_report_the_observed_snapshot(
+    db, monkeypatch, report_submission, names
+):
+    solver = collection_solver()
+    solver._recycling_pending = {"id": "report-snapshot", "at": at(18, 19)}
+    solver.scene = Mock(return_value=Scene.INFRA_MAIN)
+    solver._read_recycling_operators.return_value = names
+    monkeypatch.setattr(
+        recycling, "read_recycling_materials", Mock(return_value={"装置": 2})
+    )
+    solver._finish_recycling_collection()
+    report_submission.assert_called_once_with("report-snapshot")
+    saved = record.get_recycling_history("2026-10-18", "2026-10-18")["records"][0]
+    assert saved["materials"] == {"装置": 2}
+    assert saved["operators"] == names
+    assert solver._recycling_pending is None
 
 
 def test_archived_borderline_quantity_is_recorded_after_two_matching_frames(
@@ -550,7 +597,7 @@ def test_other_material_sources_are_not_recorded():
 def test_room_entry_records_incidental_collection_before_dismissal(
     db, monkeypatch, dismiss_failures, entry_delay
 ):
-    solver = collection_solver()
+    solver = collection_solver(monkeypatch)
     page = ["map"]
     ready = [True]
     dismissals = [0]
@@ -597,13 +644,9 @@ def test_room_entry_records_incidental_collection_before_dismissal(
 
     solver.tap.side_effect = tap
     solver.sleep.side_effect = sleep
-    if entry_delay:
-        with pytest.raises(RuntimeError, match="未成功进入房间"):
-            solver.enter_room("recycle", max_attempts=1)
-    else:
-        solver.enter_room("recycle", max_attempts=1)
+    solver.enter_room("recycle", max_attempts=1)
 
-    assert page[0] == ("map" if entry_delay else "room")
+    assert page[0] == "room"
     assert waits[0] == entry_delay
     result = record.get_recycling_history("2000-01-01", "2100-01-01")
     assert result["total"] == 1
@@ -612,7 +655,7 @@ def test_room_entry_records_incidental_collection_before_dismissal(
 
 
 def test_room_entry_waits_for_connecting_before_recording_reward(db, monkeypatch):
-    solver = collection_solver()
+    solver = collection_solver(monkeypatch)
     page = ["map"]
     solver.scene = lambda: Scene.INFRA_MAIN if page[0] == "map" else Scene.CONNECTING
     solver.find = lambda name: (
@@ -646,7 +689,7 @@ def test_room_entry_waits_for_connecting_before_recording_reward(db, monkeypatch
 def test_room_entry_does_not_attribute_unrelated_rewards(
     db, monkeypatch, room, initial_page
 ):
-    solver = collection_solver()
+    solver = collection_solver(monkeypatch)
     page = [initial_page]
     solver.scene = lambda: Scene.INFRA_MAIN if page[0] == "map" else Scene.MATERIEL
     solver.find = lambda name: (
@@ -665,7 +708,7 @@ def test_room_entry_does_not_attribute_unrelated_rewards(
 
 
 def test_room_entry_without_production_enters_room_without_recording(db, monkeypatch):
-    solver = collection_solver()
+    solver = collection_solver(monkeypatch)
     page = ["map"]
     solver.scene = lambda: Scene.INFRA_MAIN if page[0] == "map" else Scene.INFRA_DETAILS
     solver.find = lambda name: (

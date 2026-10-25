@@ -9,6 +9,7 @@ import pytest
 import yaml
 from yamlcore import CoreLoader
 
+from arknights_mower.utils import manager_common
 from arknights_mower.utils import manager_instances as controls
 from arknights_mower.utils import update_runtime as runtime
 from manager import Api
@@ -54,15 +55,17 @@ def batch_changes(manager, settings):
     ]
 
 
-def test_unset_permissions_allow_updates_and_disable_ai_without_writing(manager):
+def test_unset_permissions_hide_maintenance_and_disable_ai_without_writing(manager):
     item = manager.get_instances()[0]
-    assert item["updates_enabled"] is True
+    assert item["extra_settings_visible"] is False
+    assert "updates_enabled" not in item
     assert item["ai_assistant_enabled"] is False
     assert not (Path(item["path"]) / "config/conf.yml").exists()
     manager.update_settings(0, {"token": "keep", "port": 58001})
     reopened = Api(manager._storage_path)
     item = reopened.get_instances()[0]
-    assert item["updates_enabled"] is True
+    assert item["extra_settings_visible"] is False
+    assert "updates_enabled" not in item
     assert item["ai_assistant_enabled"] is False
     saved = read_conf(reopened)
     assert "updates_enabled" not in saved
@@ -70,39 +73,95 @@ def test_unset_permissions_allow_updates_and_disable_ai_without_writing(manager)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_update_permission_is_persisted_without_changing_other_settings(
+def test_maintenance_permission_is_persisted_without_changing_other_settings(
     manager, enabled
 ):
-    assert manager.get_instances()[0]["updates_enabled"] is True
+    assert manager.get_instances()[0]["extra_settings_visible"] is False
     manager.update_settings(
         0, {"token": "keep", "port": 58001, "ai_assistant_enabled": True}
     )
     manager.update_all_settings(
-        batch_changes(manager, {"updates_enabled": enabled}), manager.instances.copy()
+        batch_changes(manager, {"extra_settings_visible": enabled}),
+        manager.instances.copy(),
     )
     reopened = Api(manager._storage_path)
-    assert reopened.get_instances()[0]["updates_enabled"] is enabled
+    assert reopened.get_instances()[0]["extra_settings_visible"] is enabled
     saved = read_conf(reopened)
-    assert saved["updates_enabled"] is enabled
+    assert saved["extra_settings_visible"] is enabled
+    assert "updates_enabled" not in saved
     assert saved["ai_assistant_enabled"] is True
     assert saved["webview"] == {"token": "keep", "port": 58001}
 
 
-@pytest.mark.parametrize("enabled", [None, 0, 1, "true", "false"])
-def test_manager_rejects_invalid_update_permission_without_writing(manager, enabled):
-    with pytest.raises(ValueError, match="布尔值"):
+@pytest.mark.parametrize("enabled", [False, True, None, 0, 1, "true", "false"])
+def test_manager_rejects_retired_update_permission_without_writing(manager, enabled):
+    with pytest.raises(ValueError, match="不支持"):
         manager.update_settings(
             0, {"token": "", "port": None, "updates_enabled": enabled}
+        )
+    with pytest.raises(ValueError, match="不支持"):
+        manager.update_all_settings(
+            batch_changes(manager, {"updates_enabled": enabled}),
+            manager.instances.copy(),
         )
     assert not (Path(manager.instances[0]["path"]) / "config/conf.yml").exists()
 
 
-def test_manager_skips_live_update_permission_edits(manager, monkeypatch):
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ({}, False),
+        ({"updates_enabled": True}, True),
+        ({"updates_enabled": False}, False),
+        ({"extra_settings_visible": True}, True),
+        ({"extra_settings_visible": False}, False),
+        ({"extra_settings_visible": False, "updates_enabled": False}, False),
+        ({"extra_settings_visible": True, "updates_enabled": True}, True),
+        ({"extra_settings_visible": True, "updates_enabled": False}, False),
+        ({"extra_settings_visible": False, "updates_enabled": True}, True),
+    ],
+)
+def test_manager_merges_legacy_update_permission_without_read_writes(
+    manager, raw, expected
+):
+    path = Path(manager.instances[0]["path"]) / "config/conf.yml"
+    path.parent.mkdir(parents=True)
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    before = path.read_bytes()
+    item = manager.get_instances()[0]
+    assert item["extra_settings_visible"] is expected
+    assert "updates_enabled" not in item
+    assert path.read_bytes() == before
+    manager.update_settings(0, {"token": "saved", "port": None})
+    saved = read_conf(manager)
+    assert "updates_enabled" not in saved
+    assert saved.get("extra_settings_visible", False) is expected
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_explicit_manager_choice_replaces_legacy_denial(manager, enabled):
+    path = Path(manager.instances[0]["path"]) / "config/conf.yml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "extra_settings_visible: true\nupdates_enabled: false\n", encoding="utf-8"
+    )
+    manager.update_all_settings(
+        batch_changes(manager, {"extra_settings_visible": enabled}),
+        manager.instances.copy(),
+    )
+    assert read_conf(manager) == {"extra_settings_visible": enabled}
+    assert manager.get_instances()[0]["extra_settings_visible"] is enabled
+
+
+def test_manager_skips_live_maintenance_permission_edits(manager, monkeypatch):
     monkeypatch.setattr(runtime, "instances", lambda **kwargs: [record(manager)])
     with pytest.raises(ValueError):
-        manager.update_settings(0, {"token": "", "port": None, "updates_enabled": True})
+        manager.update_settings(
+            0, {"token": "", "port": None, "extra_settings_visible": True}
+        )
     result = manager.update_all_settings(
-        batch_changes(manager, {"updates_enabled": True}), manager.instances.copy()
+        batch_changes(manager, {"extra_settings_visible": True}),
+        manager.instances.copy(),
     )
     assert result["results"][0]["status"] == "skipped"
     assert not (Path(manager.instances[0]["path"]) / "config/conf.yml").exists()
@@ -161,6 +220,87 @@ def test_single_settings_matching_target_still_rejects_running_process(
     assert not Path(target["path"]).exists()
 
 
+@pytest.mark.parametrize("action", ["remove", "rename", "start", "stop", "select_path"])
+@pytest.mark.parametrize("changed", [False, True])
+def test_row_actions_validate_captured_target_before_side_effects(
+    manager, monkeypatch, action, changed
+):
+    target = dict(manager.instances[0])
+    manager.update_settings(0, {"token": "first", "port": None})
+    manager.add("second", str(manager._storage_path.parent / "second"))
+    manager.update_settings(1, {"token": "second", "port": None})
+    files = [Path(item["path"]) / "config/conf.yml" for item in manager.instances]
+    before_configs = {path: path.read_bytes() for path in files}
+    other = Api(manager._storage_path)
+    if changed:
+        other.remove(0)
+    else:
+        other.add("unrelated", "")
+    before_list = manager._storage_path.read_bytes()
+    current = other.instances[0]
+    if action == "stop":
+        live = dict(record(manager), space=current["path"])
+        monkeypatch.setattr(runtime, "instances", lambda **kwargs: [live])
+    send = Mock()
+    monkeypatch.setattr(runtime, "send_instance_command", send)
+    choose = Mock(return_value=str(manager._storage_path.parent / "selected"))
+    monkeypatch.setattr("manager.choose_instance_directory", choose)
+    monkeypatch.setattr("manager.webview.active_window", lambda: None)
+
+    def apply():
+        if action == "rename":
+            return manager.rename(0, "renamed", target)
+        return getattr(manager, action)(0, target)
+
+    if changed:
+        if action in ("start", "stop"):
+            result = apply()
+            assert result["ok"] is False
+            assert "实例已变化" in result["message"]
+        else:
+            with pytest.raises(ValueError, match="实例已变化"):
+                apply()
+        controls.subprocess.Popen.assert_not_called()
+        send.assert_not_called()
+        choose.assert_not_called()
+        assert manager._storage_path.read_bytes() == before_list
+    else:
+        result = apply()
+        if action == "start":
+            assert result["ok"] is True
+            controls.subprocess.Popen.assert_called_once()
+        elif action == "stop":
+            assert result["ok"] is True
+            send.assert_called_once_with(live, "exit")
+        elif action == "remove":
+            assert all(item["path"] != target["path"] for item in manager.instances)
+        elif action == "rename":
+            assert manager.instances[0]["name"] == "renamed"
+        else:
+            choose.assert_called_once_with(None, target["path"])
+            assert manager.instances[0]["path"] == result
+    assert {path: path.read_bytes() for path in files} == before_configs
+
+
+def test_folder_dialog_rejects_target_replaced_while_choosing(manager, monkeypatch):
+    target = dict(manager.instances[0])
+    manager.add("second", str(manager._storage_path.parent / "second"))
+    other = Api(manager._storage_path)
+    saved = []
+
+    def choose(*args):
+        other.remove(0)
+        saved.append(manager._storage_path.read_bytes())
+        return str(manager._storage_path.parent / "selected")
+
+    monkeypatch.setattr("manager.choose_instance_directory", choose)
+    monkeypatch.setattr("manager.webview.active_window", lambda: None)
+    with pytest.raises(ValueError, match="实例已变化"):
+        manager.select_path(0, target)
+    assert manager._storage_path.read_bytes() == saved[0]
+    assert manager.instances[0] == other.instances[0]
+
+
 def test_duplicate_launch_is_blocked_before_registration_and_after_window_reopen(
     manager,
 ):
@@ -173,12 +313,336 @@ def test_duplicate_launch_is_blocked_before_registration_and_after_window_reopen
     assert not state["editable"] and not state["can_start"] and state["can_stop"]
 
 
+@pytest.mark.parametrize(
+    "values,background",
+    [
+        ({}, "0"),
+        ({"startup_mode": "window"}, "0"),
+        ({"startup_mode": "background"}, "1"),
+    ],
+)
+@pytest.mark.parametrize("bulk", [False, True])
+def test_manager_launch_honors_saved_common_startup_mode(
+    manager, monkeypatch, values, background, bulk
+):
+    monkeypatch.setenv("MOWER_BACKGROUND", "1")
+    manager.update_all_settings(
+        [], manager.instances.copy(), {"values": values, "original": {}}
+    )
+    assert (manager.start_all() if bulk else manager.start(0))["ok"]
+    controls.subprocess.Popen.assert_called_once()
+    env = controls.subprocess.Popen.call_args.kwargs["env"]
+    assert env["MOWER_BACKGROUND"] == background
+    assert env["MOWER_MANAGED"] == "1"
+    assert {
+        key: value
+        for key, value in manager_common.read_settings(manager._common_path).items()
+        if key not in manager_common.SHARED_CONNECTION_KEYS
+    } == values
+    assert not Path(manager.instances[0]["path"]).exists()
+
+
+def test_invalid_common_startup_mode_blocks_launch_before_creating_a_process(manager):
+    runtime.write_json(manager._common_path, {"startup_mode": "invalid"})
+    assert not manager.start(0)["ok"]
+    controls.subprocess.Popen.assert_not_called()
+
+
+def test_browser_action_addresses_ready_registration_without_starting_another_instance(
+    manager, monkeypatch
+):
+    manager.update_settings(0, {"token": "saved-token", "port": 58001})
+    runtime.write_json(manager._common_path, {"instance_page_mode": "webview"})
+    registered = record(manager, port=59002)
+    pending = {**registered, "ready": False}
+    monkeypatch.setattr(runtime, "instances", lambda **kwargs: [pending, registered])
+    assert manager.get_instances()[0]["can_open_browser"]
+    assert manager.open_browser(0, dict(manager.instances[0])) == {"ok": True}
+    commands = list((runtime.state_dir() / "commands/registered").glob("*.json"))
+    assert len(commands) == 1
+    assert json.loads(commands[0].read_text()) == {"action": "browser"}
+    controls.subprocess.Popen.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["stopped", "starting", "stopping", "unmanaged"])
+@pytest.mark.parametrize("method", ["open_browser", "open_instance_page"])
+def test_browser_action_rechecks_instance_readiness_before_dispatch(
+    manager, monkeypatch, state, method
+):
+    registered = record(manager)
+    registered["ready"] = state != "starting"
+    registered["managed"] = state != "unmanaged"
+    monkeypatch.setattr(
+        runtime,
+        "instances",
+        lambda **kwargs: [] if state == "stopped" else [registered],
+    )
+    if state == "stopping":
+        runtime.send_instance_command(registered, "exit")
+    assert not manager.get_instances()[0]["can_open_browser"]
+    assert not getattr(manager, method)(0, dict(manager.instances[0]))["ok"]
+    assert not (runtime.state_dir() / "commands").exists()
+    controls.subprocess.Popen.assert_not_called()
+
+
+@pytest.mark.parametrize("method", ["open_browser", "open_instance_page"])
+def test_browser_action_rejects_stale_target_and_unreadable_state(
+    manager, monkeypatch, method
+):
+    open_page = getattr(manager, method)
+    target = dict(manager.instances[0])
+    manager.rename(0, "renamed")
+    assert not open_page(0, target)["ok"]
+    assert not open_page(-1, dict(manager.instances[0]))["ok"]
+    assert not open_page(True, dict(manager.instances[0]))["ok"]
+    monkeypatch.setattr(runtime, "instances", Mock(side_effect=OSError("scan failed")))
+    assert open_page(0, dict(manager.instances[0])) == {
+        "ok": False,
+        "message": "scan failed",
+    }
+    assert not (runtime.state_dir() / "commands").exists()
+
+
+@pytest.mark.parametrize("mode,action", [("browser", "browser"), ("webview", "show")])
+@pytest.mark.parametrize("assistant", [False, True])
+@pytest.mark.parametrize("updates", [False, True])
+def test_instance_page_uses_current_manager_preference_and_retains_permissions(
+    manager, monkeypatch, mode, action, assistant, updates
+):
+    manager.update_settings(
+        0,
+        {
+            "token": "saved-token",
+            "port": 58001,
+            "ai_assistant_enabled": assistant,
+            "extra_settings_visible": updates,
+        },
+    )
+    before = read_conf(manager)
+    if mode is not None:
+        runtime.write_json(manager._common_path, {"instance_page_mode": mode})
+    registered = record(manager, port=59002)
+    monkeypatch.setattr(
+        runtime,
+        "instances",
+        lambda **kwargs: [{**registered, "ready": False}, registered],
+    )
+    assert manager.open_instance_page(0, dict(manager.instances[0])) == {"ok": True}
+    commands = list((runtime.state_dir() / "commands/registered").glob("*.json"))
+    assert [json.loads(command.read_text()) for command in commands] == [
+        {"action": action}
+    ]
+    assert read_conf(manager) == before
+    controls.subprocess.Popen.assert_not_called()
+
+
+def test_invalid_page_preference_blocks_dispatch_without_replacing_saved_data(
+    manager, monkeypatch
+):
+    runtime.write_json(manager._common_path, {"instance_page_mode": "invalid"})
+    before = manager._common_path.read_bytes()
+    monkeypatch.setattr(runtime, "instances", lambda **kwargs: [record(manager)])
+    assert not manager.open_instance_page(0, dict(manager.instances[0]))["ok"]
+    assert manager._common_path.read_bytes() == before
+    assert not (runtime.state_dir() / "commands").exists()
+
+
 def test_bridge_does_not_expose_filesystem_objects(manager):
     assert not any(
         isinstance(value, Path)
         for name, value in inspect.getmembers(manager)
         if not name.startswith("_")
     )
+
+
+def test_manager_keeps_folder_dialog_on_its_own_window(manager, monkeypatch):
+    import manager as manager_module
+
+    window = Mock()
+    other_window = Mock()
+    monkeypatch.setattr(manager_module.webview, "active_window", other_window)
+    choose = Mock(return_value=(str(manager._storage_path.parent / "selected"),))
+    monkeypatch.setattr(manager_module, "choose_instance_directory", choose)
+    controller = Api(manager._storage_path, window=window)
+    original = manager.instances[0]["path"]
+    selected = controller.select_path(0)
+    choose.assert_called_once_with(window, original)
+    other_window.assert_not_called()
+    assert manager.get_instances()[0]["path"] == selected
+
+
+def test_manager_launch_does_not_inherit_parent_instance_recovery(manager, monkeypatch):
+    monkeypatch.delenv("http_proxy", raising=False)
+    inherited = {
+        "MOWER_SUPERVISOR_DIRECTORY": "parent-supervision",
+        "MOWER_SUPERVISOR_CHILD_REPORT": "parent-report",
+        "MOWER_SUPERVISOR_GENERATION": "parent-generation",
+        "MOWER_SUPERVISOR_INTENT": "parent-intent",
+        "MOWER_RECOVERY_RUN": "1",
+        "MOWER_RESUME_MODE": "1",
+        "MOWER_RESTART_JOB": "parent-update",
+        "MOWER_RESTART_PORT": "58011",
+        "MOWER_RESUME_RUN": "1",
+        "MOWER_LAUNCH_ID": "parent-launch",
+        "MOWER_MANAGER_PORT": "58012",
+        "MOWER_BACKGROUND": "1",
+        "MOWER_DATA_DIR": str(manager._storage_path.parent / "shared-data"),
+        "HTTP_PROXY": "http://proxy.invalid:8080",
+    }
+    for name, value in inherited.items():
+        monkeypatch.setenv(name, value)
+
+    assert manager.start(0) == {"ok": True}
+    environment = controls.subprocess.Popen.call_args.kwargs["env"]
+    assert not any(name.startswith("MOWER_SUPERVISOR_") for name in environment)
+    assert "MOWER_RECOVERY_RUN" not in environment
+    assert "MOWER_RESUME_MODE" not in environment
+    assert environment["MOWER_RESTART_JOB"] == ""
+    assert environment["MOWER_RESTART_PORT"] == ""
+    assert environment["MOWER_RESUME_RUN"] == "0"
+    assert environment["MOWER_LAUNCH_ID"] != "parent-launch"
+    assert len(environment["MOWER_LAUNCH_ID"]) == 32
+    assert environment["MOWER_MANAGER_PORT"] == "0"
+    assert environment["MOWER_BACKGROUND"] == "0"
+    assert environment["MOWER_MANAGED"] == "1"
+    assert environment["MOWER_DATA_DIR"] == inherited["MOWER_DATA_DIR"]
+    assert environment["http_proxy"] == inherited["HTTP_PROXY"]
+    assert {name: controls.os.environ[name] for name in inherited} == inherited
+
+
+def test_manager_saves_device_and_performance_without_replacing_private_fields(manager):
+    manager.update_settings(0, {"token": "private", "port": None})
+    destination = Path(manager.instances[0]["path"]) / "config/conf.yml"
+    raw = read_conf(manager)
+    raw.update(
+        theme="dark",
+        private_extension={"keep": True},
+        custom_screenshot={"command": "old", "private": 7},
+    )
+    destination.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    target = manager.instances[0].copy()
+    settings = manager.get_device_settings(0, target)
+    original = settings["values"]
+    assert manager.update_device_settings(
+        0,
+        {
+            "custom_screenshot.command": "capture-new",
+            "device.last_serial": "chosen-device",
+            "performance_mode": "low",
+            "screenshot_interval": 750,
+        },
+        target,
+        original,
+        {
+            "independent_configuration": True,
+            "original_policy": settings["original_policy"],
+        },
+    ) == {"ok": True}
+    saved = read_conf(manager)
+    assert saved["custom_screenshot"] == {
+        "command": "capture-new",
+        "enable": False,
+        "private": 7,
+    }
+    assert saved["device"]["last_serial"] == saved["adb"] == "chosen-device"
+    assert saved["performance_mode"] == "low"
+    assert saved["screenshot_interval"] == 750
+    assert saved["webview"]["token"] == "private"
+    assert saved["private_extension"] == {"keep": True}
+    assert saved["theme"] == "dark"
+
+
+@pytest.mark.parametrize("blocked", ["running", "target", "stale", "job", "invalid"])
+def test_manager_rejects_device_edits_without_writes(manager, monkeypatch, blocked):
+    manager.update_settings(0, {"token": "private", "port": None})
+    destination = Path(manager.instances[0]["path"]) / "config/conf.yml"
+    target = manager.instances[0].copy()
+    original = manager.get_device_settings(0, target)["values"]
+    changes = {"custom_screenshot.command": "replacement"}
+    if blocked == "running":
+        monkeypatch.setattr(runtime, "instances", lambda **kwargs: [record(manager)])
+    elif blocked == "target":
+        target["name"] = "stale"
+    elif blocked == "stale":
+        original["performance_mode"] = "stale"
+    elif blocked == "job":
+        monkeypatch.setattr(runtime, "active_job", lambda: True)
+    else:
+        changes = {"webview.token": "unauthorized"}
+    before = destination.read_bytes()
+    with pytest.raises(ValueError):
+        manager.update_device_settings(0, changes, target, original)
+    assert destination.read_bytes() == before
+
+
+@pytest.mark.parametrize("field", ["instance_uuid", "topology_fingerprint"])
+def test_manager_identity_metadata_requires_detected_binding(
+    manager, monkeypatch, field
+):
+    from arknights_mower.utils import managed_device
+
+    manager.update_settings(0, {"token": "keep", "port": None})
+    target = manager.instances[0].copy()
+    settings = manager.get_device_settings(0, target)
+    assert next(
+        item for item in settings["fields"] if item["key"] == f"device.{field}"
+    )["read_only"]
+    destination = Path(target["path"]) / "config/conf.yml"
+    before = destination.read_bytes()
+    monkeypatch.setattr(
+        managed_device, "discover", Mock(return_value={"candidates": []})
+    )
+    changes = {f"device.{field}": "forged"}
+    with pytest.raises(ValueError, match="识别信息由检测结果维护"):
+        manager.update_device_settings(0, changes, target, settings["values"])
+    assert destination.read_bytes() == before
+    binding = {
+        "preset_id": "windows.nox",
+        "instance_id": "0",
+        "instance_uuid": "uuid",
+        "topology_fingerprint": "fingerprint",
+    }
+    managed_device.discover.return_value = {
+        "candidates": [{"binding": {**binding, "game_package_confirmed": False}}]
+    }
+    changes = {f"device.{key}": value for key, value in binding.items()}
+    changes["device.game_package"] = "com.hypergryph.arknights.bilibili"
+    assert manager.update_device_settings(
+        0,
+        changes,
+        target,
+        settings["values"],
+        {
+            "independent_configuration": True,
+            "original_policy": settings["original_policy"],
+        },
+    ) == {"ok": True}
+    assert read_conf(manager)["device"][field] == binding[field]
+
+
+def test_manager_discovery_uses_a_validated_draft_without_persisting_it(
+    manager, monkeypatch
+):
+    from arknights_mower.utils import managed_device
+
+    target = manager.instances[0].copy()
+    settings = manager.get_device_settings(0, target)
+    original = settings["values"]
+    discover = Mock(return_value={"candidates": [{"key": "chosen"}]})
+    monkeypatch.setattr(managed_device, "discover", discover)
+    result = manager.discover_device_settings(
+        0,
+        {"device.adb_path": "chosen-adb"},
+        target,
+        original,
+        {
+            "independent_configuration": True,
+            "original_policy": settings["original_policy"],
+        },
+    )
+    assert result == {"candidates": [{"key": "chosen"}]}
+    assert discover.call_args.args[0].device.adb_path == "chosen-adb"
+    assert not (Path(target["path"]) / "config/conf.yml").exists()
 
 
 def test_separate_api_objects_cannot_admit_concurrent_operations(manager):
@@ -192,6 +656,7 @@ def test_separate_api_objects_cannot_admit_concurrent_operations(manager):
 def test_failed_reservation_write_closes_only_the_child_just_created(
     manager, monkeypatch
 ):
+    manager.get_common_settings()
     child = controls.subprocess.Popen.return_value
     child.wait.side_effect = [subprocess.TimeoutExpired("fixture", 5), None]
     monkeypatch.setattr(
@@ -824,3 +1289,85 @@ def test_managed_port_setting_is_independent_of_remote_token(token, monkeypatch)
     assert desktop_port(conf, False) == (58000 if token else 32100)
     conf.port = 0
     assert desktop_port(conf, False) == 32100
+
+
+def test_extra_settings_visibility_defaults_hidden_without_rewriting_old_config(
+    manager,
+):
+    from arknights_mower.utils.config.conf import Conf
+
+    assert Conf().extra_settings_visible is False
+    assert manager.get_instances()[0]["extra_settings_visible"] is False
+    manager.update_settings(0, {"token": "keep", "port": None})
+    before = (Path(manager.instances[0]["path"]) / "config/conf.yml").read_bytes()
+    assert manager.get_instances()[0]["extra_settings_visible"] is False
+    assert (
+        Path(manager.instances[0]["path"]) / "config/conf.yml"
+    ).read_bytes() == before
+    assert "extra_settings_visible" not in read_conf(manager)
+
+
+@pytest.mark.parametrize("assistant", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_extra_settings_visibility_persists_without_changing_ai_authorization(
+    manager, enabled, assistant
+):
+    manager.update_settings(
+        0,
+        {
+            "token": "keep",
+            "port": None,
+            "ai_assistant_enabled": assistant,
+        },
+    )
+    manager.update_all_settings(
+        batch_changes(manager, {"extra_settings_visible": enabled}),
+        manager.instances.copy(),
+    )
+    reopened = Api(manager._storage_path)
+    assert reopened.get_instances()[0]["extra_settings_visible"] is enabled
+    saved = read_conf(reopened)
+    assert saved["extra_settings_visible"] is enabled
+    assert "updates_enabled" not in saved
+    assert saved["ai_assistant_enabled"] is assistant
+    assert saved["webview"] == {"token": "keep", "port": 0}
+    reopened.update_settings(
+        0, {"token": "keep", "port": None, "extra_settings_visible": not enabled}
+    )
+    assert reopened.get_instances()[0]["extra_settings_visible"] is not enabled
+    assert "updates_enabled" not in read_conf(reopened)
+    assert read_conf(reopened)["ai_assistant_enabled"] is assistant
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false"])
+def test_extra_settings_visibility_rejects_non_bool(manager, value):
+    from pydantic import ValidationError
+
+    from arknights_mower.utils.config.conf import Conf
+
+    with pytest.raises(ValidationError):
+        Conf(extra_settings_visible=value)
+    with pytest.raises(ValueError, match="布尔值"):
+        manager.update_settings(
+            0, {"token": "", "port": None, "extra_settings_visible": value}
+        )
+    with pytest.raises(ValueError, match="布尔值"):
+        manager.update_all_settings(
+            batch_changes(manager, {"extra_settings_visible": value}),
+            manager.instances.copy(),
+        )
+    assert not (Path(manager.instances[0]["path"]) / "config/conf.yml").exists()
+
+
+def test_live_instance_cannot_change_extra_settings_visibility(manager, monkeypatch):
+    monkeypatch.setattr(runtime, "instances", lambda **kwargs: [record(manager)])
+    with pytest.raises(ValueError):
+        manager.update_settings(
+            0, {"token": "", "port": None, "extra_settings_visible": True}
+        )
+    result = manager.update_all_settings(
+        batch_changes(manager, {"extra_settings_visible": True}),
+        manager.instances.copy(),
+    )
+    assert result["results"][0]["status"] == "skipped"
+    assert not (Path(manager.instances[0]["path"]) / "config/conf.yml").exists()

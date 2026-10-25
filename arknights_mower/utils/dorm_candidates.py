@@ -9,6 +9,7 @@ from arknights_mower.utils.resting_priority import (
     busy_resting_names,
     crafting_rest_order,
     has_resting_mood,
+    is_full_dynamic_candidate,
     resting_key,
     resting_mood,
     resting_tier,
@@ -43,6 +44,9 @@ def scheduling_mood_reaches(op_data, name, limit, now=None):
 def scheduling_mood_observation(op_data, name, now=None, *, estimates=None):
     """返回决策值及来源时间，实读字段和预估缓存分别保留。"""
     now = now or datetime.now()
+    if getattr(op_data, "mood_calculation_enabled", False):
+        value = op_data.calculated_mood(name, now)
+        return (value, now) if value is not None else None
     op = op_data.operators.get(name)
     measured = (
         (op.mood if op.is_resting() else resting_mood(op, now), op.time_stamp)
@@ -103,7 +107,6 @@ def retained_task_reservations(
                 task is None
                 or task is current_task
                 or getattr(task, "run_order_staffing_wait", False)
-                or getattr(task, "run_order_window_wait", False)
                 or not getattr(task, "retains_execution", False)
             ):
                 continue
@@ -133,7 +136,6 @@ def retained_task_reservations(
             task is None
             or task is current_task
             or getattr(task, "run_order_staffing_wait", False)
-            or getattr(task, "run_order_window_wait", False)
             or not getattr(task, "retains_execution", False)
         ):
             continue
@@ -208,11 +210,7 @@ def dorm_task_reservations(op_data, tasks, excluded=()):
     names.update(getattr(op_data, "emergency_reserved_agents", ()))
     slots = {slot for slot in retained_slots if slot[0].startswith("dorm")}
     for task in tasks:
-        if (
-            task is None
-            or getattr(task, "run_order_staffing_wait", False)
-            or getattr(task, "run_order_window_wait", False)
-        ):
+        if task is None or getattr(task, "run_order_staffing_wait", False):
             continue
         names.update(getattr(task, "emergency_staffing_members", ()))
         names.update(
@@ -291,7 +289,9 @@ def dorm_candidates(
             continue
         mood = dorm_candidate_mood(op_data, name, now)
         if not has_resting_mood(op, now):
-            if not op.is_high() and not op_data.has_rest_mood_limit(name):
+            if (mood is not None and mood < op.upper_limit) or (
+                not op.is_high() and not op_data.has_rest_mood_limit(name)
+            ):
                 unknown.append(name)
             continue
         if (
@@ -309,7 +309,11 @@ def dorm_candidates(
 
     def estimate_key(name):
         mood = dorm_candidate_mood(op_data, name, now)
-        return 24 if mood is None else mood, resting_tier(op_data, name)
+        return (
+            is_full_dynamic_candidate(op_data, name, now),
+            24 if mood is None else mood,
+            resting_tier(op_data, name, now),
+        )
 
     full.sort(key=estimate_key)
     unknown.sort(key=estimate_key)

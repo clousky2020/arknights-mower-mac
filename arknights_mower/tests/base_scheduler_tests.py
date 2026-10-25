@@ -468,6 +468,7 @@ class TestBaseScheduler(unittest.TestCase):
         solver.tasks = []
         solver.drone_room = None
         solver.op_data = MagicMock()
+        solver.op_data.mood_calculation_enabled = False
         solver.op_data.exhaust_agent = ["伊内丝"]
         solver.op_data.rest_in_full_group = set()
         solver.op_data.groups = {}
@@ -2396,9 +2397,7 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
 
 
 class TestScanDispatchMastery(unittest.TestCase):
-    """#74 第3段：扫描 = 唯一周期派发点——`_auto_schedule_mastery_after_scan` 对材料
-    足够的 idle 计划入队「开始训练」SKILL_UPGRADE（plan_key 指定计划，无逻辑标记）。
-    """
+    """材料确认后只为首个就绪计划派发开始任务，已有训练时保留原任务。"""
 
     def _solver(self):
         solver = base_schedule.BaseSchedulerSolver()
@@ -2440,7 +2439,7 @@ class TestScanDispatchMastery(unittest.TestCase):
         self.assertLessEqual(task.time, datetime.now() + timedelta(seconds=1))
 
     @patch.object(base_schedule.BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_dispatch_scan_start_tasks_skips_non_idle_and_unconfirmed(self):
+    def test_dispatch_scan_start_tasks_skips_when_other_skill_is_training(self):
         solver = self._solver()
         idle_ok = self._idle_plan(pid=3, char_id="char_a", skill_index=1)
         idle_no_material = self._idle_plan(pid=4, char_id="char_b", skill_index=1)
@@ -2455,8 +2454,7 @@ class TestScanDispatchMastery(unittest.TestCase):
             base_schedule.BaseSchedulerSolver._dispatch_scan_start_tasks(
                 solver, [{"char_id": "char_a", "skill_index": 1}]
             )
-        self.assertEqual(len(solver.tasks), 1, "只入队 idle 且材料足够的计划")
-        self.assertEqual(solver.tasks[0].plan_key, "3")
+        self.assertEqual(solver.tasks, [], "其他技能正在训练时不派发开始任务")
 
     @patch.object(base_schedule.BaseSchedulerSolver, "__init__", lambda x: None)
     def test_dispatch_scan_start_tasks_dedup_same_plan(self):
@@ -2476,16 +2474,12 @@ class TestScanDispatchMastery(unittest.TestCase):
         self.assertEqual(len(upgrades), 1)
 
     @patch.object(base_schedule.BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_dispatch_scan_start_tasks_one_task_per_skill(self):
-        # 存量库同一 (干员, 技能) 有多行（insert_plan 无去重）→ 每个键只派第一条 idle
-        # 行：旧实现按行派发，7 行数据会发 7 条一模一样的「开始训练」，只有一条能真跑
-        # （实测 `scheduled=1` 却打出「已为 7 个……安排开始训练」）。
+    def test_dispatch_scan_start_tasks_only_first_skill_despite_duplicate_rows(self):
         solver = self._solver()
         rows = [
             self._idle_plan(pid=1, char_id="char_a", skill_index=1),
             self._idle_plan(pid=2, char_id="char_a", skill_index=1),
             self._idle_plan(pid=3, char_id="char_a", skill_index=1),
-            # 同一时刻另一个技能的任务必须保留（按时间判重会把这条吞掉）
             self._idle_plan(pid=4, char_id="char_b", skill_index=1),
         ]
         with (
@@ -2501,11 +2495,11 @@ class TestScanDispatchMastery(unittest.TestCase):
             )
         self.assertEqual(
             [t.plan_key for t in solver.tasks],
-            ["1", "4"],
-            "同键只派第一条 idle 行，不同技能各自保留",
+            ["1"],
+            "重复行及其他技能均不增加开始任务",
         )
         self.assertTrue(
-            any("已为 2 个" in c.args[0] for c in info.call_args_list),
+            any("已为 1 个" in c.args[0] for c in info.call_args_list),
             "日志里的 N 要与实际入队数一致",
         )
 
@@ -3208,6 +3202,7 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         )
         solver.tasks = [solver.task]
         solver.op_data = MagicMock()
+        solver.op_data.mood_calculation_enabled = False
         solver.op_data.run_order_rooms = {room: ["但书"]}
         solver.op_data.get_current_room.return_value = ["旧干员"]
         solver.recog = MagicMock()
@@ -3480,8 +3475,8 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
                 solver.back.assert_called_once()
                 self.assertIn(room, solver.task.plan)
 
-    def test_invalid_countdown_retains_order_without_claiming_a_miss(self):
-        for remaining in (0, -1):
+    def test_outside_countdown_reports_miss_before_selection(self):
+        for remaining in (0, -1, 660, 900):
             with self.subTest(remaining=remaining):
                 solver, room, _ = self.make_solver()
                 solver.get_order_remaining_time.side_effect = None
@@ -3494,15 +3489,15 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
                     patch.object(base_schedule, "send_message") as notify,
                     patch.object(base_schedule, "save_exception"),
                 ):
-                    with self.assertRaises(base_schedule.RoomArrangementDeferred):
+                    with self.assertRaises(base_schedule.RunOrderMissed):
                         solver.agent_arrange_room({}, room, solver.task.plan)
                 self.assertEqual(solver.task.time, original_time)
                 self.assertEqual(solver.task.plan, original_plan)
                 self.assertEqual(solver.tasks, [solver.task])
                 solver.choose_agent.assert_not_called()
                 solver.tap_confirm.assert_not_called()
-                solver.reset_room_time.assert_not_called()
-                notify.assert_not_called()
+                solver.reset_room_time.assert_called_once_with(room)
+                notify.assert_called_once_with("检测到漏单！", level="WARNING")
 
     def test_adjusted_order_can_continue_with_out_of_range_countdown(self):
         solver, room, events = self.make_solver()
@@ -3516,7 +3511,7 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         self.assertEqual(solver.turn_on_room_detail.call_count, 1)
         solver.reset_room_time.assert_not_called()
 
-    def test_resumed_window_failure_rechecks_countdown_before_selection(self):
+    def test_resumed_arrangement_rechecks_countdown_before_selection(self):
         solver, room, events = self.make_solver()
         solver.task.arrangement_retry_room = room
         solver.task.arrangement_retry_count = 1
@@ -3761,7 +3756,7 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         solver.get_order_remaining_time.assert_called_once_with()
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_changed_countdown_checks_actual_order_without_claiming_a_miss(self):
+    def test_changed_countdown_reports_miss_and_restores_original_roster(self):
         room = "room_1_1"
         task = SchedulerTask(
             time=datetime.now(),
@@ -3787,11 +3782,12 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
             patch.object(base_schedule, "save_exception") as save_exception,
             patch.object(base_schedule, "send_message") as send_message,
         ):
-            solver.agent_arrange(task.plan)
+            with self.assertRaises(base_schedule.RunOrderMissed):
+                solver.agent_arrange(task.plan)
 
-        error.assert_not_called()
-        save_exception.assert_not_called()
-        send_message.assert_not_called()
+        error.assert_called_once()
+        save_exception.assert_called_once()
+        send_message.assert_called_once_with("检测到漏单！", level="WARNING")
         solver.accept_order.assert_called_once_with()
         self.assertEqual(solver.agent_arrange_room.call_count, 2)
 

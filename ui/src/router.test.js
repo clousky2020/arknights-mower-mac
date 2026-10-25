@@ -27,7 +27,7 @@ describe('frontend navigation credentials', () => {
 
   it.each([
     ['/plan-editor', 'plan'],
-    ['/mowersettings', 'mowersettings'],
+    ['/task-settings', 'task-settings'],
     ['/record/report', 'report']
   ])('keeps the session token when navigating to %s', async (path, name) => {
     await router.push('/?token=session-token')
@@ -40,12 +40,23 @@ describe('frontend navigation credentials', () => {
     })
   })
 
+  it('redirects the old Mower settings address while retaining its session and target', async () => {
+    await router.push('/?token=session-token')
+    await router.push('/mowersettings?view=details#mower-updates')
+    expect(router.currentRoute.value).toMatchObject({
+      path: '/task-settings',
+      name: 'task-settings',
+      query: { token: 'session-token', view: 'details' },
+      hash: '#mower-updates'
+    })
+  })
+
   it('keeps an explicit destination token and its other navigation fields', async () => {
     await router.push('/?token=session-token')
     await router.push('/mowersettings?token=destination-token&view=details#software-update')
 
     expect(router.currentRoute.value).toMatchObject({
-      path: '/mowersettings',
+      path: '/task-settings',
       query: { token: 'destination-token', view: 'details' },
       hash: '#software-update'
     })
@@ -81,4 +92,32 @@ describe('frontend navigation credentials', () => {
       '/:pathMatch(.*)'
     ])
   })
+
+  it('preserves the requested query and anchor when adding the session token', async () => {
+    await router.push('/?token=demo&old=unused')
+    await router.push('/mowersettings?section=accounts#income-settings')
+    expect(router.currentRoute.value.query).toEqual({
+      token: 'demo',
+      old: 'unused',
+      section: 'accounts'
+    })
+    expect(router.currentRoute.value.hash).toBe('#income-settings')
+  })
+
+  it.each(['#task-devices', '#task-daily', '#task-accounts', '#task-maa'])(
+    'opens legacy task settings on the task settings page while retaining %s and authentication',
+    async (hash) => {
+      await router.push('/?token=demo&old=unused')
+      await router.push(`/maasettings?section=accounts${hash}`)
+      expect(router.currentRoute.value.name).toBe('task-settings')
+      expect(router.currentRoute.value.path).toBe('/task-settings')
+      expect(router.currentRoute.value.query).toEqual({
+        token: 'demo',
+        old: 'unused',
+        section: 'accounts'
+      })
+      expect(router.currentRoute.value.hash).toBe(hash)
+      expect(router.currentRoute.value.meta.settings).not.toBe(true)
+    }
+  )
 })

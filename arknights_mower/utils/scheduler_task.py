@@ -32,6 +32,7 @@ from arknights_mower.utils.resting_priority import (
     busy_resting_names,
     crafting_rest_order,
     has_resting_mood,
+    is_full_dorm_filler,
     resting_key,
     resting_mood,
     resting_tier,
@@ -61,6 +62,18 @@ class TaskTypes(Enum):
     DEPOT = ("仓库扫描", "仓库扫描", 2)
     WORKSHOP = ("加工材料", "加工材料", 2)
     FURNITURE = ("分解所有重复家具", "分解所有重复家具", 2)
+    DAILY = ("daily", "日常任务", 2)
+    MAIL = ("mail", "领取邮件", 2)
+    REPORT = ("report", "读取基报", 2)
+    VISIT_FRIEND = ("visit_friend", "访问好友", 2)
+    CREDIT_SHOP = ("credit_shop", "信用购物", 2)
+    MISSION = ("mission", "领取任务奖励", 2)
+    STAGE_PLAN = ("stage_plan", "作战计划", 2)
+    ROGUELIKE = ("roguelike", "集成战略 (MAA)", 2)
+    SSS = ("sss", "保全派驻 (MAA)", 2)
+    RECLAMATION = ("reclamation", "生息演算 (MAA)", 2)
+    RA = ("ra", "生息演算", 2)
+    SECRET_FRONT = ("secret_front", "隐秘战线", 2)
 
     def __new__(cls, value, display_value, priority):
         obj = object.__new__(cls)
@@ -68,6 +81,26 @@ class TaskTypes(Enum):
         obj.display_value = display_value
         obj.priority = priority
         return obj
+
+
+MANUAL_TASK_TYPES = frozenset(
+    {
+        TaskTypes.DAILY,
+        TaskTypes.RECRUIT,
+        TaskTypes.SKLAND,
+        TaskTypes.MAIL,
+        TaskTypes.REPORT,
+        TaskTypes.VISIT_FRIEND,
+        TaskTypes.CREDIT_SHOP,
+        TaskTypes.MISSION,
+        TaskTypes.STAGE_PLAN,
+        TaskTypes.ROGUELIKE,
+        TaskTypes.SSS,
+        TaskTypes.RECLAMATION,
+        TaskTypes.RA,
+        TaskTypes.SECRET_FRONT,
+    }
+)
 
 
 class TaskScope(Enum):
@@ -423,13 +456,11 @@ def _advance_mood_limit_releases(
         for task in blockers:
             if (
                 task.type in (TaskTypes.RUN_ORDER, TaskTypes.SWAP_SUPPORT)
-                or getattr(task, "run_order_window_observation", False)
-            ) and task.time <= now:
+                and task.time <= now
+            ):
                 # 已到期的关键任务先执行，不再尝试把清退塞到它前面。
                 continue
-            if task.type == TaskTypes.RUN_ORDER or getattr(
-                task, "run_order_window_observation", False
-            ):
+            if task.type == TaskTypes.RUN_ORDER:
                 # 跑单时间已扣除进站提前量，还需预留确认、收单和归位。
                 minutes = (
                     max(run_order_delay, config.conf.run_order_delay)
@@ -478,10 +509,7 @@ def _advance_swap_before_orders(tasks, swap, now, execution_time, op_data=None):
         (
             t
             for t in tasks
-            if (
-                t.type == TaskTypes.RUN_ORDER
-                or getattr(t, "run_order_window_observation", False)
-            )
+            if t.type == TaskTypes.RUN_ORDER
             and t.meta_data
             and not getattr(t, "run_order_restore_pending", False)
             and id(t) not in blocked_orders
@@ -609,7 +637,6 @@ def _priority_tasks(tasks, op_data=None):
             task
             for task in task_view(tasks, TaskScope.DISPATCH, op_data)
             if task.type == TaskTypes.RUN_ORDER
-            or getattr(task, "run_order_window_observation", False)
             or config.conf.enable_mastery
             and task.type == TaskTypes.SWAP_SUPPORT
         ),
@@ -1095,10 +1122,7 @@ def _schedule_priority_tasks(tasks, execution_time=None, time_now=None, op_data=
         # 未来普通任务仅在跑单前十分钟延期；到期任务仍按实际操作预算保护跑单。
         # 宿舍保留提前规划；只有确认独立的后续任务保留原时间。
         if (
-            (
-                priority.type == TaskTypes.RUN_ORDER
-                or getattr(priority, "run_order_window_observation", False)
-            )
+            priority.type == TaskTypes.RUN_ORDER
             and priority.time - now > timedelta(minutes=10)
             and task.time > now
         ):
@@ -1173,10 +1197,7 @@ def _schedule_priority_tasks(tasks, execution_time=None, time_now=None, op_data=
                 continue
             duration = batch_cursor - start
         protected = fixed | (
-            adjusted
-            if priority.type == TaskTypes.RUN_ORDER
-            or getattr(priority, "run_order_window_observation", False)
-            else set()
+            adjusted if priority.type == TaskTypes.RUN_ORDER else set()
         )
         if id(task) in protected or (
             batch_fits is not False
@@ -2112,6 +2133,9 @@ def plan_metadata(op_data, tasks, *, excluded_names=()):
     min_resting_time = datetime.max
     _plan = {}
     _type = []
+    mood_now = (
+        datetime.now() if getattr(op_data, "mood_calculation_enabled", False) else None
+    )
     # 第一个心情低的且小于3 则只休息半小时
     total_agent = sorted(
         (
@@ -2125,15 +2149,23 @@ def plan_metadata(op_data, tasks, *, excluded_names=()):
             and not v.is_resting()
             and not op_data.is_standby(v.name)
         ),
-        key=lambda x: x.current_mood() - x.lower_limit,
+        key=lambda x: (
+            (x.current_mood(mood_now) if mood_now is not None else x.current_mood())
+            - x.lower_limit
+        ),
     )
 
     # 工作心情预测与本轮休息等待窗口分别计算，重算不能重启等待。
     for agent in total_agent:
-        min_resting_time = min(min_resting_time, agent.predict_exhaust())
+        exhausted = (
+            agent.predict_exhaust(mood_now)
+            if mood_now is not None
+            else agent.predict_exhaust()
+        )
+        min_resting_time = min(min_resting_time, exhausted)
 
     return_windows = {}
-    now = datetime.now()
+    now = mood_now or datetime.now()
 
     def previous_return_time(name):
         previous = previous_returns.get(name)
@@ -2182,7 +2214,11 @@ def plan_metadata(op_data, tasks, *, excluded_names=()):
                 observed.individual_return_window = (identity, start)
         for bed in dorms:
             return_windows[bed.name] = (identity, start)
-        known = [bed.time for bed in dorms if bed.time is not None]
+        known = [
+            due
+            for bed in dorms
+            if (due := observed_recovery_deadline(op_data, bed.name, now)) is not None
+        ]
         if known:
             return min(known)
         # 缺少新倒计时不取消既有回班；普通回班生成时仍保留原有提前量。
@@ -2273,7 +2309,8 @@ def plan_metadata(op_data, tasks, *, excluded_names=()):
                 task_time = deadline
             else:
                 if not any(
-                    dorm.time is not None or previous_return_time(dorm.name) is not None
+                    observed_recovery_deadline(op_data, dorm.name, now) is not None
+                    or previous_return_time(dorm.name) is not None
                     for dorm in high_dorms
                 ):
                     continue
@@ -2289,13 +2326,15 @@ def plan_metadata(op_data, tasks, *, excluded_names=()):
             # high_droms 如果触发急救模式，后面的移送到急救前
             for room in high_dorms:
                 if room.name and (
-                    room.time is not None or previous_return_time(room.name) is not None
+                    observed_recovery_deadline(op_data, room.name, now) is not None
+                    or previous_return_time(room.name) is not None
                 ):
                     rest_in_full = op_data.operators[room.name].rest_in_full
                     task_time = (
                         normal_return_time([room])
                         if not rest_in_full
-                        else room.time or previous_return_time(room.name)
+                        else observed_recovery_deadline(op_data, room.name, now)
+                        or previous_return_time(room.name)
                     )
                     if task_time not in new_task:
                         new_task[task_time] = ([room], rest_in_full)
@@ -2309,12 +2348,11 @@ def plan_metadata(op_data, tasks, *, excluded_names=()):
     if op_data.config.free_room:
         for room in free_rooms:
             operator = op_data.operators[room.name]
-            observed_full = (
-                operator.time_stamp is not None
-            ) and operator.mood >= operator.upper_limit
-            if (room.time or observed_full) and room.name:
+            observed_full = recovery_mood_complete(op_data, operator, now)
+            due = observed_recovery_deadline(op_data, room.name, now)
+            if (due or observed_full) and room.name:
                 # 清退使用个人回满时刻；主班抢床交给轮休层级接管。
-                task_time = datetime.now() if observed_full else room.time
+                task_time = now if observed_full else due
                 release_tasks.setdefault(task_time, ([], None))[0].append(room)
     # 独立的个人离宿时刻不受整组回满、不养闲人和任务合并影响。
     generated = generate_plan_by_drom(
@@ -2525,7 +2563,9 @@ def plan_mood_limit_releases(op_data, *, recovery_targets=None, previous_tasks=(
             and has_resting_mood(op)
         ):
             due = None
-            if op.mood >= target:
+            if getattr(op_data, "mood_calculation_enabled", False):
+                due = op_data.calculated_mood_deadline(op.name, target, now)
+            elif op.mood >= target:
                 due = now
             elif (
                 bed.time is not None
@@ -2554,6 +2594,10 @@ def plan_mood_limit_releases(op_data, *, recovery_targets=None, previous_tasks=(
         complete = op_data.rest_mood_complete(op.name)
         if complete:
             due = now
+        elif getattr(op_data, "mood_calculation_enabled", False):
+            due = op_data.calculated_mood_deadline(op.name, op.upper_limit, now)
+            if due is None:
+                continue
         elif bed.time is not None:
             due = max(now, bed.time)
         else:
@@ -2562,7 +2606,11 @@ def plan_mood_limit_releases(op_data, *, recovery_targets=None, previous_tasks=(
         room, index = bed.position
         names = ["Current"] * len(op_data.plan[room])
         names[index] = "Free"
-        source = (bed.time, op.upper_limit, complete)
+        source = (
+            (op_data.mood_model.revision, op_data.mood_model.rules_hash, op.upper_limit)
+            if getattr(op_data, "mood_calculation_enabled", False)
+            else (bed.time, op.upper_limit, complete)
+        )
         task = previous.get(op.name)
         if (
             task is None
@@ -3110,12 +3158,17 @@ def try_add_release_dorm(
             for name in names:
                 if name not in op_data.operators or time is None:
                     continue
+                from arknights_mower.utils.group_recovery import (
+                    observed_recovery_deadline,
+                )
+
                 _, bed = op_data.get_dorm_by_name(name)
+                due = observed_recovery_deadline(op_data, name)
                 if (
                     bed is not None
                     and op_data.is_effective_free_slot(bed)
-                    and bed.time is not None
-                    and bed.time < time
+                    and due is not None
+                    and due < time
                 ):
                     add_release_dorm(tasks, op_data, name)
         return
@@ -3136,7 +3189,6 @@ def try_add_release_dorm(
                 name
                 for name in candidates.estimated_recovering
                 if name in op_data.operators
-                and resting_tier(op_data, name) <= RestingTier.PRIORITY_REPLACEMENT
             ],
             key=lambda name: (
                 resting_tier(op_data, name),
@@ -3166,7 +3218,10 @@ def try_add_release_dorm(
 
         filling_vacancies = bool(vacancies)
         arrangement = {}
-        beds_to_visit = op_data.ordered_dorms()
+        beds_to_visit = sorted(
+            op_data.ordered_dorms(),
+            key=lambda bed: not is_full_dorm_filler(op_data, bed.name, now),
+        )
         for bed in beds_to_visit:
             room, index = bed.position
             if room in arrangement and arrangement[room][index] != "Current":
@@ -3201,7 +3256,13 @@ def try_add_release_dorm(
                     (
                         name
                         for name in recovering
-                        if bed_takeover_allowed(op_data, name, occupant.name)
+                        if (
+                            name in candidates.recovering
+                            or resting_tier(op_data, name)
+                            <= RestingTier.PRIORITY_REPLACEMENT
+                            or is_full_dorm_filler(op_data, occupant.name, now)
+                        )
+                        and bed_takeover_allowed(op_data, name, occupant.name)
                         and op_data._slot_takable(bed, requester=name, plan=arrangement)
                     ),
                     None,
@@ -3311,8 +3372,12 @@ def add_release_dorm(tasks, op_data, name):
     if not op_data.config.free_room or op_data.skip_idle_dorm_release(name):
         return
     _idx, __dorm = op_data.get_dorm_by_name(name)
+    from arknights_mower.utils.group_recovery import observed_recovery_deadline
+
+    due = observed_recovery_deadline(op_data, name) if __dorm else None
     if (
-        __dorm.time > datetime.now()
+        due is not None
+        and due > datetime.now()
         and find_next_task(
             tasks,
             task_type=TaskTypes.RELEASE_DORM,
@@ -3326,7 +3391,7 @@ def add_release_dorm(tasks, op_data, name):
             __plan = {_free.current_room: ["Current"] * 5}
             __plan[_free.current_room][_free.current_index] = "Free"
             task = SchedulerTask(
-                time=__dorm.time,
+                time=due,
                 task_type=TaskTypes.RELEASE_DORM,
                 task_plan=__plan,
                 meta_data=name,
@@ -3518,6 +3583,8 @@ class SchedulerTask:
 
     @property
     def display_name(self):
+        if target := getattr(self, "replacement_check", None):
+            return self.meta_data or f"替班心情检查：{target['cover']}"
         if self.type == TaskTypes.SELF_CORRECTION and getattr(
             self, "exhaust_support", False
         ):

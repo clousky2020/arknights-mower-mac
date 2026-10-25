@@ -50,6 +50,9 @@ _DB_TABLE_STMTS = (
     "operators TEXT, materials TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS recycling_collection_time "
     "ON recycling_collection(collected_at)",
+    "CREATE TABLE IF NOT EXISTS recycling_report_progress ("
+    "event_id TEXT PRIMARY KEY, status TEXT NOT NULL, next_unit INTEGER NOT NULL DEFAULT 0,"
+    "base_ms INTEGER, end_ms INTEGER)",
     "CREATE TABLE IF NOT EXISTS recycling_valuation ("
     "id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS workshop_inventory_updates ("
@@ -109,6 +112,12 @@ def _ensure_tables(conn):
                 )
         conn.execute(
             'CREATE INDEX IF NOT EXISTS agent_action_name_time ON agent_action(name, "current_time")'
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS agent_action_mood_directory "
+            'ON agent_action(name, "current_time", mood) '
+            "WHERE name IS NOT NULL AND TRIM(name) <> '' "
+            'AND mood IS NOT NULL AND "current_time" IS NOT NULL'
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS agent_action_working_time "
@@ -267,6 +276,9 @@ def current_state():
         "waiting_group_shifts": getattr(base_scheduler, "waiting_group_shifts", []),
         "party_time": data.party_time,
         "operators": data.operators,
+        "calculated_mood": copy.deepcopy(vars(data.mood_model))
+        if getattr(data, "mood_model", None) is not None
+        else None,
         "facility_states": getattr(data, "facility_states", {}),
         "room_observations": getattr(data, "room_observations", {}),
         "recall_recovery_rates": copy.deepcopy(
@@ -332,6 +344,16 @@ def save_state_to_db(saved_state):
 
     current_time = datetime.now()
 
+    # 运行引用不写进 pickle，旧版本仍能读取实际驻员及未完成任务。
+    persisted = dict(saved_state)
+    if "operators" in persisted:
+        persisted["operators"] = {}
+        for name, operator in saved_state["operators"].items():
+            detached = copy.copy(operator)
+            detached.__dict__.pop("_mood_model", None)
+            detached.__dict__.pop("_mood_conf", None)
+            persisted["operators"][name] = detached
+
     try:
         with _conn() as connection:
             cursor = connection.cursor()
@@ -340,7 +362,7 @@ def save_state_to_db(saved_state):
                 "INSERT INTO saved_state VALUES (?, ?)",
                 (
                     str(current_time),
-                    sqlite3.Binary(pickle.dumps(saved_state)),
+                    sqlite3.Binary(pickle.dumps(persisted)),
                 ),
             )
             connection.commit()
@@ -767,6 +789,11 @@ def save_recycling_collection(event_id, collected_at, operators, materials):
                 json.dumps(materials or {}, ensure_ascii=False),
             ),
         )
+        if cursor.rowcount == 1:
+            connection.execute(
+                "INSERT INTO recycling_report_progress (event_id, status) VALUES (?, 'waiting')",
+                (event_id,),
+            )
         connection.commit()
         return cursor.rowcount == 1
 
@@ -975,12 +1002,22 @@ def get_recycling_history(start_date, end_date, page=1, page_size=50):
         connection.execute("BEGIN")
         result = _recycling_summary(connection, bounds)
         rows = connection.execute(
-            "SELECT event_id, collected_at, operators, materials "
-            "FROM recycling_collection WHERE collected_at >= ? AND collected_at < ? "
-            "ORDER BY collected_at DESC, event_id DESC LIMIT ? OFFSET ?",
+            "SELECT c.event_id, c.collected_at, c.operators, c.materials, p.status "
+            "FROM recycling_collection c LEFT JOIN recycling_report_progress p "
+            "ON p.event_id = c.event_id "
+            "WHERE c.collected_at >= ? AND c.collected_at < ? "
+            "ORDER BY c.collected_at DESC, c.event_id DESC LIMIT ? OFFSET ?",
             (*bounds, page_size, (page - 1) * page_size),
         )
-        result["records"] = [_recycling_snapshot(row) for row in rows]
+        result["records"] = [
+            {
+                **_recycling_snapshot(row[:4]),
+                "upload_status": (row[4] or "pending")
+                if json.loads(row[3])
+                else "skipped",
+            }
+            for row in rows
+        ]
         return result
 
 
