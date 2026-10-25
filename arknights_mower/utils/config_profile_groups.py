@@ -2,7 +2,7 @@
 
 CONF_GROUPS = {
     "device": set(
-        "adb custom_screenshot device droidcast fix_mumu12_adb_disconnect maa_adb_path mumu12IPC package_type simulator tap_to_launch_game touch_method".split()
+        "adb custom_screenshot device droidcast fix_mumu12_adb_disconnect maa_adb_path mumu12IPC package_type simulator tap_to_launch_game touch_fallback touch_method".split()
     ),
     "runtime": set(
         "close_simulator_when_idle exit_game_when_idle low_frame_rate_mode performance_mode return_home_when_idle screenshot_interval selection_poll_interval selection_transition_timeout start_automatically waiting_scene".split()
