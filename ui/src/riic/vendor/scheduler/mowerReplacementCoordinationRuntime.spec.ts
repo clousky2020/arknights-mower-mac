@@ -4,12 +4,13 @@ import {getMowerSourceRuntime,settleMowerSource} from './mowerSourceRuntime'
 import {MowerDormState} from './mowerSchedulingData'
 import {mowerUrgentRecallBlocked} from './mowerUrgentRecovery'
 import {MowerTask,MOWER_TASK_TYPES as T,toMowerMicros} from './mowerTaskQueue'
+import {nextMowerMoodPlanningWake} from './mowerPlanningWake'
 
 const rates={workRate:()=>1,recoveryRate:(name:string)=>name==='A'?1:4,forecastRates:(state:RuntimeState)=>({work:Object.fromEntries(Object.keys(state.morale).map(name=>[name,1])),recovery:Object.fromEntries(Object.keys(state.morale).map(name=>[name,name==='A'?1:4]))})}
-function fixture(alternates=['Y'],third?:'chain'|'occupied'){
+function fixture(alternates=['Y'],third?:'chain'|'occupied'|'working'){
  const rows:NonNullable<RuntimeConfig['mowerSourcePlan']>={room_1_1:[{agent:'A',group:'a',replacement:['X',...alternates]}],room_1_2:[{agent:'B',group:'b',replacement:['X']}],dormitory_1:[...['K1','K2'].map(agent=>({agent,group:'',replacement:[]})),...['Free','Free','Free'].map(agent=>({agent,group:'',replacement:[]}))]}
  if(third)rows.room_1_3=[{agent:'C',group:'c',replacement:third==='chain'?['Y','Z']:['Y']}]
- const config:RuntimeConfig={mowerAlpha:true,mowerSourcePlan:rows,positions:Object.entries(rows).flatMap(([room,row])=>row.flatMap((slot,index)=>slot.agent==='Free'?[]:[{id:`${room}_${index}`,roomId:room,primary:slot.agent,candidates:slot.replacement,group:slot.group,permanent:room.startsWith('dorm'),dormitory:room.startsWith('dorm')}])),beds:[2,3,4].map(index=>({id:`dormitory_1_${index}`,roomId:'dormitory_1',vip:index===2})),initialMorale:{A:4,C:4,B:0,X:24,Y:24,Z:24},idleOperators:['Idle1','Idle2','Idle3'],mowerPolicy:{restingThreshold:.65,powerPlantCount:2,opeRestingPriority:[]},mowerSourceRules:{workaholic:[],exhaustRequire:['B'],restInFull:['A','B',...(third?['C']:[])],lowPriority:[],refreshDrained:[],lingMode:0},mowerRunLoopClock:{minimumClockStepMicros:1,notificationSleepMicros:1_000_000}}
+ const config:RuntimeConfig={mowerAlpha:true,mowerSourcePlan:rows,positions:Object.entries(rows).flatMap(([room,row])=>row.flatMap((slot,index)=>slot.agent==='Free'?[]:[{id:`${room}_${index}`,roomId:room,primary:slot.agent,candidates:slot.replacement,group:slot.group,permanent:room.startsWith('dorm'),dormitory:room.startsWith('dorm')}])),beds:[2,3,4].map(index=>({id:`dormitory_1_${index}`,roomId:'dormitory_1',vip:index===2})),initialMorale:{A:4,C:third==='working'?16:4,B:0,X:24,Y:24,Z:24},idleOperators:['Idle1','Idle2','Idle3'],mowerPolicy:{restingThreshold:.65,powerPlantCount:2,opeRestingPriority:[]},mowerSourceRules:{workaholic:[],exhaustRequire:['B'],restInFull:['A','B',...(third?['C']:[])],lowPriority:[],refreshDrained:[],lingMode:0},mowerRunLoopClock:{minimumClockStepMicros:1,notificationSleepMicros:1_000_000}}
  const state=createRosterRuntime(config),source=getMowerSourceRuntime(state),data=source.data
  source.initial=false
  for(const position of config.positions){const op=data.operators[position.primary]!;Object.assign(op,{currentRoom:position.roomId,currentIndex:Number(position.id.slice(position.id.lastIndexOf('_')+1)),mood:state.morale[op.name]??24,timeStampMicros:0,depletionRate:1})}
@@ -17,7 +18,7 @@ function fixture(alternates=['Y'],third?:'chain'|'occupied'){
  Object.assign(data.operators.A!,{currentRoom:'dormitory_1',currentIndex:2,mood:4,timeStampMicros:0})
  Object.assign(data.operators.X!,{currentRoom:'room_1_1',currentIndex:0,mood:24,timeStampMicros:0,depletionRate:1})
  data.dorms=[new MowerDormState(['dormitory_1',2],'A',toMowerMicros(20)),new MowerDormState(['dormitory_1',3]),new MowerDormState(['dormitory_1',4])]
- if(third){
+ if(third&&third!=='working'){
   state.occupants.room_1_3_0='Y';state.bedOccupants.dormitory_1_3='C'
   Object.assign(data.operators.C!,{currentRoom:'dormitory_1',currentIndex:3,mood:4,timeStampMicros:0})
   Object.assign(data.operators.Y!,{currentRoom:'room_1_3',currentIndex:0,mood:24,timeStampMicros:0,depletionRate:1})
@@ -37,6 +38,23 @@ function dispatchUntil(state:RuntimeState,done:()=>boolean,maxSteps=50){
 }
 
 describe('replacement coordination through source runtime',()=>{
+ it.each([false,true].flatMap(predictiveMoodControl=>['patrol','planning'].map(recheck=>({predictiveMoodControl,recheck}))))('requires full-recovery endurance despite $recheck with saved mood mode=$predictiveMoodControl',({predictiveMoodControl,recheck})=>{
+  const {state,source}=fixture([],recheck==='planning'?'working':undefined)
+  state.config.mowerPolicy!.predictiveMoodControl=predictiveMoodControl
+  source.data.policy.predictiveMoodControl=predictiveMoodControl
+  state.config.mowerSourceRules!.restInFull=['B'];source.data.operators.A!.restInFull=false
+  source.data.operators.B!.exhaustRequire=false;state.config.mowerSourceRules!.exhaustRequire=[]
+  source.queue.tasks[0]!.ordinaryCoordination=true
+  if(recheck==='planning'){
+   source.planningWake=nextMowerMoodPlanningWake(state,source.data,rates)
+   expect(source.planningWake).toEqual({timeMicros:toMowerMicros(1),names:['C']})
+  }else source.queue.tasks.push(new MowerTask({time:1}))
+  settleMowerSource(state,rates)
+  expect(source.queue.tasks.some(task=>task.exhaustSupport)).toBe(false)
+  expect(state.occupants.room_1_1_0).toBe('X')
+  expect(state.occupants.room_1_2_0).toBe('B')
+  expect(Object.values(state.bedOccupants)).toContain('A')
+ })
  it.each([{mood:4,rate:1,allowed:false,ordinary:true},{mood:4,rate:1,allowed:true,ordinary:false},{mood:20,rate:1,allowed:true,ordinary:true}])('recall feasibility uses remaining work endurance: $mood mood, $rate depletion',({mood,rate,allowed,ordinary})=>{
   const {state,source}=fixture([])
   state.config.mowerSourceRules!.restInFull=['B'];source.data.operators.A!.restInFull=false

@@ -106,6 +106,16 @@ def recovery_failure_details(previous, *, reason, message, exit_code=None):
         isinstance(previous, dict)
         and previous.get("active") is True
         and previous.get("startup") is not True
+        and not (
+            previous.get("reason") == "worker_exception"
+            and reason
+            in {
+                "process_exit",
+                "process_creation",
+                "startup_timeout",
+                "http_unresponsive",
+            }
+        )
     ):
         details.pop("exit_code", None)
         for key in ("occurred_at", "reason", "trigger_message", "exit_code"):
@@ -564,6 +574,7 @@ def hidden_console_options():
 def launch_environment(record, job_id="", background=False):
     env = os.environ.copy()
     env.pop("MOWER_RECOVERY_RUN", None)
+    env.pop("MOWER_UPDATE_REPLAN", None)
     # A frozen child must initialize its own bootloader/runtime, including after
     # replacement of the bundle. System subprocesses must not inherit private libs.
     env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"

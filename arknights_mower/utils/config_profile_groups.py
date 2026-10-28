@@ -8,7 +8,7 @@ CONF_GROUPS = {
         "close_simulator_when_idle exit_game_when_idle low_frame_rate_mode performance_mode return_home_when_idle screenshot_interval selection_poll_interval selection_transition_timeout start_automatically waiting_scene".split()
     ),
     "daily": set(
-        "check_mail_enable mail_skip_clear_read maa_depot_enable maa_enable maa_gap maa_mail maa_mining maa_orundum maa_recruit maa_specialaccess report_enable sign_in skland_enable".split()
+        "check_mail_enable event_sign_in_enable mail_skip_clear_read maa_depot_enable maa_enable maa_event_shop maa_gap maa_mail maa_mining maa_orundum maa_recruit maa_signinevent maa_specialaccess report_enable sign_in skland_enable".split()
     ),
     "trust": set(
         "trust_rotation_enable trust_rotation_interval trust_rotation_prefer_low trust_rotation_threshold".split()
@@ -27,7 +27,7 @@ CONF_GROUPS = {
         "maa_auto_check_update maa_auto_update maa_conn_preset maa_mirrorchyan_token maa_path maa_resource_auto_check_update maa_resource_auto_update maa_restore_theme maa_restore_theme_enable maa_touch_option maa_update_channel".split()
     ),
     "long": set(
-        "maa_long_task_type maa_rcl_theme maa_rg_enable maa_rg_sleep_max maa_rg_sleep_min maa_rg_theme rcl reclamation_algorithm rogue secret_front sss".split()
+        "copilot paradox maa_long_task_type maa_rcl_theme maa_rg_enable maa_rg_sleep_max maa_rg_sleep_min maa_rg_theme rcl reclamation_algorithm rogue secret_front sss".split()
     ),
     "accounts": {"skland_info"},
     "notifications": set(
@@ -42,7 +42,7 @@ CONF_GROUPS = {
     ),
     "rescue_plan": {"automatic_rescue_enable"},
     "base": set(
-        "assistant_follows_schedule dorm_isolation enable_mastery favorite fia_fool fia_threshold free_blacklist free_room group_mood_gap_exclusions group_mood_gap_max_extra_wait_hours group_mood_gap_threshold_minutes group_rest_in_full_on_mood_gap merge_interval product_switching rescue_threshold resting_threshold right_side_room_order swap_contact_train test_mood_calculation version_update_resting_threshold version_update_threshold_advance_hours".split()
+        "assistant_follows_schedule dorm_isolation enable_mastery favorite fia_fool fia_threshold free_blacklist free_room group_mood_gap_exclusions group_mood_gap_max_extra_wait_hours group_mood_gap_threshold_minutes group_rest_in_full_on_mood_gap group_resting_thresholds merge_interval product_switching rescue_threshold resting_threshold right_side_room_order swap_contact_train test_mood_calculation version_update_resting_threshold version_update_threshold_advance_hours".split()
     ),
     "runorder": {"run_order_delay", "run_order_grandet_mode"},
     "drone": {"drone_count_limit", "drone_interval", "drone_room"},

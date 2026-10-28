@@ -43,6 +43,7 @@ def status():
     with _lock:
         automatic = (
             value["active"]
+            and value.get("reason") != "worker_exception"
             and value.get(
                 "resume_requested", os.environ.get("MOWER_RECOVERY_RUN") != "0"
             )
@@ -127,6 +128,24 @@ def cancelled():
         return _cancelled
 
 
+def _retire_worker_failure(path, raw):
+    if (
+        isinstance(raw, dict)
+        and raw.get("active") is True
+        and raw.get("reason") == "worker_exception"
+    ):
+        raw = dict(raw)
+        raw.update(
+            active=False,
+            phase="stopped",
+            resume_requested=False,
+            next_retry_at=None,
+        )
+        runtime.write_json(path, raw, sync=True)
+        _progress.clear()
+    return raw
+
+
 def initialize_intent(wanted, *, startup=False, start_type="0"):
     """Resolve an unready launch from its actual startup policy, honoring Stop."""
     with _lock:
@@ -134,6 +153,7 @@ def initialize_intent(wanted, *, startup=False, start_type="0"):
         os.environ["MOWER_RECOVERY_RUN"] = "1" if wanted else "0"
         path = notice_path()
         raw = runtime.read_json(path) if path is not None else None
+        raw = _retire_worker_failure(path, raw)
         if isinstance(raw, dict) and raw.get("active") is True:
             values = {"resume_requested": wanted, "startup": startup}
             if startup and wanted:
@@ -141,7 +161,7 @@ def initialize_intent(wanted, *, startup=False, start_type="0"):
                     "2" if start_type == "2" else pending_start_type() or start_type
                 )
                 values["reset_observation_pending"] = values["start_type"] == "2"
-                if values["start_type"] in ("1", "2"):
+                if values["start_type"] in ("1", "2", "3"):
                     values["pending_start_type"] = values["start_type"]
                 values.update(
                     phase="waiting",
@@ -165,7 +185,7 @@ def initialize_intent(wanted, *, startup=False, start_type="0"):
                 selected = (
                     "2" if start_type == "2" else pending_start_type() or start_type
                 )
-                if selected in ("1", "2"):
+                if selected in ("1", "2", "3"):
                     raw.update(
                         start_type=selected,
                         pending_start_type=selected,
@@ -180,6 +200,9 @@ def request_resume(start_type="0"):
     global _cancelled
     with _lock:
         _cancelled = False
+        path = notice_path()
+        raw = runtime.read_json(path) if path is not None else None
+        _retire_worker_failure(path, raw)
         if start_type != "2":
             start_type = pending_start_type() or start_type
         if status()["active"]:
@@ -188,7 +211,9 @@ def request_resume(start_type="0"):
                 startup=True,
                 start_type=start_type,
                 reset_observation_pending=start_type == "2",
-                pending_start_type=start_type if start_type in ("1", "2") else None,
+                pending_start_type=start_type
+                if start_type in ("1", "2", "3")
+                else None,
                 phase="waiting",
                 message="正在重新观察设备、驻员和心情，按所选启动方式继续调度。",
             )
@@ -198,7 +223,7 @@ def request_resume(start_type="0"):
                 raw = runtime.read_json(path) or {"active": False, "phase": "resolved"}
                 raw["reset_observation_pending"] = start_type == "2"
                 raw["pending_start_type"] = (
-                    start_type if start_type in ("1", "2") else None
+                    start_type if start_type in ("1", "2", "3") else None
                 )
                 runtime.write_json(path, raw, sync=True)
 
@@ -212,7 +237,7 @@ def pending_start_type():
     if current.get("reset_observation_pending"):
         return "2"
     selected = current.get("pending_start_type")
-    return selected if selected in ("1", "2") else None
+    return selected if selected in ("1", "2", "3") else None
 
 
 def checkpoint_reset(scheduler):
@@ -230,18 +255,23 @@ def checkpoint_reset(scheduler):
 def checkpoint_start(scheduler):
     if pending_start_type() == "2":
         return checkpoint_reset(scheduler)
-    if pending_start_type() != "1":
+    if pending_start_type() not in ("1", "3"):
         return
     from arknights_mower.solvers.record import save_current_state
 
     scheduler._state_restore_complete = True
     try:
         if not save_current_state():
-            raise RuntimeError("清空任务后的状态暂未保存，保留所选启动方式等待重试")
+            message = (
+                "更新重规划后的状态暂未保存，保留重要任务和所选启动方式等待重试"
+                if pending_start_type() == "3"
+                else "清空任务后的状态暂未保存，保留所选启动方式等待重试"
+            )
+            raise RuntimeError(message)
         with _lock:
             path = notice_path()
             raw = runtime.read_json(path) if path is not None else None
-            if isinstance(raw, dict) and raw.get("pending_start_type") == "1":
+            if isinstance(raw, dict) and raw.get("pending_start_type") in ("1", "3"):
                 raw["pending_start_type"] = None
                 runtime.write_json(path, raw, sync=True)
     except BaseException:
@@ -250,43 +280,35 @@ def checkpoint_start(scheduler):
 
 
 def activate(message):
-    """A failed Python worker uses the same recovery boundary as native exit."""
+    """Record a failed attempt only within an existing process recovery."""
     path = notice_path()
     if path is None or _cancelled:
         return
     with _lock:
         raw = runtime.read_json(path)
-        if path.exists() and (
-            not isinstance(raw, dict) or type(raw.get("active")) is not bool
+        if (
+            _cancelled
+            or not isinstance(raw, dict)
+            or raw.get("active") is not True
+            or raw.get("reason") == "worker_exception"
         ):
             return
+        previous = {**raw, "startup": False}
+        details = runtime.recovery_failure_details(
+            previous, reason="worker_exception", message=message
+        )
+        if "reason" not in raw:
+            details.pop("reason", None)
+        raw.update(
+            startup=False,
+            phase="waiting",
+            message=message,
+            next_retry_at=None,
+            **details,
+        )
         runtime.write_json(
             path,
-            {
-                "active": True,
-                "startup": False,
-                "phase": "waiting",
-                "resume_requested": True,
-                "start_type": (
-                    "2"
-                    if isinstance(raw, dict) and raw.get("reset_observation_pending")
-                    else raw.get("pending_start_type") or raw.get("start_type", "0")
-                    if isinstance(raw, dict)
-                    and (raw.get("active") or raw.get("pending_start_type"))
-                    else "0"
-                ),
-                "reset_observation_pending": bool(
-                    isinstance(raw, dict) and raw.get("reset_observation_pending")
-                ),
-                "pending_start_type": raw.get("pending_start_type")
-                if isinstance(raw, dict)
-                else None,
-                "message": message,
-                "next_retry_at": None,
-                **runtime.recovery_failure_details(
-                    raw, reason="worker_exception", message=message
-                ),
-            },
+            raw,
             sync=True,
         )
         _progress.clear()

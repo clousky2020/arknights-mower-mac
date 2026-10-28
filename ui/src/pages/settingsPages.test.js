@@ -13,6 +13,7 @@ import MowerSettings from './Settings.vue'
 import TaskConfiguration from '@/task-workflow/TaskConfiguration.vue'
 import TaskSettingsPanels from '@/components/TaskSettingsPanels.vue'
 import { routes } from '@/routes'
+import { themeSelectionKey } from '@/composables/themeSelection'
 
 const state = vi.hoisted(() => ({ segmented: [], actions: {} }))
 
@@ -48,7 +49,7 @@ vi.mock('naive-ui', async (original) => {
           content.push(slots.default?.())
         }
         if (['NInput', 'NInputNumber'].includes(name)) {
-          content.push(h('input', { value: props.value, disabled: props.disabled }))
+          content.push(h('input', { value: props.value, disabled: props.disabled, min: attrs.min }))
         }
         return h('div', { 'data-control': name }, content)
       }
@@ -103,7 +104,7 @@ function setup(Page, overrides = {}, setTheme, pageProps = {}) {
   app.provide('axios', axios)
   app.provide('loaded', ref(false))
   app.provide('mobile', ref(false))
-  if (setTheme) app.provide('set_theme_with_transition', setTheme)
+  if (setTheme) app.provide(themeSelectionKey, setTheme)
   store = app.runWithContext(() => useConfigStore())
   plan = app.runWithContext(() => usePlanStore())
   app.runWithContext(() => useMowerStore()).updates_enabled = true
@@ -144,6 +145,19 @@ function attribute(node, name) {
 }
 
 describe('settings page ownership', () => {
+  it.each([0, 19, 20, 100])('无人机输入框传递最小值 20 和当前值 %s', async (limit) => {
+    const html = await renderToString(setup(TaskSettingsPanels, { drone_count_limit: limit }))
+    const forms = elements(parseHtml(html)).filter(
+      (node) => attribute(node, 'data-control') === 'NFormItem'
+    )
+    const field = forms.find((node) => node.loc.source.includes('无人机使用阈值'))
+    expect(field).toBeDefined()
+    const input = elements(field).find((node) => node.tag === 'input')
+    expect(attribute(input, 'min')).toBe('20')
+    expect(attribute(input, 'value')).toBe(String(limit))
+    expect(store.drone_count_limit).toBe(limit)
+  })
+
   it.each([false, null])('keeps update controls hidden with permission %s', async (permission) => {
     const app = setup(MowerSettings)
     app.runWithContext(() => useMowerStore()).updates_enabled = permission
@@ -159,6 +173,7 @@ describe('settings page ownership', () => {
     for (const label of [
       '界面缩放',
       '软件版本显示',
+      '版本水印',
       '版本类型',
       '邮件提醒',
       '软件更新',
@@ -197,7 +212,7 @@ describe('settings page ownership', () => {
     expect(axios.patch).not.toHaveBeenCalled()
   })
 
-  it('passes the shared theme selector choice to the injected transition owner', async () => {
+  it('lets the application capture the old appearance before applying a theme selection', async () => {
     const setTheme = vi.fn()
     const html = await renderToString(setup(MowerSettings, { theme: 'light' }, setTheme))
     const control = state.segmented.find((entry) => entry.label === '显示主题')
@@ -301,14 +316,14 @@ describe('settings page ownership', () => {
     const legacyTasks = children.find((route) => route.path === 'maasettings')
     expect(legacyTasks.component).toBeUndefined()
     expect(legacyTasks.redirect({ query: { token: 'demo' }, hash: '#task-devices' })).toEqual({
-      name: 'task-settings',
+      name: 'settings',
       query: { token: 'demo' },
       hash: '#task-devices'
     })
     const legacyMower = children.find((route) => route.path === 'mowersettings')
     expect(legacyMower.component).toBeUndefined()
     expect(legacyMower.redirect({ query: { token: 'demo' }, hash: '#mower-data' })).toEqual({
-      name: 'task-settings',
+      name: 'settings',
       query: { token: 'demo' },
       hash: '#mower-data'
     })
@@ -435,6 +450,7 @@ describe('settings page layouts', () => {
       'depot',
       'stage-plan',
       'rewards',
+      'event-shop',
       'long',
       'accounts',
       'maa',
@@ -490,6 +506,7 @@ describe('settings page layouts', () => {
       'depot',
       'credit',
       'rewards',
+      'event-shop',
       'stage-plan',
       'long',
       'intervals',

@@ -5,6 +5,7 @@ read_csv / DataFrame.to_csv / iloc 迭代 / to_dict 等少量 CSV 能力。
 """
 
 import csv
+import io
 import math
 import os
 
@@ -17,6 +18,30 @@ class EmptyDataError(Exception):
     pass
 
 
+def _read_csv_text(path, encoding):
+    """按 UTF-8 BOM / UTF-8 / GBK 顺序解码 CSV 文本。
+
+    Windows 导出的 UTF-8 BOM 文件用 GBK 解码不会报错，只会让首列名残留
+    BOM 字节，因此必须先检测 BOM；其余情况优先尝试 UTF-8，再回退到 GBK。
+    调用方传入其它编码（如 UTF-16）时先按该编码解码。
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig")
+    if encoding in (None, "utf-8", "utf-8-sig", "gbk"):
+        candidates = ["utf-8-sig", "utf-8", "gbk"]
+    else:
+        candidates = [encoding, "utf-8-sig", "utf-8", "gbk"]
+    last_exc = None
+    for candidate in candidates:
+        try:
+            return raw.decode(candidate)
+        except UnicodeDecodeError as exc:
+            last_exc = exc
+    raise last_exc
+
+
 def read_csv_rows(path, encoding="utf-8", header="infer"):
     """读 CSV 为行列表。
 
@@ -24,9 +49,8 @@ def read_csv_rows(path, encoding="utf-8", header="infer"):
     header=False 时返回 [数据行...]（首行也是数据）。
     空文件或只有表头无数据时抛 EmptyDataError，与 pandas 行为一致。
     """
-    with open(path, encoding=encoding, newline="") as f:
-        reader = csv.reader(f)
-        rows = [row for row in reader if row]
+    reader = csv.reader(io.StringIO(_read_csv_text(path, encoding), newline=""))
+    rows = [row for row in reader if row]
     if header == "infer":
         header = True
     if header:
@@ -116,33 +140,30 @@ def read_dicts(path, encoding="utf-8"):
     """
     if os.path.getsize(path) == 0:
         raise EmptyDataError
-    with open(path, encoding=encoding, newline="") as f:
-        reader = csv.reader(f)
-        try:
-            raw_headers = next(reader)
-        except StopIteration:
-            raise EmptyDataError
-        # 空表头命名 Unnamed: N；重复表头使用 .N 后缀，构造位置唯一的列名
-        col_names = []
-        seen = set()
-        for i, name in enumerate(raw_headers):
-            if not name:
-                name = f"Unnamed: {i}"
-            new_name = name
-            suffix = 1
-            while new_name in seen:
-                new_name = f"{name}.{suffix}"
-                suffix += 1
-            seen.add(new_name)
-            col_names.append(new_name)
-        rows = []
-        for row in reader:
-            if not row:
-                continue
-            r = {
-                name: row[i] if i < len(row) else "" for i, name in enumerate(col_names)
-            }
-            rows.append(r)
-        if not rows:
-            raise EmptyDataError
-        return rows
+    reader = csv.reader(io.StringIO(_read_csv_text(path, encoding), newline=""))
+    try:
+        raw_headers = next(reader)
+    except StopIteration:
+        raise EmptyDataError
+    # 空表头命名 Unnamed: N；重复表头使用 .N 后缀，构造位置唯一的列名
+    col_names = []
+    seen = set()
+    for i, name in enumerate(raw_headers):
+        if not name:
+            name = f"Unnamed: {i}"
+        new_name = name
+        suffix = 1
+        while new_name in seen:
+            new_name = f"{name}.{suffix}"
+            suffix += 1
+        seen.add(new_name)
+        col_names.append(new_name)
+    rows = []
+    for row in reader:
+        if not row:
+            continue
+        r = {name: row[i] if i < len(row) else "" for i, name in enumerate(col_names)}
+        rows.append(r)
+    if not rows:
+        raise EmptyDataError
+    return rows

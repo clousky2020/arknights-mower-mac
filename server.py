@@ -20,8 +20,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 from zlib import error as ZlibError
 
-import pandas as pd
-from flask import Flask, abort, g, jsonify, request, send_file, send_from_directory
+from flask import Flask, abort, g, request, send_file, send_from_directory
 from flask_cors import CORS
 from flask_sock import Sock
 from pydantic import ValidationError
@@ -31,14 +30,13 @@ from werkzeug.security import safe_join
 
 from arknights_mower import __system__
 from arknights_mower.solvers.record import clear_data, load_state, save_state
-from arknights_mower.solvers.report import read_csv_with_encoding_fallback
-from arknights_mower.utils import config, network_settings
+from arknights_mower.utils import config, network_settings, round_stop
 from arknights_mower.utils.config.plan_advanced import (
     apply_advanced_settings,
     export_advanced_settings,
 )
 from arknights_mower.utils.config_backup import MAX_BACKUP_BYTES, backup_lock
-from arknights_mower.utils.csv_utils import parse_cell_num
+from arknights_mower.utils.csv_utils import EmptyDataError, parse_cell_num, read_dicts
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.diagnostics import (
     archive_window,
@@ -189,11 +187,16 @@ def _cancel_scheduled_start():
         scheduled_start_at = None
 
 
-def _run_scheduled_start(timer, generation):
+def _run_scheduled_start(timer, generation, start_type="2"):
     global scheduled_start_timer, scheduled_start_at
     from arknights_mower.utils.config_backup import LocalConfigError
     from arknights_mower.utils.config_profiles import ProfileConflict, check_generation
 
+    # A downtime can end while its old worker is finishing cleanup. Wait for
+    # that real dependency once, rather than trying to start a second worker.
+    worker = mower_thread
+    if start_type == "0" and worker and config.stop_mower.is_set():
+        worker.join(10)
     with backup_lock:
         with scheduled_start_lock:
             if scheduled_start_timer is not timer:
@@ -205,13 +208,13 @@ def _run_scheduled_start(timer, generation):
         except (ProfileConflict, LocalConfigError) as exc:
             logger.warning("预约启动已取消：%s", exc)
             return
-        if _start_mower("2"):
+        if _start_mower(start_type):
             logger.info("预约时间已到，Mower 开始执行")
         else:
             logger.warning("预约时间已到，但 Mower 当前无法启动")
 
 
-def _schedule_start(delay_seconds):
+def _schedule_start(delay_seconds, *, start_type="2"):
     global scheduled_start_timer, scheduled_start_at
     from arknights_mower.utils.config_profiles import current_generation
 
@@ -222,7 +225,9 @@ def _schedule_start(delay_seconds):
         scheduled_start_at = datetime.datetime.now().astimezone() + datetime.timedelta(
             seconds=delay_seconds
         )
-        timer = Timer(delay_seconds, lambda: _run_scheduled_start(timer, generation))
+        timer = Timer(
+            delay_seconds, lambda: _run_scheduled_start(timer, generation, start_type)
+        )
         timer.daemon = True
         scheduled_start_timer = timer
         timer.start()
@@ -927,6 +932,8 @@ def serialize_configuration_requests():
     if changes_configuration and request.path not in {
         "/gui/appearance",
         "/gui/sidebar",
+        "/gui/depot",
+        "/gui/log-background",
     }:
         check_token()
         from arknights_mower.utils.config_backup import LocalConfigError
@@ -1617,9 +1624,12 @@ def load_plan_from_json():
     else:
         from arknights_mower.utils.workshop_config import workshop_lock
 
-        plan = config.PlanModel(**request.json)
-        # 校验随排班保存的设置；网页配置保存仍负责更新运行配置。
-        apply_advanced_settings(config.conf, plan.advanced_settings)
+        try:
+            plan = config.PlanModel(**request.json)
+            # 校验随排班保存的设置；网页配置保存仍负责更新运行配置。
+            apply_advanced_settings(config.conf, plan.advanced_settings)
+        except (ValidationError, ValueError) as exc:
+            return {"error": "invalid_configuration", "message": str(exc)}, 400
         with workshop_lock:
             previous_plan = config.plan
             config.plan = plan
@@ -1904,11 +1914,21 @@ def get_status():
         "plan_condition": [],
         "status": "stopped",
         "scheduled_start_at": start_at,
+        "stop_after_round": bool(
+            mower_thread and mower_thread.is_alive() and round_stop.pending()
+        ),
         "next_task_time": None,
         "remaining_seconds": None,
+        "maintenance_pause": None,
     }
     if mower_thread and mower_thread.is_alive():
-        from arknights_mower.__main__ import base_scheduler, device_control
+        from arknights_mower.__main__ import (
+            base_scheduler,
+            device_control,
+            get_manual_pause,
+        )
+
+        response["maintenance_pause"] = get_manual_pause()
 
         device_state = device_control.status().status
         response["status"] = (
@@ -1977,28 +1997,59 @@ def _valid_preparation_serial(serial):
 
 
 def _run_mower_worker(saved_state, preparation_serial=None):
-    """Report a failed worker and retain automatic high-level recovery intent."""
+    """Stop failed workers; only an existing process recovery may retry them."""
     from arknights_mower.__main__ import main
     from arknights_mower.utils import crash_recovery
     from arknights_mower.utils.csleep import MowerExit
+    from arknights_mower.utils.news_checker import MaintenanceInfo
 
     try:
         if preparation_serial is None:
-            main(saved_state)
+            result = main(saved_state)
         else:
-            main(
+            result = main(
                 saved_state,
                 preparation_serial=preparation_serial,
             )
+        if isinstance(result, MaintenanceInfo):
+            # main has already saved the queue and closed the device session.
+            # Serialize this handoff with explicit stop/cancel and timer changes.
+            with backup_lock, scheduled_start_lock:
+                if shutdown.closing or crash_recovery.cancelled():
+                    return
+                _request_mower_stop()
+                if not result.restart_after_update:
+                    _cancel_scheduled_start()
+                    logger.info("停服更新已停止任务，按用户选择关闭 Mower 进程")
+                    shutdown.request("manual_server_update")
+                    return
+                start_at = _schedule_start(
+                    max(0, (result.end - datetime.datetime.now()).total_seconds()),
+                    start_type="0",
+                )
+            logger.info(f"停服更新已停止 Mower，已预约在 {start_at} 继续运行")
     except MowerExit:
         return
     except Exception as exc:
-        logger.exception("工作线程暂未完成，正在等待自动恢复")
+        if config.stop_mower.is_set():
+            _request_mower_stop()
+            logger.exception("工作线程已停止，请检查错误后手动启动")
+            return
         if not shutdown.closing and not config.stop_mower.is_set():
-            crash_recovery.activate(
-                f"工作线程发生异常：{exc}；后台退避后自动重新观察并接续任务。"
-            )
+            if crash_recovery.status().get("automatic"):
+                crash_recovery.activate(f"恢复期间工作线程发生异常：{exc}")
+                logger.exception("进程恢复尚未完成，保留任务等待后续恢复尝试")
+            else:
+                from arknights_mower.utils.instance_supervisor import task_intent
+
+                config.stop_mower.set()
+                try:
+                    task_intent(False)
+                except Exception:
+                    logger.exception("记录任务停止意图失败，工作线程已停止")
+                logger.exception("工作线程发生异常，本次任务运行已停止")
     finally:
+        round_stop.cancel()
         if saved_state.get("_process_crash_recovery"):
             from arknights_mower.utils import crash_recovery
 
@@ -2043,7 +2094,12 @@ def _start_mower(
             return False
         if start_type != "2":
             start_type = crash_recovery.pending_start_type() or start_type
-        if crash_recovery.status()["active"] and recovery_state is None:
+        current_recovery = crash_recovery.status()
+        if (
+            current_recovery["active"]
+            and current_recovery.get("reason") != "worker_exception"
+            and recovery_state is None
+        ):
             if automatic:
                 if not crash_recovery.status().get("automatic"):
                     return False
@@ -2056,6 +2112,7 @@ def _start_mower(
         tmp_dir.mkdir(exist_ok=True)
 
         config.stop_mower.clear()
+        round_stop.cancel()
         # Reset starts must not deserialize a snapshot from an older version.
         saved_state = (
             recovery_state
@@ -2064,6 +2121,10 @@ def _start_mower(
         )
         if start_type == "1":
             saved_state["tasks"] = []
+        elif start_type == "3":
+            from arknights_mower.utils.scheduler_task import replan_update_tasks
+
+            saved_state = replan_update_tasks(saved_state)
         mower_thread = Thread(
             target=_run_mower_worker,
             args=(saved_state,),
@@ -2089,9 +2150,7 @@ def _start_mower(
             set_mower_thread(None)
             config.stop_mower.set()
             try:
-                wanted = automatic and not crash_recovery.cancelled()
-                if wanted and not crash_recovery.status()["active"]:
-                    crash_recovery.activate("启动工作线程暂未成功，后台稍后自动重试。")
+                wanted = automatic and crash_recovery.status().get("automatic", False)
                 task_intent(wanted, automatic=wanted)
             except Exception:
                 logger.exception("记录任务停止意图失败，工作线程未启动")
@@ -2170,6 +2229,43 @@ def scheduled_start():
     return {"scheduled_start_at": start_at}
 
 
+@app.route("/maintenance-pause", methods=["DELETE"])
+@require_token
+def cancel_maintenance_pause():
+    from arknights_mower.__main__ import cancel_manual_pause
+
+    payload = request.get_json(silent=True)
+    pause_id = payload.get("id") if isinstance(payload, dict) else None
+    if not isinstance(pause_id, str) or not pause_id:
+        return {"error": "请指定要取消的闪断暂停"}, 400
+    if (
+        not mower_thread
+        or not mower_thread.is_alive()
+        or not cancel_manual_pause(pause_id)
+    ):
+        return {"error": "该闪断暂停已结束，请刷新状态"}, 409
+    return {"maintenance_pause": None}
+
+
+@app.route("/stop-after-round", methods=["PUT", "DELETE"])
+@require_token
+def stop_after_round():
+    with maa_maintenance_lock:
+        if request.method == "DELETE":
+            round_stop.cancel()
+        else:
+            if (
+                shutdown.closing
+                or active_job()
+                or not mower_thread
+                or not mower_thread.is_alive()
+                or _performance_test_status()["status"] == "running"
+                or not round_stop.request_stop()
+            ):
+                return {"error": "当前没有可等待结束的任务，或任务正在停止"}, 409
+        return {"stop_after_round": round_stop.pending()}
+
+
 @app.route("/stop")
 @require_token
 @save_state
@@ -2184,10 +2280,8 @@ def stop(*, user_requested=True):
     return str(_stop_mower()).lower()
 
 
-def _stop_mower(timeout=10, *, preserve_run_intent=False):
-    """Let the worker's run boundary restore preparation before it exits."""
-    global mower_thread
-
+def _request_mower_stop(*, preserve_run_intent=False):
+    """Signal a stop without joining the calling worker."""
     from arknights_mower.utils import crash_recovery
     from arknights_mower.utils.instance_supervisor import task_intent
 
@@ -2198,11 +2292,25 @@ def _stop_mower(timeout=10, *, preserve_run_intent=False):
         logger.exception("记录任务停止意图失败，继续取消工作线程")
     finally:
         config.stop_mower.set()
+        round_stop.cancel()
         if not preserve_run_intent:
             try:
                 crash_recovery.cancel()
             except Exception:
                 logger.exception("记录自动恢复取消失败，当前进程已停止后台重试")
+
+
+def _stop_mower(timeout=10, *, preserve_run_intent=False):
+    """Let the worker's run boundary restore preparation before it exits."""
+    global mower_thread
+
+    from arknights_mower.utils import crash_recovery
+    from arknights_mower.utils.instance_supervisor import task_intent
+
+    with scheduled_start_lock:
+        _request_mower_stop(preserve_run_intent=preserve_run_intent)
+        if not preserve_run_intent:
+            _cancel_scheduled_start()
     deadline = time.monotonic() + timeout
     if not maa_maintenance_lock.acquire(timeout=timeout):
         logger.error("等待任务状态锁超时，保留未完成的设备恢复记录")
@@ -2628,28 +2736,154 @@ def import_from_image():
     return "排班已加载"
 
 
+@app.route("/maa-copilot", methods=["GET", "POST"])
+@require_token
+def maa_copilot_library():
+    from arknights_mower.utils.maa_copilot import (
+        MAX_SCRIPT_BYTES,
+        list_scripts,
+        store_script,
+    )
+
+    with backup_lock:
+        try:
+            if request.method == "GET":
+                return {"scripts": list_scripts()}
+            upload = request.files.get("copilot")
+            if upload is None:
+                return {"message": "没有收到作业文件"}, 400
+            return store_script(upload.read(MAX_SCRIPT_BYTES + 1))
+        except (ValueError, TypeError, RecursionError):
+            return {
+                "message": "作业格式无效或存储已满，请检查文件并清理不再使用的作业"
+            }, 400
+        except OSError:
+            return {"message": "作业读写失败，请检查目录权限"}, 500
+
+
+@app.delete("/maa-copilot/<script_id>")
+@require_token
+def delete_maa_copilot(script_id):
+    from arknights_mower.utils.maa_copilot import script_path
+
+    with backup_lock, maa_maintenance_lock:
+        if any(item.id == script_id for item in config.conf.copilot.scripts):
+            return {"message": "请先将作业移出执行队列"}, 409
+        if _maa_busy_response():
+            return {"message": "MAA 正在使用中，请等待任务结束后删除作业"}, 409
+        try:
+            script_path(script_id).unlink(missing_ok=True)
+        except ValueError:
+            return {"message": "作业标识无效"}, 400
+        except OSError:
+            return {"message": "删除作业失败，请检查目录权限"}, 500
+    return {"ok": True}
+
+
+@app.route("/maa-event-shop", methods=["GET"])
+@require_token
+def maa_event_shop_navigation():
+    from arknights_mower.utils.config.weekly_plan_loader import get_weekly_plan_manager
+    from arknights_mower.utils.maa_event_shop import activity_shops
+
+    with backup_lock:
+        try:
+            return {
+                "shops": activity_shops(
+                    get_weekly_plan_manager()._current_server_timestamp()
+                )
+            }
+        except (ValueError, OSError):
+            logger.exception("读取活动商店资源失败")
+            return {"message": "活动商店资源无效，请更新资源包"}, 400
+
+
+@app.route("/maa-paradox", methods=["GET", "POST"])
+@require_token
+def maa_paradox_library():
+    from arknights_mower.utils.maa_copilot import (
+        MAX_SCRIPT_BYTES,
+        list_scripts,
+        store_script,
+    )
+
+    with backup_lock:
+        try:
+            if request.method in ("GET", "HEAD"):
+                return {"scripts": list_scripts(paradox=True)}
+            upload = request.files.get("copilot")
+            if upload is None:
+                return {"message": "没有收到作业文件"}, 400
+            return store_script(upload.read(MAX_SCRIPT_BYTES + 1), paradox=True)
+        except (ValueError, TypeError, RecursionError):
+            return {
+                "message": "作业格式无效或存储已满，请检查文件并清理不再使用的作业"
+            }, 400
+        except OSError:
+            return {"message": "作业读写失败，请检查目录权限"}, 500
+
+
+@app.delete("/maa-paradox/<script_id>")
+@require_token
+def delete_maa_paradox(script_id):
+    from arknights_mower.utils.maa_copilot import script_path
+
+    with backup_lock, maa_maintenance_lock:
+        if any(item.id == script_id for item in config.conf.paradox.scripts):
+            return {"message": "请先将作业移出执行队列"}, 409
+        if _maa_busy_response():
+            return {"message": "MAA 正在使用中，请等待任务结束后删除作业"}, 409
+        try:
+            script_path(script_id, paradox=True).unlink(missing_ok=True)
+        except ValueError:
+            return {"message": "作业标识无效"}, 400
+        except OSError:
+            return {"message": "删除作业失败，请检查目录权限"}, 500
+    return {"ok": True}
+
+
 @app.route("/sss-copilot", methods=["GET", "POST"])
 @require_token
 def upload_sss_copilot():
-    copilot = get_path("@app/sss.json")
-    if request.method == "GET":
-        if copilot.is_file():
-            with copilot.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        else:
-            return {"exists": False}
-    else:
-        logger.debug("上传保全派驻作业：%s", request.files)
-        data = request.files["copilot"]
-        data.save(copilot)
-        data.seek(0)
-        data = json.load(data)
-    return {
-        "exists": True,
-        "title": data["doc"]["title"],
-        "details": data["doc"]["details"],
-        "operators": data["opers"],
-    }
+    from arknights_mower.utils.maa_copilot import (
+        MAX_SCRIPT_BYTES,
+        list_scripts,
+        store_script,
+    )
+
+    with backup_lock:
+        try:
+            if request.method == "GET":
+                return {"scripts": list_scripts(sss=True)}
+            upload = request.files.get("copilot")
+            if upload is None:
+                return {"message": "没有收到作业文件"}, 400
+            return store_script(upload.read(MAX_SCRIPT_BYTES + 1), sss=True)
+        except (ValueError, TypeError, RecursionError):
+            return {
+                "message": "保全作业格式无效或存储已满，请检查文件并清理不再使用的作业"
+            }, 400
+        except OSError:
+            return {"message": "作业读写失败，请检查目录权限"}, 500
+
+
+@app.delete("/sss-copilot/<script_id>")
+@require_token
+def delete_sss_copilot(script_id):
+    from arknights_mower.utils.maa_copilot import script_path
+
+    with backup_lock, maa_maintenance_lock:
+        if any(item.id == script_id for item in config.conf.sss.scripts):
+            return {"message": "请先将作业移出执行队列"}, 409
+        if _maa_busy_response():
+            return {"message": "MAA 正在使用中，请等待任务结束后删除作业"}, 409
+        try:
+            script_path(script_id, sss=True).unlink(missing_ok=True)
+        except ValueError:
+            return {"message": "作业标识无效"}, 400
+        except OSError:
+            return {"message": "删除作业失败，请检查目录权限"}, 500
+    return {"ok": True}
 
 
 @app.route("/resource-update/manual", methods=["POST"])
@@ -3678,15 +3912,15 @@ def date2str(target: datetime.date):
 
 
 @app.route("/report/getReportData")
+@require_token
 def get_report_data():
     record_path = get_path("@app/tmp/report.csv")
     try:
         format_data = []
         if os.path.exists(record_path) is False:
             logger.debug("基报不存在")
-            return jsonify([])
-        df = read_csv_with_encoding_fallback(record_path, on_bad_lines="warn")
-        data = df.to_dict("records")
+            return []
+        data = read_dicts(record_path, encoding="gbk")
         for row in data:
             row["赤金"] = parse_cell_num(row["赤金"])
             row["作战录像"] = parse_cell_num(row["作战录像"])
@@ -3739,74 +3973,42 @@ def get_report_data():
                 )
         logger.debug(format_data)
         return format_data
+    except EmptyDataError:
+        return []
     except PermissionError:
         logger.info("report.csv正在被占用")
-        return jsonify([])
-    except (UnicodeDecodeError, pd.errors.ParserError) as e:
-        logger.warning(f"report.csv 编码无法识别或格式损坏: {e}")
-        return jsonify({"error": str(e)}), 500
+        return {"error": "report.csv 正在被其他程序占用，请关闭后刷新"}, 503
 
 
 @app.route("/report/getOrundumData")
+@require_token
 def get_orundum_data():
     record_path = get_path("@app/tmp/report.csv")
     try:
         format_data = []
         if os.path.exists(record_path) is False:
             logger.debug("基报不存在")
-            return jsonify([])
-        df = read_csv_with_encoding_fallback(record_path, on_bad_lines="warn")
-        data = df.to_dict("records")
-        earliest_date = datetime.datetime.now()
-
-        begin_make_orundum = (earliest_date + datetime.timedelta(days=1)).date()
-        logger.debug(begin_make_orundum)
+            return []
+        data = read_dicts(record_path, encoding="gbk")
         for item in data:
-            # 脏数据（读取失败为 None）保留行但置空，避免被当作 0 污染累计总量
             item["合成玉"] = parse_cell_num(item["合成玉"])
             item["合成玉订单数量"] = parse_cell_num(item["合成玉订单数量"])
             if item["合成玉"] is None:
                 logger.debug("合成玉读取失败：{}".format(item.get("Unnamed: 0")))
-        if len(data) >= 15:
-            for i in range(len(data) - 1, -1, -1):
-                if 0 < i < len(data) - 15:
-                    data.pop(i)
-                else:
-                    logger.debug("合成玉{}".format(data[i]["合成玉"]))
-                    if data[i]["合成玉"] is not None and data[i]["合成玉"] > 0:
-                        begin_make_orundum = str2date(data[i]["Unnamed: 0"])
-        else:
-            for item in data:
-                if item["合成玉"] is not None and item["合成玉"] > 0:
-                    begin_make_orundum = str2date(item["Unnamed: 0"])
-        if begin_make_orundum > earliest_date.date():
-            return format_data
         total_orundum = 0
         for item in data:
-            if item["合成玉"] is None:
-                # 脏行保留、累计值断开，与赤金等字段的 null 表现一致
-                format_data.append(
-                    {
-                        "日期": date2str(
-                            str2date(item["Unnamed: 0"]) - datetime.timedelta(days=1)
-                        ),
-                        "合成玉": None,
-                        "合成玉订单数量": None,
-                        "抽数": None,
-                        "累计制造合成玉": None,
-                    }
-                )
-                continue
-            total_orundum = total_orundum + item["合成玉"]
+            amount = item["合成玉"]
+            if amount is not None:
+                total_orundum += amount
             format_data.append(
                 {
                     "日期": date2str(
                         str2date(item["Unnamed: 0"]) - datetime.timedelta(days=1)
                     ),
-                    "合成玉": item["合成玉"],
+                    "合成玉": amount,
                     "合成玉订单数量": item["合成玉订单数量"],
-                    "抽数": round((item["合成玉"] / 600), 1),
-                    "累计制造合成玉": total_orundum,
+                    "抽数": round(amount / 600, 1) if amount is not None else None,
+                    "累计制造合成玉": total_orundum if amount is not None else None,
                 }
             )
 
@@ -3827,12 +4029,11 @@ def get_orundum_data():
                 )
         logger.debug(format_data)
         return format_data
+    except EmptyDataError:
+        return []
     except PermissionError:
         logger.info("report.csv正在被占用")
-        return jsonify([])
-    except (UnicodeDecodeError, pd.errors.ParserError) as e:
-        logger.warning(f"report.csv 编码无法识别或格式损坏: {e}")
-        return jsonify({"error": str(e)}), 500
+        return {"error": "report.csv 正在被其他程序占用，请关闭后刷新"}, 503
 
 
 @contextmanager
@@ -4201,6 +4402,7 @@ def mastery_t3_summary():
 
 @app.route("/mastery-t3-debug", methods=["POST"])
 def mastery_t3_debug():
+
     from arknights_mower.utils.mastery_recommendation import (
         _find_skill_data,
         get_mastery_recommendations,

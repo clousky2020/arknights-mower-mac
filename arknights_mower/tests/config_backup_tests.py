@@ -860,6 +860,49 @@ def test_preserves_access_gui_and_state(storage, local_exists, in_archive):
             assert path.read_bytes() == b"local bytes"
 
 
+@pytest.mark.parametrize("name", ["gui-watermark.key", "Gui-Watermark.Key"])
+def test_watermark_key_is_not_exported(storage, name):
+    storage(f"@app/config/{name}").write_bytes(b"local watermark signing key")
+
+    with ZipFile(BytesIO(backup.export_archive())) as exported:
+        assert "config/gui-watermark.key" not in {
+            name.casefold() for name in exported.namelist()
+        }
+
+
+@pytest.mark.parametrize("name", ["gui-watermark.key", "Gui-Watermark.Key"])
+@pytest.mark.parametrize("local_exists", [False, True])
+def test_backup_cannot_create_or_replace_watermark_key(storage, name, local_exists):
+    destination = storage("@app/config/gui-watermark.key")
+    if local_exists:
+        destination.write_bytes(b"local watermark signing key")
+    raw = archive(
+        {
+            "conf.yml": "account: imported",
+            "plan.json": '{"plan1": {}}',
+            name: b"key from another instance",
+        }
+    )
+
+    if local_exists and name != "gui-watermark.key":
+        with pytest.raises(ValueError, match="大小写冲突"):
+            backup.import_configuration(raw)
+        assert config.conf.account == "before"
+        assert not storage("@app/config-backups").exists()
+    else:
+        backup.import_configuration(raw)
+        assert config.conf.account == "imported"
+
+    matching_names = {
+        path.name
+        for path in destination.parent.iterdir()
+        if path.name.casefold() == "gui-watermark.key"
+    }
+    assert matching_names == ({"gui-watermark.key"} if local_exists else set())
+    if local_exists:
+        assert destination.read_bytes() == b"local watermark signing key"
+
+
 @pytest.mark.parametrize("incoming_lock", [False, True])
 def test_active_gui_process_lock_is_not_exported_or_replaced_by_import(
     storage, monkeypatch, incoming_lock
@@ -1206,6 +1249,7 @@ def test_plan_advanced_settings_round_trip_without_drone_room(
     value = populated_plan.model_dump(exclude_none=True)
     value["advanced_settings"] = {
         "resting_threshold": 0.75,
+        "group_resting_thresholds": {"主表组": 0.35, "副表组": 0.65},
         "drone_count_limit": 140,
         "product_switching": {"waiting_seconds": 5},
         "experimental_dorm_logic": True,
@@ -1217,6 +1261,7 @@ def test_plan_advanced_settings_round_trip_without_drone_room(
     result = post_plan_file(plan_client, value)
     assert result.get_data(as_text=True) == "排班已加载"
     assert config.conf.resting_threshold == 0.75
+    assert config.conf.group_resting_thresholds == {"主表组": 0.35, "副表组": 0.65}
     assert config.conf.drone_count_limit == 140
     assert config.conf.product_switching.waiting_seconds == 5
     assert config.conf.group_rest_in_full_on_mood_gap is False
@@ -1227,6 +1272,10 @@ def test_plan_advanced_settings_round_trip_without_drone_room(
 
     exported = plan_client.get("/export-json", headers={"token": "test-token"}).json
     assert exported["advanced_settings"]["resting_threshold"] == 0.75
+    assert exported["advanced_settings"]["group_resting_thresholds"] == {
+        "主表组": 0.35,
+        "副表组": 0.65,
+    }
     assert exported["advanced_settings"]["product_switching"]["waiting_seconds"] == 5
     assert exported["advanced_settings"]["group_rest_in_full_on_mood_gap"] is False
     assert exported["advanced_settings"]["group_mood_gap_threshold_minutes"] == 75
@@ -1639,3 +1688,82 @@ def test_gap_exclusions_preserve_exact_names_and_have_isolated_defaults():
     assert second.group_mood_gap_exclusions == []
     conf = config.Conf(group_mood_gap_exclusions=[" 组一 ", "组二", " 组一 "])
     assert conf.group_mood_gap_exclusions == [" 组一 ", "组二"]
+
+
+def test_ordinary_copilot_library_and_queue_roundtrip(storage, monkeypatch):
+    from arknights_mower.solvers import record
+    from arknights_mower.utils import maa_copilot
+
+    monkeypatch.setattr(maa_copilot, "get_path", storage)
+    monkeypatch.setattr(record, "get_path", storage)
+    monkeypatch.setattr(record, "_tables_created", False)
+    info = maa_copilot.store_script(b'{"stage_name":"1-7","actions":[]}')
+    config.conf = config.Conf(
+        copilot={"scripts": [{"id": info["id"], "is_raid": True}]}
+    )
+    config.save_conf()
+    progress = {
+        "key": maa_copilot.queue_key(config.conf.copilot),
+        "next": 1,
+        "failed": False,
+    }
+    record.save_maa_copilot_progress(progress)
+    raw = backup.export_archive()
+    files = backup.read_archive(raw)
+    name = "copilots/" + info["id"] + ".json"
+    assert name in files
+    maa_copilot.script_path(info["id"]).unlink()
+    record.save_maa_copilot_progress({})
+    backup.import_configuration(raw)
+    assert record.load_maa_copilot_progress() == progress
+    assert config.conf.copilot.scripts[0].id == info["id"]
+    assert config.conf.copilot.scripts[0].is_raid is True
+    assert (
+        maa_copilot.build_copilot_params(config.conf.copilot)["copilot_list"][0][
+            "is_raid"
+        ]
+        is True
+    )
+
+
+def test_sss_library_queue_round_count_and_progress_roundtrip(storage, monkeypatch):
+    from arknights_mower.solvers import record
+    from arknights_mower.utils import maa_copilot, maa_sss
+
+    monkeypatch.setattr(maa_copilot, "get_path", storage)
+    monkeypatch.setattr(record, "get_path", storage)
+    monkeypatch.setattr(record, "_tables_created", False)
+    script = {
+        "type": "SSS",
+        "stage_name": "保全",
+        "tool_men": {},
+        "stages": [
+            {
+                "stage_name": "第一关",
+                "draw_as_possible": True,
+                "strategies": [],
+                "actions": [],
+            }
+        ],
+    }
+    info = maa_copilot.store_script(json.dumps(script).encode(), sss=True)
+    config.conf = config.Conf(
+        sss={"scripts": [{"id": info["id"], "type": 2, "ec": 3, "times": 4}]}
+    )
+    config.save_conf()
+    progress = {
+        "key": maa_copilot.queue_key(config.conf.sss),
+        "next": 0,
+        "completed": 2,
+        "failed": False,
+    }
+    record.save_maa_sss_progress(progress)
+    raw = backup.export_archive()
+    assert "sss-copilots/" + info["id"] + ".json" in backup.read_archive(raw)
+    maa_copilot.script_path(info["id"], sss=True).unlink()
+    record.save_maa_sss_progress({})
+    backup.import_configuration(raw)
+    assert record.load_maa_sss_progress() == progress
+    item = config.conf.sss.scripts[0]
+    assert item.model_dump() == {"id": info["id"], "type": 2, "ec": 3, "times": 4}
+    assert maa_sss.build_sss_params(item)["loop_times"] == 1

@@ -349,6 +349,7 @@ def supervise(
         if wanted is None and base_environment.get("MOWER_RESUME_MODE") in (
             "0",
             "1",
+            "3",
         ):
             wanted = True
         if (
@@ -359,7 +360,13 @@ def supervise(
             wanted = base_environment["MOWER_RESUME_RUN"] == "1"
         start_type = "0"
         if not report.get("ready"):
-            if base_environment.get("MOWER_RESUME_MODE") in ("0", "1"):
+            if (
+                base_environment.get("MOWER_UPDATE_REPLAN") == "1"
+                and base_environment.get("MOWER_RESTART_JOB")
+                and base_environment.get("MOWER_RESUME_RUN") == "1"
+            ):
+                start_type = "3"
+            elif base_environment.get("MOWER_RESUME_MODE") in ("0", "1", "3"):
                 start_type = base_environment["MOWER_RESUME_MODE"]
             elif (
                 base_environment.get("MOWER_RESTART_JOB")
@@ -399,14 +406,14 @@ def supervise(
                 if previous.get("reset_observation_pending"):
                     notice["start_type"] = "2"
                     notice["reset_observation_pending"] = True
-                elif previous.get("pending_start_type") in ("1", "2"):
+                elif previous.get("pending_start_type") in ("1", "2", "3"):
                     notice["start_type"] = previous["pending_start_type"]
                 elif previous.get("active") is True and (
                     report.get("ready")
                     or base_environment.get("MOWER_RECOVERY_RUN") is not None
                 ):
                     notice["start_type"] = previous.get("start_type", "0")
-            if notice["start_type"] in ("1", "2"):
+            if notice["start_type"] in ("1", "2", "3"):
                 notice["pending_start_type"] = notice["start_type"]
             if notice["start_type"] == "2":
                 notice["reset_observation_pending"] = True
@@ -435,7 +442,12 @@ def supervise(
                 return False
             time.sleep(min(poll_interval, max(0, until - time.monotonic())))
         # A replacement launch must not inherit update-resume intent from an old job.
-        for variable in ("MOWER_RESUME_MODE", "MOWER_RESUME_RUN", "MOWER_RESTART_JOB"):
+        for variable in (
+            "MOWER_RESUME_MODE",
+            "MOWER_RESUME_RUN",
+            "MOWER_RESTART_JOB",
+            "MOWER_UPDATE_REPLAN",
+        ):
             base_environment.pop(variable, None)
         if report.get("port"):
             base_environment["MOWER_RESTART_PORT"] = str(report["port"])
@@ -633,9 +645,29 @@ def supervise(
             )
 
 
+def show_existing_instance(directory):
+    from arknights_mower.utils.path import get_path
+
+    target = os.path.normcase(str(Path(directory).resolve()))
+    for record in runtime.instances(timeout=0):
+        if record.get("kind") != "instance" or not record.get("ready"):
+            continue
+        data = Path(record.get("data_dir") or get_path("@app", space=""))
+        owned = data / (record.get("space") or "") / "tmp/process-supervision"
+        if os.path.normcase(str(owned.resolve())) != target:
+            continue
+        if (runtime.state_dir() / "shutdown" / f"{record['id']}.json").exists():
+            continue
+        runtime.send_instance_command(record, "show")
+        return True
+    return False
+
+
 def run_launcher(arguments):
     with console_stop() as stop:
         directory = supervisor_directory(arguments)
+        if show_existing_instance(directory):
+            return 0
         try:
             with instance_lock(directory, cancelled=lambda: stop.requested):
                 # A surviving child retains exclusivity after supervisor termination.

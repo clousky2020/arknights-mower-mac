@@ -467,6 +467,24 @@ def test_database_tables_keep_schema_indexes_and_autoincrement(storage):
 
 
 @pytest.mark.parametrize("inherit", [[], ["other_settings"]])
+def test_profile_switch_preserves_current_log_background(storage, inherit):
+    path = config.conf_path.parent / "log-background.webp"
+    path.write_bytes(b"first local image")
+    original = profiles.list_profiles()["active_id"]
+    created = _create("background preservation", inherit)
+    assert path.read_bytes() == b"first local image"
+    path.write_bytes(b"latest local image")
+    _activate(original)
+    assert path.read_bytes() == b"latest local image"
+    _activate(created["active_id"])
+    assert path.read_bytes() == b"latest local image"
+    assert (
+        backup.read_archive(backup.export_archive())["log-background.webp"]
+        == b"latest local image"
+    )
+
+
+@pytest.mark.parametrize("inherit", [[], ["other_settings"]])
 def test_profile_switch_preserves_the_active_gui_process_lock(
     storage, monkeypatch, inherit
 ):
@@ -489,6 +507,47 @@ def test_profile_switch_preserves_the_active_gui_process_lock(
             assert "gui.yml.lock" not in backup.read_archive(snapshot.read_bytes())
     gui.save_window_mode("normal")
     assert gui.load_window_mode() == "normal"
+
+
+@pytest.mark.parametrize("selected", [[], ["other_settings"]])
+@pytest.mark.parametrize("operation", ["create", "activate", "import"])
+def test_profile_operations_preserve_watermark_key_without_saving_it_in_snapshots(
+    storage, selected, operation
+):
+    key_path = storage("@app/config/gui-watermark.key")
+    key_path.write_bytes(b"local watermark signing key")
+    original = profiles.list_profiles()["active_id"]
+    incoming_files, incoming_tmp = backup.read_archive(
+        profiles.export_current_archive(), include_tmp=True
+    )
+    incoming_files["Gui-Watermark.Key"] = b"key from another instance"
+    incoming = backup._archive_bytes(incoming_files, incoming_tmp)
+
+    if operation == "create":
+        _create("created", selected)
+    elif operation == "activate":
+        _create("second")
+        storage(f"@app/config-profiles/{original}.zip").write_bytes(incoming)
+        _activate(original, selected)
+    else:
+        profiles.import_profile(
+            incoming,
+            "imported",
+            selected,
+            expected_generation=profiles.current_generation(),
+        )
+
+    assert key_path.read_bytes() == b"local watermark signing key"
+    snapshots = list(storage("@app/config-profiles").glob("*.zip"))
+    assert len(snapshots) == 2
+    for snapshot in snapshots:
+        assert "gui-watermark.key" not in {
+            name.casefold() for name in backup.read_archive(snapshot.read_bytes())
+        }
+    assert "gui-watermark.key" not in {
+        name.casefold()
+        for name in backup.read_archive(profiles.export_current_archive())
+    }
 
 
 def test_all_selected_groups_preserve_configuration_without_saved_scheduler(storage):
@@ -701,6 +760,20 @@ def test_conf_fields_have_one_group_and_no_unmapped_current_fields():
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("inherit", [[], ["daily"], ["credit"]])
+def test_event_sign_in_follows_daily_profile_group(storage, enabled, inherit):
+    config.conf.event_sign_in_enable = enabled
+    config.save_conf()
+
+    _create("活动签到配置", inherit)
+
+    expected = enabled if "daily" in inherit else False
+    assert config.conf.event_sign_in_enable is expected
+    saved = config.Conf(**yaml.safe_load(config.conf_path.read_text(encoding="utf-8")))
+    assert saved.event_sign_in_enable is expected
+
+
+@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("inherit", [[], ["base"]])
 def test_mood_calculation_follows_base_profile_group(storage, enabled, inherit):
     config.conf.test_mood_calculation = enabled
@@ -712,6 +785,20 @@ def test_mood_calculation_follows_base_profile_group(storage, enabled, inherit):
     assert config.conf.test_mood_calculation is expected
     saved = config.Conf(**yaml.safe_load(config.conf_path.read_text(encoding="utf-8")))
     assert saved.test_mood_calculation is expected
+
+
+@pytest.mark.parametrize("inherit", [[], ["base"], ["other_settings"]])
+def test_group_resting_thresholds_follow_base_profile_group(storage, inherit):
+    thresholds = {"大组": 0.35, "普通组": 0.65}
+    config.conf.group_resting_thresholds = thresholds
+    config.save_conf()
+
+    _create("各组心情阈值配置", inherit)
+
+    expected = thresholds if "base" in inherit else {}
+    assert config.conf.group_resting_thresholds == expected
+    saved = config.Conf(**yaml.safe_load(config.conf_path.read_text(encoding="utf-8")))
+    assert saved.group_resting_thresholds == expected
 
 
 @pytest.mark.parametrize(
@@ -1378,3 +1465,151 @@ def test_only_successful_activation_resets_observed_performance_without_changing
         result.poll_interval,
         result.transition_timeout,
     ) == (900, 0.3, 4.5)
+
+
+@pytest.mark.parametrize("inherit", [[], ["long"], ["other_settings"]])
+def test_copilot_queue_and_files_follow_long_task_profile_group(
+    storage, monkeypatch, inherit
+):
+    from arknights_mower.solvers import record
+    from arknights_mower.utils import maa_copilot
+    from arknights_mower.utils.config.conf import CopilotConf, CopilotScriptConf
+
+    monkeypatch.setattr(maa_copilot, "get_path", storage)
+    monkeypatch.setattr(record, "get_path", storage)
+    monkeypatch.setattr(record, "_tables_created", False)
+    script = maa_copilot.store_script(b'{"stage_name":"1-7","actions":[]}')
+    config.conf.copilot = CopilotConf(scripts=[CopilotScriptConf(id=script["id"])])
+    config.save_conf()
+    progress = {
+        "key": maa_copilot.queue_key(config.conf.copilot),
+        "next": 1,
+        "failed": False,
+    }
+    record.save_maa_copilot_progress(progress)
+    original = profiles.list_profiles()["active_id"]
+    path = maa_copilot.script_path(script["id"])
+
+    _create("作业配置", inherit)
+
+    assert bool(config.conf.copilot.scripts) is ("long" in inherit)
+    assert path.is_file() is ("long" in inherit)
+    assert record.load_maa_copilot_progress() == (progress if "long" in inherit else {})
+    if "long" in inherit:
+        assert maa_copilot.build_copilot_params(config.conf.copilot)["copilot_list"][0][
+            "filename"
+        ] == str(path)
+    _activate(original)
+    assert record.load_maa_copilot_progress() == progress
+    assert config.conf.copilot.scripts[0].id == script["id"]
+    assert maa_copilot.build_copilot_params(config.conf.copilot)["copilot_list"][0][
+        "filename"
+    ] == str(path)
+
+
+@pytest.mark.parametrize("inherit", [[], ["daily"], ["credit"]])
+def test_maa_activity_sign_in_follows_daily_profile_group(storage, inherit):
+    config.conf.maa_signinevent = True
+    config.save_conf()
+    _create("MAA 活动签到配置", inherit)
+    assert config.conf.maa_signinevent is ("daily" in inherit)
+
+
+@pytest.mark.parametrize("inherit", [[], ["long"], ["other_settings"]])
+def test_sss_queue_files_and_round_progress_follow_long_task_profile_group(
+    storage, monkeypatch, inherit
+):
+    from arknights_mower.solvers import record
+    from arknights_mower.utils import maa_copilot
+
+    monkeypatch.setattr(maa_copilot, "get_path", storage)
+    monkeypatch.setattr(record, "get_path", storage)
+    monkeypatch.setattr(record, "_tables_created", False)
+    script = maa_copilot.store_script(
+        b'{"type":"SSS","stage_name":"SSS","tool_men":{},"stages":[{"stage_name":"one","draw_as_possible":true,"strategies":[],"actions":[]}]}',
+        sss=True,
+    )
+    config.conf.sss = config.Conf(
+        sss={"scripts": [{"id": script["id"], "times": 3}]}
+    ).sss
+    config.save_conf()
+    progress = {
+        "key": maa_copilot.queue_key(config.conf.sss),
+        "next": 0,
+        "completed": 2,
+        "failed": False,
+    }
+    record.save_maa_sss_progress(progress)
+    original = profiles.list_profiles()["active_id"]
+    path = maa_copilot.script_path(script["id"], sss=True)
+
+    _create("作业配置", inherit)
+
+    assert bool(config.conf.sss.scripts) is ("long" in inherit)
+    assert path.is_file() is ("long" in inherit)
+    assert record.load_maa_sss_progress() == (progress if "long" in inherit else {})
+    if "long" in inherit:
+        assert str(
+            maa_copilot.script_path(config.conf.sss.scripts[0].id, sss=True)
+        ) == str(path)
+    _activate(original)
+    assert record.load_maa_sss_progress() == progress
+    assert config.conf.sss.scripts[0].id == script["id"]
+    assert str(maa_copilot.script_path(config.conf.sss.scripts[0].id, sss=True)) == str(
+        path
+    )
+
+
+@pytest.mark.parametrize("inherit", [[], ["long"], ["other_settings"]])
+def test_paradox_queue_files_and_progress_follow_long_profile_group(
+    storage, monkeypatch, inherit
+):
+    from arknights_mower.solvers import record
+    from arknights_mower.utils import maa_copilot
+
+    monkeypatch.setattr(maa_copilot, "get_path", storage)
+    monkeypatch.setattr(record, "get_path", storage)
+    monkeypatch.setattr(record, "_tables_created", False)
+    script = maa_copilot.store_script(
+        b'{"stage_name":"mem_test_1","actions":[]}', paradox=True
+    )
+    config.conf.paradox = config.Conf(
+        paradox={"scripts": [{"id": script["id"]}]}
+    ).paradox
+    config.save_conf()
+    progress = {
+        "key": maa_copilot.queue_key(config.conf.paradox),
+        "next": 1,
+        "failed": False,
+    }
+    record.save_maa_paradox_progress(progress)
+    original = profiles.list_profiles()["active_id"]
+    path = maa_copilot.script_path(script["id"], paradox=True)
+    _create("悖论配置", inherit)
+    assert bool(config.conf.paradox.scripts) is ("long" in inherit)
+    assert path.is_file() is ("long" in inherit)
+    assert record.load_maa_paradox_progress() == (progress if "long" in inherit else {})
+    _activate(original)
+    assert record.load_maa_paradox_progress() == progress
+    assert path.is_file()
+
+
+@pytest.mark.parametrize("inherit", [[], ["daily"], ["long"]])
+def test_event_shop_settings_follow_daily_profile_group(storage, inherit):
+    config.conf.maa_event_shop = config.Conf(
+        maa_event_shop={
+            "enable": True,
+            "activity": "测试活动",
+            "custom_entry": True,
+            "x": 900,
+            "y": 400,
+            "confirm_text": "兑换处",
+            "switch_source": "活动",
+        }
+    ).maa_event_shop
+    config.save_conf()
+    _create("商店配置", inherit)
+    assert config.conf.maa_event_shop.enable is ("daily" in inherit)
+    if "daily" in inherit:
+        assert config.conf.maa_event_shop.x == 900
+        assert config.conf.maa_event_shop.switch_source == "活动"

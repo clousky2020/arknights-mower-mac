@@ -1,5 +1,6 @@
 """Prefer available replacements before recalling resting operators in correction."""
 
+import copy
 from datetime import datetime
 from functools import cache
 
@@ -15,13 +16,81 @@ from arknights_mower.utils.operators import TRADE_ORDER_AGENTS
 PLACEHOLDERS = {"", "Current", "Free"}
 
 
+def reconcile_backup_dorm_retention(
+    op_data,
+    plan,
+    previous_names,
+    *,
+    explicit_slots=(),
+    reserved_names=(),
+    reserved_slots=(),
+):
+    """切表时安置无主岗位的保留干员，并释放退出保留的动态住客。"""
+    if not any(previous_names) and not any(op_data.config.free_room_exclusions):
+        return plan
+    result = copy.deepcopy(plan)
+    projected = op_data.project_arrangements([result])
+    explicit_names = {
+        result.get(room, [])[index]
+        for room, index in explicit_slots
+        if index < len(result.get(room, ()))
+    } - PLACEHOLDERS
+    reserved_names = set(reserved_names) | set(op_data.reserved_product_replacements)
+    reserved_slots = set(reserved_slots) | set(op_data.reserved_product_beds)
+    for name in set(previous_names) - set(op_data.config.free_room_exclusions):
+        op = projected.operators.get(name)
+        if op is None or op.room or not op.is_resting() or name in explicit_names:
+            continue
+        position = (op.current_room, op.current_index)
+        bed = next((bed for bed in projected.dorm if bed.position == position), None)
+        if bed is None or not projected.is_effective_free_slot(bed):
+            continue
+        if name in reserved_names or position in reserved_slots:
+            return None
+        result.setdefault(
+            op.current_room, ["Current"] * len(projected.plan[op.current_room])
+        )[op.current_index] = ""
+    projected = op_data.project_arrangements([result])
+    missing = [
+        name
+        for name in op_data.config.free_room_exclusions
+        if projected.is_free_room_excluded(name)
+        and not projected.operators[name].room
+        and not projected.operators[name].current_room
+    ]
+    if not missing:
+        return result
+    if set(missing) & reserved_names:
+        return None
+    occupied = reserved_slots | set(explicit_slots)
+    occupied.update(
+        bed.position
+        for bed in projected.dorm
+        if bed.name or projected.get_current_operator(*bed.position) is not None
+    )
+    # 保留身份占用空余 Free 床，不以切表安置之名挤走其他恢复住客。
+    beds = projected.assign_dorm_group(missing, reserved_slots=occupied)
+    if beds is None:
+        return None
+    for bed in beds:
+        room, index = bed.position
+        result.setdefault(room, ["Current"] * len(projected.plan[room]))[index] = (
+            bed.name
+        )
+    return result
+
+
 def suppress_completed_dorm_returns(op_data, plan):
     """个人上限周期已完成的离宿者不被纠错或交接重新召回。"""
     for room, row in list(plan.items()):
         if not room.startswith("dorm"):
             continue
         for index, name in enumerate(row):
-            if name not in PLACEHOLDERS and op_data.rest_mood_complete(name):
+            if (
+                name not in PLACEHOLDERS
+                and op_data.rest_mood_complete(name)
+                and not op_data.is_free_room_excluded(name)
+            ):
                 current = op_data.get_current_operator(room, index)
                 if current is None or current.name != name:
                     row[index] = "Current"
@@ -260,14 +329,29 @@ def prefer_resting_replacements(op_data, fix_plan, is_busy):
     protected = _recall_recovery_members(op_data) | off_duty_full_recovery_members(
         op_data
     )
+    protected.update(
+        name
+        for name, op in op_data.operators.items()
+        if op_data.workaholic_follows_resting_group(op) and not op.is_working()
+    )
     resting.update(protected)
-    if not resting:
+    recalling_groups = {
+        op.group
+        for room, row in fix_plan.items()
+        if not room.startswith("dorm")
+        for index, name in enumerate(row)
+        if (op := op_data.operators.get(name)) is not None
+        and op.group
+        and op_data.group_is_resting(op.group)
+        and op_data.is_workaholic_group(op.group)
+        and (op.room, op.index) == (room, index)
+    }
+    if not resting and not recalling_groups:
         return
     requested = {room: slots.copy() for room, slots in fix_plan.items()}
     reserved = _reserved_names(op_data, requested, resting)
     is_busy = cache(is_busy)
     current = {room: op_data.get_current_room(room, True) for room in fix_plan}
-    recalling_groups = set()
     for room, slots in fix_plan.items():
         if room.startswith("dorm"):
             continue
@@ -322,11 +406,13 @@ def prefer_resting_replacements(op_data, fix_plan, is_busy):
                     f"{name}所在组正在休息，{room}暂无可用替班，保留原纠错叫回安排"
                 )
     # 回班以组为单位覆盖之前逐槽尝试的替班结果，不能只叫回失败那一人。
-    # 宿舍固定成员交给 correct_group_dorms，训练室仍尊重调用方的保护。
+    # 全零心情组没有触发成员，连同宿舍固定成员一起形成完整回班意图。
     for group in recalling_groups:
         for name in op_data.groups[group]:
             op = op_data.operators[name]
-            if op.room.startswith("dorm"):
+            if op.room.startswith("dorm") and not op_data.is_workaholic_group(group):
+                continue
+            if op.multi_group and op_data.is_workaholic_group(group):
                 continue
             current.setdefault(op.room, op_data.get_current_room(op.room, True))
             fix_plan.setdefault(op.room, ["Current"] * len(op_data.plan[op.room]))[
@@ -364,7 +450,9 @@ def correct_group_dorms(op_data, fix_plan, is_busy, *, positions=None):
             == n
             for n in names
         )
-        group_resting = op_data.group_is_resting(group) and not recalling
+        group_resting = (
+            transitions.get(group, op_data.group_is_resting(group)) and not recalling
+        )
         changes = {}
         for op in residents:
             # 清缓存后当前绑定列不代表实际休息组；共享岗位检查全部绑定。

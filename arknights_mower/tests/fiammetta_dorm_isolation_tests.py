@@ -196,7 +196,7 @@ def test_fia_does_not_retain_idle_excluded_resident_in_target_slot(solver):
     assert agents[2] == target.name
 
 
-def test_plan_fia_refreshes_zero_rate_cache_before_full_mood_decision(
+def test_plan_fia_refreshes_full_mood_without_learning_rate_before_charging(
     solver, monkeypatch
 ):
     target = solver.op_data.operators["伊内丝"]
@@ -218,7 +218,7 @@ def test_plan_fia_refreshes_zero_rate_cache_before_full_mood_decision(
     solver.plan_fia()
 
     assert target.mood == 20
-    assert target.depletion_rate > 0
+    assert target.depletion_rate == 0
     assert solver.tasks[0].plan == {ROOM: [target.name, "菲亚梅塔"]}
     solver.enter_room.assert_called_once_with("meeting")
     solver.back.assert_called_once()
@@ -268,10 +268,20 @@ def test_charge_return_keeps_work_rate_and_later_work_can_recalibrate(
 ):
     import numpy as np
 
+    from arknights_mower.utils import operators
+
+    class Clock(datetime):
+        current = datetime(2026, 10, 26, 12)
+
+        @classmethod
+        def now(cls):
+            return cls.current
+
+    monkeypatch.setattr(operators, "datetime", Clock)
     data = solver.op_data
     target = data.operators["讯使"]
     target._current_room, target.current_index = ROOM, 2
-    target.mood, target.time_stamp, target.depletion_rate = 24, datetime.now(), 3.25
+    target.mood, target.time_stamp, target.depletion_rate = 24, Clock.now(), 3.25
     solver.task = SchedulerTask(
         task_type=TaskTypes.FIAMMETTA, task_plan={"contact": ["讯使"]}
     )
@@ -284,7 +294,7 @@ def test_charge_return_keeps_work_rate_and_later_work_can_recalibrate(
     solver.scroll_room_operators = MagicMock()
     solver.read_screen = MagicMock(return_value="讯使")
     solver.read_accurate_mood = MagicMock(return_value=24)
-    solver.read_operator_time = MagicMock(return_value=datetime.now())
+    solver.read_operator_time = MagicMock(return_value=Clock.now())
     monkeypatch.setattr(target, "need_to_refresh", lambda **kw: read_mood)
     monkeypatch.setattr(
         "arknights_mower.solvers.record.save_agent_action", lambda *a, **kw: None
@@ -295,9 +305,15 @@ def test_charge_return_keeps_work_rate_and_later_work_can_recalibrate(
     assert target.mood == 24
     half_hour = target.time_stamp + timedelta(minutes=30)
     assert target.current_mood(half_hour) == pytest.approx(22.375)
-    # 正常工作实读仍校准速度，充能保护不是永久锁定速度。
-    target.time_stamp = datetime.now() - timedelta(hours=1)
+    # 充能采样不作为工作速率基准，首次正常实读仍保留原速率。
+    Clock.current += timedelta(hours=1)
     data.update_detail(target.name, 20, "contact", 0, True)
+    assert target.depletion_rate == 3.25
+    assert target.mood == 20
+    assert target.time_stamp == Clock.now()
+    # 两次正常工作实读之间下降 4 点，恢复校准为每小时 4 点。
+    Clock.current += timedelta(hours=1)
+    data.update_detail(target.name, 16, "contact", 0, True)
     assert target.depletion_rate == pytest.approx(4, abs=0.01)
 
 

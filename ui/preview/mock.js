@@ -1,5 +1,6 @@
 import axios, { AxiosError } from 'axios'
 import screenshot from './screenshot.svg?raw'
+import { DEFAULT_BASELINE_CONFIG, DEFAULT_VIEW_PREFS } from '../src/utils/depot_inventory.js'
 import {
   BlobReader,
   BlobWriter,
@@ -36,9 +37,11 @@ function previewFieldGroup(key) {
   if (key.startsWith('automatic_rescue')) return 'rescue_plan'
   if (['start_automatically', 'performance_mode', 'screenshot_interval'].includes(key))
     return 'runtime'
-  if (key.startsWith('maa_rg_') || key === 'maa_long_task_type') return 'long'
+  if (key.startsWith('maa_rg_') || ['maa_long_task_type', 'sss', 'copilot'].includes(key))
+    return 'long'
   if (key.startsWith('maa_')) return 'maa'
-  if (['check_mail_enable', 'report_enable', 'skland_enable'].includes(key)) return 'daily'
+  if (['check_mail_enable', 'event_sign_in_enable', 'report_enable', 'skland_enable'].includes(key))
+    return 'daily'
   return 'other_settings'
 }
 
@@ -74,6 +77,35 @@ export function createPreviewConfiguration(config, theme = 'light') {
     },
     resource_update: { enable: false, auto_update: false }
   }
+}
+
+// 基建报表示例：30 天产出，按日期生成稳定的起伏，不使用随机数。
+function previewBaseReport(today) {
+  const end = new Date(`${today}T00:00:00`)
+  const report = []
+  const orundum = []
+  const trading = []
+  for (let offset = 30; offset >= 1; offset--) {
+    const day = new Date(end)
+    day.setDate(end.getDate() - offset)
+    const date = day.toLocaleDateString('sv-SE')
+    const wave = Math.sin(offset / 2.3)
+    const orders = 21 + Math.round(wave * 3)
+    const gold = 70000 + Math.round(wave * 8000) + (offset % 4) * 1500
+    report.push({
+      日期: date,
+      赤金: gold,
+      作战录像: 22000 + Math.round(Math.cos(offset / 3) * 4000),
+      龙门币订单: orders * 1000 + (offset % 3) * 1500,
+      龙门币订单数: orders,
+      每单获取龙门币: Math.round((orders * 1000 + (offset % 3) * 1500) / orders)
+    })
+    orundum.push({ 日期: date, 合成玉: offset % 5 === 0 ? 0 : 160, 合成玉订单数量: 8 })
+    if (offset % 3 === 0) trading.push({ 日期: date, 龙舌兰: 1 + (offset % 2), 可露希尔: 1 })
+  }
+  // 示例里保留一天未读到赤金，演示缺失读数的显示。
+  report[report.length - 6].赤金 = null
+  return { report, orundum, trading }
 }
 
 export function createPreviewData(config) {
@@ -132,12 +164,20 @@ export function createPreviewData(config) {
     logs,
     tasks,
     status: 'running',
+    baseReport: previewBaseReport(date),
+    incomeSettings: {
+      base_algorithm: 2,
+      base_algorithm_saved: true,
+      ratios: { experience: 0.9568, gold: 0.76544, order: 0.23456, efficiency: 1 }
+    },
     plan: { conf: { ling_xi: 1 }, plan1: {}, backup_plans: [], facility_levels: {} },
     layout: { screenshot_height: 180, task_height: 132 },
     sidebar: null,
+    depotPreferences: null,
     appearance: {
       software_version_display: 'version',
       software_version_language: 'en',
+      watermark_visible: true,
       task_settings_layout: 'checklist'
     }
   }
@@ -255,6 +295,43 @@ export function createPreviewAdapter(data, requests = []) {
     profiles.push({ id, name: name.trim() })
     return activate(config, id, incoming, selected)
   }
+  let logBackground = null
+  // 养成规划示例数据按需加载，其他预览页面不必创建这部分示例对象。
+  let growthAdapter = null
+  let growthLoading = null
+  function loadGrowth() {
+    if (growthAdapter) return Promise.resolve(growthAdapter)
+    if (!growthLoading) {
+      growthLoading = Promise.all([import('./growthFixture.js'), import('./growthAdapter.js')])
+        .then(([{ createGrowthPreview }, { createGrowthAdapter }]) => {
+          growthAdapter = createGrowthAdapter(createGrowthPreview())
+          return growthAdapter
+        })
+        .catch((error) => {
+          growthLoading = null
+          throw error
+        })
+    }
+    return growthLoading
+  }
+  function isGrowthPath(target) {
+    return (
+      target === '/mastery-recommendation' ||
+      target.startsWith('/mastery-plan') ||
+      target === '/growth-plan' ||
+      target === '/mastery-t3-summary' ||
+      target === '/growth-survey' ||
+      target === '/growth-crafting-order' ||
+      target === '/mastery-route' ||
+      target === '/mastery-route/settings' ||
+      target === '/cultivate-fetch' ||
+      target === '/workshop-status' ||
+      target === '/workshop-auto-config' ||
+      target.startsWith('/workshop-operators') ||
+      target === '/growth-chip-farming' ||
+      target === '/operator'
+    )
+  }
   return async (config) => {
     const method = (config.method || 'get').toUpperCase()
     const requestUrl = new URL(config.url, 'http://mower-preview.invalid')
@@ -268,25 +345,100 @@ export function createPreviewAdapter(data, requests = []) {
     )
       fail(config, '网络设置请求缺少确认标识', 403)
     const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+    // 养成规划使用独立的示例数据与内存状态，先于通用配置校验处理。
+    // Axios 自定义适配器不会把 config.params 并进 url，这里手动合并查询参数。
+    if (isGrowthPath(path)) {
+      const growthQuery = new URLSearchParams(requestUrl.searchParams)
+      for (const [key, value] of Object.entries(config.params || {})) {
+        if (value !== undefined && value !== null) growthQuery.set(key, String(value))
+      }
+      const growthResult = (await loadGrowth()).handle({
+        method,
+        path,
+        query: growthQuery,
+        body
+      })
+      if (!growthResult.unhandled) {
+        if (growthResult.status && growthResult.status >= 400) {
+          fail(
+            config,
+            growthResult.data?.error || growthResult.data?.message || '离线预览接口返回错误',
+            growthResult.status,
+            'ERR_PREVIEW_OPERATION'
+          )
+        }
+        return {
+          status: growthResult.status || 200,
+          statusText: 'OK',
+          data: growthResult.data,
+          headers: {},
+          config
+        }
+      }
+    }
     const supplied =
       config.headers?.get?.('X-Mower-Config-Generation') ??
       config.headers?.['X-Mower-Config-Generation']
     if (
       ['POST', 'PATCH', 'PUT', 'DELETE'].includes(method) &&
+      !path.startsWith('/gui/') &&
       supplied !== generation &&
       !(generation === '0' && supplied == null)
     ) {
       fail(config, '当前配置已切换，请重新加载页面', 409)
     }
     let result
+    if (path === '/gui/log-background' && ['GET', 'PUT', 'DELETE'].includes(method)) {
+      if (method === 'PUT') {
+        if (
+          !(body instanceof Blob) ||
+          !['image/png', 'image/jpeg', 'image/webp'].includes(body.type) ||
+          body.size > 8 * 1024 * 1024
+        )
+          fail(config, '请选择不超过 8 MiB 的 PNG、JPEG 或 WebP 图片')
+        logBackground = new Blob([body], { type: 'image/webp' })
+      } else if (method === 'DELETE') logBackground = null
+      return {
+        status: logBackground ? 200 : 204,
+        statusText: 'OK',
+        data: logBackground || '',
+        headers: { 'cache-control': 'no-store' },
+        config
+      }
+    }
     const reads = {
       '/conf': () => clone(data.config),
       '/network/settings': () => ({ ok: true, ...networkSettings }),
       '/config-profiles': profileList,
       '/shop': () => ['龙门币', '招聘许可', '赤金'],
       '/item': () => ['龙门币', '赤金', '源岩'],
+      '/report/getReportData': () => clone(data.baseReport.report),
+      '/report/getOrundumData': () => clone(data.baseReport.orundum),
+      '/report/trading_history': () => clone(data.baseReport.trading),
+      '/report/recycling_settings': () => clone(data.incomeSettings),
       // 离线示例仅提供默认预设，不读取 MAA 文件或建立连接。
       '/maa-conn-preset': () => ['General'],
+      '/maa-event-shop': () => ({ shops: [] }),
+      '/maa-paradox': () => ({ scripts: [] }),
+      '/maa-copilot': () => ({ scripts: [] }),
+      '/sss-copilot': () => ({
+        scripts: [
+          {
+            id: 'a'.repeat(64),
+            stage_name: '保全关卡 1',
+            title: '示例作业一',
+            details: '离线预览示例，请在游戏中准备编队。',
+            operators: [{ name: '棘刺', skill: 3 }]
+          },
+          {
+            id: 'b'.repeat(64),
+            stage_name: '保全关卡 2',
+            title: '示例作业二',
+            details: '可为此项单独选择关卡、导能单元和次数。',
+            operators: []
+          }
+        ]
+      }),
       '/operator': () => [
         '能天使',
         '德克萨斯',
@@ -379,6 +531,7 @@ export function createPreviewAdapter(data, requests = []) {
       }),
       '/ui-state/log-layout': () => clone(data.layout),
       '/gui/sidebar': () => ({ sidebar: clone(data.sidebar) }),
+      '/gui/depot': () => ({ depot: clone(data.depotPreferences) }),
       '/gui/appearance': () => clone(data.appearance),
       '/db-admin/stats': () => ({ log: 64, task: 5 }),
       '/screenshot/latest': () => new Blob([screenshot], { type: 'image/svg+xml' })
@@ -450,24 +603,56 @@ export function createPreviewAdapter(data, requests = []) {
     else if (method === 'PUT' && path === '/gui/sidebar') {
       data.sidebar = clone(body.sidebar)
       result = { sidebar: clone(data.sidebar) }
-    } else if (method === 'PUT' && path === '/gui/appearance') {
-      const choices = {
-        software_version_display: ['version', 'channel'],
-        software_version_language: ['zh', 'en'],
-        task_settings_layout: ['checklist', 'waterfall']
-      }
+    } else if (method === 'PUT' && path === '/gui/depot') {
+      const groups = ['favorites', 'view', 'baseline']
       if (
         !body ||
         typeof body !== 'object' ||
         Array.isArray(body) ||
-        Object.keys(body).length === 0 ||
-        Object.entries(body).some(
+        Object.keys(body).some((key) => !['depot', 'migrate'].includes(key)) ||
+        (Object.hasOwn(body, 'migrate') && body.migrate !== true) ||
+        !body.depot ||
+        typeof body.depot !== 'object' ||
+        Array.isArray(body.depot) ||
+        Object.keys(body.depot).length === 0 ||
+        Object.keys(body.depot).some((key) => !groups.includes(key))
+      )
+        fail(config, '仓库偏好无效')
+      if (!body.migrate || data.depotPreferences === null) {
+        data.depotPreferences = {
+          favorites: [],
+          view: clone(DEFAULT_VIEW_PREFS),
+          baseline: clone(DEFAULT_BASELINE_CONFIG),
+          ...data.depotPreferences,
+          ...clone(body.depot)
+        }
+      }
+      result = { depot: clone(data.depotPreferences) }
+    } else if (method === 'PUT' && path === '/report/recycling_settings') {
+      data.incomeSettings = { ...body, base_algorithm_saved: true }
+      result = clone(data.incomeSettings)
+    } else if (method === 'PUT' && path === '/gui/appearance') {
+      const choices = {
+        software_version_display: ['version', 'channel'],
+        software_version_language: ['zh', 'en'],
+        watermark_visible: [true, false],
+        task_settings_layout: ['checklist', 'waterfall']
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) fail(config, '外观配置无效')
+      const changes = { ...body }
+      delete changes.watermark_confirmation
+      if (
+        Object.keys(changes).length === 0 ||
+        Object.entries(changes).some(
           ([key, value]) => !Object.hasOwn(choices, key) || !choices[key].includes(value)
-        )
+        ) ||
+        (Object.hasOwn(body, 'watermark_confirmation') && body.watermark_visible !== false) ||
+        (body.watermark_visible === false &&
+          body.watermark_confirmation !== '反馈问题时务必说明具体版本')
       )
         fail(config, '外观配置无效')
-      Object.assign(data.appearance, clone(body))
-      result = clone(body)
+      Object.assign(data.appearance, clone(changes))
+      result = clone(changes)
     } else if (method === 'POST' && path === '/network/settings') {
       if (!body || typeof body.http_proxy !== 'string' || typeof body.github_proxy !== 'string')
         fail(config, '请提供完整的网络代理设置')

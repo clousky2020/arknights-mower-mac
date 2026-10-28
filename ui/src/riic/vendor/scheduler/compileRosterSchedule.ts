@@ -11,7 +11,7 @@ import type { MowerMainConf, RosterWorkspace } from '../domain/roster'
 import type { CompiledSchedule, CompiledSlot, SimulationAssumptions } from './types'
 
 const DEFAULTS: SimulationAssumptions = {
-  schemaVersion: 1, initialMorale: 24, enableParty:false, leifengMode:true, droneIntervalHours:3, droneCountLimit:100, reloadRooms:[], maaGapHours:3, restingThreshold: 0.65, rescueThreshold: 0.75, freeRoom: false, dormOrder: '', groupRestInFullOnMoodGap: true, groupMoodGapThresholdMinutes: 60, groupMoodGapMaxExtraWaitHours: 0, groupMoodGapExclusions: [], mergeIntervalMinutes: 10, enableMastery: true, fiammettaFool: true, fiammettaThreshold: 0.9, operatorMorale: {}, dormAtmosphere: 0,
+  schemaVersion: 1, predictiveMoodControl: false, initialMorale: 24, enableParty:false, leifengMode:true, droneIntervalHours:3, droneCountLimit:100, reloadRooms:[], maaGapHours:3, restingThreshold: 0.65, rescueThreshold: 0.75, freeRoom: false, dormOrder: '', groupRestInFullOnMoodGap: true, groupMoodGapThresholdMinutes: 60, groupMoodGapMaxExtraWaitHours: 0, groupMoodGapExclusions: [], mergeIntervalMinutes: 10, enableMastery: true, fiammettaFool: true, fiammettaThreshold: 0.9, operatorMorale: {}, dormAtmosphere: 0,
   initialGold: 0, initialFragments: 0, initialDrones: 0,
   collectionIntervalHours: 0, operationDurationHours: 0, horizonHours: 24 * 90,
   elitePhase: 2, currentOccupants: {},
@@ -36,6 +36,7 @@ export function compileRosterSchedule(workspace: RosterWorkspace, options: Parti
   assumptions.enableParty=false
   assumptions.operatorMorale = safeClone(options.operatorMorale ?? {})
   assumptions.currentOccupants = safeClone(options.currentOccupants ?? {})
+  assumptions.groupRestingThresholds = safeClone(assumptions.groupRestingThresholds === undefined ? {} : assumptions.groupRestingThresholds)
   const diagnostics: CompiledSchedule['diagnostics'] = []
   const invalid = (path: string, message: string) => diagnostics.push({ code: 'INVALID_ASSUMPTION', severity: 'error', path, message })
   if (assumptions.dormIsolation !== undefined) {
@@ -43,6 +44,7 @@ export function compileRosterSchedule(workspace: RosterWorkspace, options: Parti
     else assumptions.dormIsolation = assumptions.dormIsolation.map(group => [...new Set(group.map(resolveOperatorCharId))])
   }
   if(assumptions.majorMaintenanceStartHours!==undefined&&(!Number.isFinite(assumptions.majorMaintenanceStartHours)||assumptions.majorMaintenanceStartHours<0))invalid('assumptions.majorMaintenanceStartHours','Maintenance start must be a nonnegative finite hour offset')
+  if(assumptions.majorMaintenanceDurationHours!==undefined&&(!Number.isFinite(assumptions.majorMaintenanceDurationHours)||assumptions.majorMaintenanceDurationHours<0))invalid('assumptions.majorMaintenanceDurationHours','Maintenance duration must be nonnegative and finite')
   if(assumptions.runOrderSimulationMode!==undefined&&assumptions.runOrderSimulationMode!=='ideal')invalid('assumptions.runOrderSimulationMode','Invalid simulation run-order mode')
   for (const key of ['enableMastery','enableParty','leifengMode'] as const) if (typeof assumptions[key] !== 'boolean') invalid('assumptions.'+key, 'Native scheduling switch must be boolean')
   for(const key of ['droneIntervalHours','maaGapHours'] as const)if(!Number.isFinite(assumptions[key])||assumptions[key]!<0)invalid('assumptions.'+key,'Native service interval must be nonnegative and finite')
@@ -55,7 +57,8 @@ export function compileRosterSchedule(workspace: RosterWorkspace, options: Parti
   else assumptions.groupMoodGapExclusions = [...new Set(assumptions.groupMoodGapExclusions)]
   if (!Number.isFinite(assumptions.mergeIntervalMinutes)) invalid('assumptions.mergeIntervalMinutes', 'merge_interval must be finite')
   if (typeof assumptions.freeRoom !== 'boolean') invalid('assumptions.freeRoom', 'free_room must be boolean')
-  if (!Number.isFinite(assumptions.restingThreshold) || assumptions.restingThreshold! < 0 || assumptions.restingThreshold! > 1) invalid('assumptions.restingThreshold', 'Resting threshold must be within 0..1')
+  if (!assumptions.groupRestingThresholds || typeof assumptions.groupRestingThresholds !== 'object' || Array.isArray(assumptions.groupRestingThresholds) || Object.entries(assumptions.groupRestingThresholds).some(([group, value]) => !group.trim() || !Number.isFinite(value) || value < .35 || value > 1)) invalid('assumptions.groupRestingThresholds', '各组心情阈值必须为非空组名到 0.35–1 的有限数映射')
+  if (!Number.isFinite(assumptions.restingThreshold) || assumptions.restingThreshold! < .35 || assumptions.restingThreshold! > 1) invalid('assumptions.restingThreshold', 'Resting threshold must be within 0.35..1')
   if (!Number.isFinite(assumptions.initialMorale) || assumptions.initialMorale < 0 || assumptions.initialMorale > 24) invalid('assumptions.initialMorale', '初始心情必须为 0–24 的有限数')
   if (!Number.isFinite(assumptions.horizonHours) || assumptions.horizonHours <= 0) invalid('assumptions.horizonHours', '模拟时长必须为正有限数')
   if (!Number.isFinite(assumptions.initialGold) || assumptions.initialGold < 0) invalid('assumptions.initialGold', '初始赤金不能为负数')
@@ -127,6 +130,6 @@ export function compileRosterSchedule(workspace: RosterWorkspace, options: Parti
   return {
     schemaVersion: 1, rooms, operators, restPools, policies, rawConf, runOrderPolicies,
     fiammettaPolicies, diagnostics, sourceWorkspace,
-    assumptions: { ...assumptions, dataVersion: GAME_DATA_VERSION, compilerVersion: '1', levelSource: Object.keys(workspace.compatibility.unrecognizedFields.facility_levels ?? {}).length ? 'saved-with-inferred-fallback' : 'workspace-inferred', importSource: workspace.compatibility.sourceVersion ?? 'workspace', defaultsApplied },
+    assumptions: { ...assumptions, dataVersion: GAME_DATA_VERSION, compilerVersion: '2-predictive-mood-control-v1', levelSource: Object.keys(workspace.compatibility.unrecognizedFields.facility_levels ?? {}).length ? 'saved-with-inferred-fallback' : 'workspace-inferred', importSource: workspace.compatibility.sourceVersion ?? 'workspace', defaultsApplied },
   }
 }

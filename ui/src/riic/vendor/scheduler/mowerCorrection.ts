@@ -30,7 +30,9 @@ function completeMowerDepartedRecovery(data:MowerSchedulingData,plan:MowerTaskPl
  const projected=projectMowerArrangements(data,[plan])
  const missing=[...names].filter(name=>{
   const op=projected.operators[name]!
-  if(op.workaholic||op.room.startsWith('dorm')||op.currentRoom||projected.restMoodComplete(name))return false
+  if(op.workaholic||op.room.startsWith('dorm')||op.currentRoom)return false
+  if(projected.freeRoomExcluded(name))return true
+  if(projected.restMoodComplete(name))return false
   const mood=mowerDormCandidateMood(projected,name)
   return mood===undefined||mood<op.upperLimit
  })
@@ -141,11 +143,12 @@ export function mowerCorrectionPlan(data:MowerSchedulingData,skipDorm=false,expl
  }
  for(const [room,names] of Object.entries(plan))if(skipDorm&&room.startsWith('dorm')&&names.every(n=>n==='Free'||n==='Current'))delete plan[room]
  for(const op of Object.values(data.operators))if(data.busyRestingNames.has(op.name)&&op.room==='train')delete plan.train
+ for(const [room,row] of Object.entries(plan))row.forEach((_,index)=>{if(explicitSlots.has(alphaPosition(room,index)))row[index]='Current'})
  preferMowerRestingReplacements(data,plan)
  if(data.alpha){
   alphaCorrectGroupDorms(data,plan)
   for(const [room,names] of Object.entries(plan))if(room.startsWith('dorm')){
-   names.forEach((name,index)=>{if(data.restMoodComplete(name)&&data.currentOperator(room,index)?.name!==name)names[index]='Current'})
+   names.forEach((name,index)=>{if(data.restMoodComplete(name)&&!data.freeRoomExcluded(name)&&data.currentOperator(room,index)?.name!==name)names[index]='Current'})
    if(names.every(n=>n==='Current'))delete plan[room]
   }
   // Explicit backup positions retain physical occupancy through correction.

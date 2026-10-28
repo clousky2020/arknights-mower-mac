@@ -6,13 +6,13 @@ import pickle
 import sqlite3
 import traceback
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from threading import Event, Lock
 
 import pytz
 from tzlocal import get_localzone
 
-from arknights_mower.solvers.mood_history_query import FIAMMETTA_CURVE_FILTER
+from arknights_mower.solvers.mood_history_query import mood_curve_filter
 from arknights_mower.utils import config
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
@@ -35,6 +35,12 @@ _DB_TABLE_STMTS = (
     "mood_event TEXT"
     ")",
     "CREATE TABLE IF NOT EXISTS saved_state (time TEXT,state BLOB)",
+    "CREATE TABLE IF NOT EXISTS maa_paradox_progress ("
+    "id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS maa_sss_progress ("
+    "id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS maa_copilot_progress ("
+    "id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS trading_history ("
     "time INTEGER PRIMARY KEY,"
     "server_date TEXT,"
@@ -270,6 +276,10 @@ def current_state():
     ):
         return None
     data, tasks = base_scheduler.op_data, base_scheduler.tasks
+    if any(getattr(task, "mood_control_event", None) for task in tasks):
+        tasks = [
+            task for task in tasks if not getattr(task, "mood_control_event", None)
+        ]
     return {
         "dorm": data.all_dorms(),
         "tasks": tasks,
@@ -312,12 +322,17 @@ def current_state():
             getattr(base_scheduler, "_initial_mood_refresh_rooms", ())
         ),
         "daily_visit_friend": base_scheduler.daily_visit_friend,
+        "maa_daily_completed": getattr(base_scheduler, "maa_daily_completed", {}),
         "daily_visit_friend_attempt": getattr(
             base_scheduler, "daily_visit_friend_attempt", None
         ),
         "daily_report": base_scheduler.daily_report,
         "daily_skland": base_scheduler.daily_skland,
         "daily_mail": base_scheduler.daily_mail,
+        "daily_event_sign_in": getattr(base_scheduler, "daily_event_sign_in", date.min),
+        "daily_event_sign_in_attempt": getattr(
+            base_scheduler, "daily_event_sign_in_attempt", None
+        ),
         "task_count": base_scheduler.task_count,
     }
 
@@ -377,6 +392,57 @@ def save_state_to_db(saved_state):
 
 def save_current_state():
     return save_state_to_db(current_state())
+
+
+def load_maa_copilot_progress():
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT payload FROM maa_copilot_progress WHERE id = 1"
+        ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def save_maa_copilot_progress(progress):
+    with _conn() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO maa_copilot_progress VALUES (1, ?)",
+            (json.dumps(progress),),
+        )
+        connection.commit()
+
+
+def load_maa_paradox_progress():
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT payload FROM maa_paradox_progress WHERE id = 1"
+        ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def save_maa_paradox_progress(progress):
+    with _conn() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO maa_paradox_progress VALUES (1, ?)",
+            (json.dumps(progress),),
+        )
+        connection.commit()
+
+
+def load_maa_sss_progress():
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT payload FROM maa_sss_progress WHERE id = 1"
+        ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def save_maa_sss_progress(progress):
+    with _conn() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO maa_sss_progress VALUES (1, ?)",
+            (json.dumps(progress),),
+        )
+        connection.commit()
 
 
 def save_state(func):
@@ -570,6 +636,7 @@ def get_mood_ratios(*, include_work_rest=True):
         for _ in favorite
     )
     try:
+        columns = {row[1] for row in _fetchall("PRAGMA table_info(agent_action)")}
         # 查询数据（筛掉宿管和替班组的数据）
         data = _fetchall(
             """
@@ -589,7 +656,7 @@ def get_mood_ratios(*, include_work_rest=True):
                         WHERE a.current_time >= DATE('now', '-7 day', 'localtime')
                         AND
             """
-            + FIAMMETTA_CURVE_FILTER
+            + mood_curve_filter(columns)
             + """
                         ORDER BY a.agent_group DESC, a.current_time;
 

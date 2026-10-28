@@ -2,6 +2,7 @@
 
 import pickle
 from datetime import timedelta
+from itertools import cycle
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -219,11 +220,31 @@ def test_failed_floor_read_yields_without_repeated_dispatch(
     solver.get_agent_from_room.assert_called_once()
 
 
+def _prepare_zero_floor_reader(solver, clock):
+    covers, deadlines = _prepare_same_room_reader(solver, clock, 2)
+    solver.read_time = Mock(return_value=None)
+    solver.detect_room = Mock(return_value="central")
+    solver.find = Mock(
+        side_effect=lambda resource, **kwargs: (
+            True if resource == "room_detail" else None
+        )
+    )
+    solver.read_operator_time = base.BaseSchedulerSolver.read_operator_time.__get__(
+        solver
+    )
+    solver.translate_room = base.BaseSchedulerSolver.translate_room.__get__(solver)
+    # 每个槽位读取一次姓名，复用真实倒计时入口处理没有计时的耗尽状态。
+    solver.read_screen.side_effect = cycle(cover.name for cover in covers)
+    solver.read_accurate_mood.side_effect = None
+    solver.read_accurate_mood.return_value = 0
+    return covers, deadlines
+
+
 def test_same_room_floor_confirmation_supplies_both_checks(
     replacement_solver, clock, calculated
 ):
     solver = replacement_solver
-    covers, _ = _prepare_same_room_reader(solver, clock, 2)
+    covers, _ = _prepare_zero_floor_reader(solver, clock)
     model_values(solver.op_data, {op.name: 0 for op in covers} | {"赫默": 20})
     solver.read_accurate_mood.side_effect = None
     solver.read_accurate_mood.return_value = 0
@@ -234,7 +255,13 @@ def test_same_room_floor_confirmation_supplies_both_checks(
     assert replacement_check.run_replacement_check(solver, second) is False
     assert second.execution_failure
     solver.enter_room.assert_called_once()
-    assert solver.read_accurate_mood.call_count == 2
+    assert solver.read_screen.call_count == solver.read_accurate_mood.call_count == 2
+    assert solver.read_time.call_count == 2
+    solver.recog.update.assert_not_called()
+    assert [(cover.current_room, cover.current_index) for cover in covers] == [
+        ("central", 0),
+        ("central", 1),
+    ]
 
 
 @pytest.mark.parametrize("release", [None, "before", "during"])
@@ -242,7 +269,7 @@ def test_peer_same_value_read_preserves_failure_but_keeps_external_release(
     replacement_solver, clock, calculated, release
 ):
     solver = replacement_solver
-    covers, _ = _prepare_same_room_reader(solver, clock, 2)
+    covers, _ = _prepare_zero_floor_reader(solver, clock)
     model_values(solver.op_data, {op.name: 0 for op in covers} | {"赫默": 20})
     spare = solver.op_data.operators["赫默"]
     spare.current_room, spare.current_index = "meeting", 0
@@ -376,3 +403,28 @@ def test_existing_immediate_task_acquires_deadline_without_dispatch(
     assert check.time == expected
     assert check.display_name == "替班下限确认：薇薇安娜"
     solver.enter_room.assert_not_called()
+
+
+def test_same_room_zero_read_keeps_each_working_countdown(
+    replacement_solver, clock, calculated
+):
+    solver = replacement_solver
+    covers, _ = _prepare_zero_floor_reader(solver, clock)
+    model_values(solver.op_data, {op.name: 0 for op in covers} | {"赫默": 20})
+    solver.read_time.side_effect = [1800, 2400]
+    replacement_check.sync_replacement_checks(solver)
+    first, second = solver.tasks
+    for task in (first, second):
+        assert replacement_check.run_replacement_check(solver, task) is False
+    assert solver.tasks == [first, second]
+    assert [task.time for task in solver.tasks] == [
+        clock.now() + timedelta(minutes=30),
+        clock.now() + timedelta(minutes=40),
+    ]
+    assert [cover.current_index for cover in covers] == [0, 1]
+    assert all(cover.mood == 0 for cover in covers)
+    assert not any(
+        task.plan or getattr(task, "execution_failure", None) for task in solver.tasks
+    )
+    solver.enter_room.assert_called_once()
+    assert solver.read_time.call_count == 2

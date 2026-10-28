@@ -41,6 +41,7 @@ describe('income export calculation', () => {
       settings = modelSettings()
     source.advanced_settings = {
       resting_threshold: 0.7,
+      group_resting_thresholds: { 主表组: 0.35 },
       fia_fool: false,
       group_rest_in_full_on_mood_gap: true,
       group_mood_gap_max_extra_wait_hours: 0.5,
@@ -55,6 +56,7 @@ describe('income export calculation', () => {
     })
     expect(request.options.simulationAssumptions).toMatchObject({
       restingThreshold: 0.7,
+      groupRestingThresholds: { 主表组: 0.35 },
       fiammettaFool: false,
       groupRestInFullOnMoodGap: true,
       groupMoodGapMaxExtraWaitHours: 0.5,
@@ -63,6 +65,14 @@ describe('income export calculation', () => {
     const compiled = compileRosterSchedule(request.workspace, request.options.simulationAssumptions)
     const runtimeConfig = compiledScheduleToRuntimeConfig(compiled)
     const runtime = createRosterRuntime(runtimeConfig)
+    expect(getMowerSourceRuntime(runtime).data.policy.groupRestingThresholds).toEqual({
+      主表组: 0.35
+    })
+    runtimeConfig.mowerPolicy.groupRestingThresholds.主表组 = 0.8
+    expect(compiled.assumptions.groupRestingThresholds).toEqual({ 主表组: 0.35 })
+    expect(getMowerSourceRuntime(runtime).data.policy.groupRestingThresholds).toEqual({
+      主表组: 0.35
+    })
     expect(getMowerSourceRuntime(runtime).data.groupMoodGapThresholdMinutes).toBe(60)
     expect(getMowerSourceRuntime(runtime).data.groupMoodGapExclusions).toEqual(['主表组', '副表组'])
     runtimeConfig.mowerPolicy.groupMoodGapExclusions.push('额外组')
@@ -473,11 +483,20 @@ it('reports saved initial conditions and source versions without relabeling hist
     calculatorBaseRevision: '55294037d208bf1c416af386236ac0b12f321f66',
     calculatorSyncRevision: '6ddbeece6264e1881b7bf34f9b346bbf03704fff',
     mowerBaseReference: '80c97ee604375af144090656ef84b083acd6dc7f',
-    mowerCheckedRevision: '84e3926c0f36045d7baeb1ac050f815b40952d6d'
+    mowerCheckedRevision: '84e3926c0f36045d7baeb1ac050f815b40952d6d',
+    moodControlStrategyVersion: 'ordinary-threshold-v1',
+    predictiveMoodControl: false
   })
   const saved = structuredClone(result)
   const report = incomeReportLines(saved, settings, source, '主表').join('\n')
   expect(report).toContain('菲亚梅塔初始心情 16')
+  expect(report).toContain('按正常下班阈值轮休，不为避免替班断档而提前下班')
+  expect(report).toContain('普通救急召回须能坚持到对应主班回满')
+  const predictive = structuredClone(saved)
+  predictive.modelProvenance.moodControlStrategyVersion = 'predictive-mood-control-v1'
+  const predictiveReport = incomeReportLines(predictive, settings, source, '主表').join('\n')
+  expect(predictiveReport).toContain('轮班策略 predictive-mood-control-v1')
+  expect(predictiveReport).not.toContain('按正常下班阈值轮休')
   expect(report).toContain(`选择性同步 ${saved.modelProvenance.calculatorSyncRevision}`)
   expect(report).toContain(`本轮核对 ${saved.modelProvenance.mowerCheckedRevision}`)
   const historical = { ...saved }
@@ -511,13 +530,13 @@ it('does not count ordinary gold delivery as gold income or deduct it from manuf
   })
   expect(result.success, result.error).toBe(true)
   expect(result.summary.goldConsumed).toBeGreaterThan(0)
-  expect(incomeGoldEquivalentLmd(result.summary)).toBeCloseTo(9000, 8)
+  expect(incomeGoldEquivalentLmd(result.summary)).toBeCloseTo(10000, 8)
   expect(incomeImageMetrics(result.summary, 1).find((row) => row.key === 'gold').daily).toBeCloseTo(
-    9000,
+    10000,
     8
   )
   const rows = incomeMetrics(result.summary, 1)
-  expect(rows.find((row) => row.label === '赤金等价龙门币').daily).toBeCloseTo(9000, 8)
+  expect(rows.find((row) => row.label === '赤金等价龙门币').daily).toBeCloseTo(10000, 8)
   expect(rows.some((row) => ['赤金产量', '赤金消耗', '赤金净增'].includes(row.label))).toBe(false)
   source.plan1.room_1_1.product = 'exp'
   const noGold = calculateIncome(source, {

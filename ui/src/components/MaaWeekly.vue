@@ -419,7 +419,7 @@ function cancelCopyDialogLongPress() {
       <WeeklyPlanSelector compact />
     </div>
 
-    <n-tabs v-model:value="editorMode" type="segment" animated class="weekly-plan-editors">
+    <n-tabs v-model:value="editorMode" type="segment" class="weekly-plan-editors">
       <n-tab-pane name="list" tab="列表计划">
         <table class="weekly-plan-table">
           <thead>
@@ -427,7 +427,7 @@ function cancelCopyDialogLongPress() {
               <th class="weekday-column">日期</th>
               <th>关卡</th>
               <th v-if="stage_plan_runner === 'maa'" class="number-column">每次吃药</th>
-              <th class="number-column">体力阈值</th>
+              <th v-if="stage_plan_runner === 'mower'" class="number-column">体力阈值</th>
             </tr>
           </thead>
           <tbody>
@@ -461,7 +461,7 @@ function cancelCopyDialogLongPress() {
                   <template #suffix>药</template>
                 </mower-input-number>
               </td>
-              <td class="number-column">
+              <td v-if="stage_plan_runner === 'mower'" class="number-column">
                 <span class="weekly-mobile-label">体力阈值</span>
                 <mower-input-number
                   v-model:value="plan.sanity_threshold"

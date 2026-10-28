@@ -1,5 +1,12 @@
 # Software Update Contract
 
+<a id="github-file-download-fallback"></a>
+## GitHub File Download Fallback
+
+The shared `github_download.request_download` path tries direct GitHub first when the download proxy setting is empty, followed by `https://ghfast.top/`, `https://gh-proxy.com/`, `https://gh-proxy.org/` and `https://edgeone.gh-proxy.org/` in that order. The existing ghfast station remains first. The additional stations use the [GH-Proxy service](https://gh-proxy.com/docs/github-accelerator); the maintained [XIU2 download-source list](https://github.com/XIU2/UserScript/blob/7e93aceb592a613d499ed21b3e9886377e31fba0/GithubEnhanced-High-Speed-Download.user.js) attributes both alternate domains to gh-proxy.com. Connection failures, timeouts and HTTP 403, 429 or 5xx responses advance to the next candidate; other HTTP failures stop immediately. Each candidate is attempted at most once. Failed HTTP responses close before advancing, and the caller owns the successful response. Body-read failures remain the caller's responsibility.
+
+An explicit download proxy uses only that station. GitHub API calls and hosts outside the file-download allowlist retain their original URLs. The settings connection test uses this same download path, reports the selected fallback hostname and allows 105 seconds on the client for five candidates with the existing ten-second connect and read timeouts. These third-party stations are download providers, not an authenticity guarantee; existing per-caller validation remains applicable. Focused offline coverage is in [`network_settings_tests.py`](../../arknights_mower/tests/network_settings_tests.py).
+
 ## 1. Command Execution
 
 `Worker.run_command` executes fixed argument lists without a shell. Each command has a monotonic deadline and respects preparation cancellation. POSIX commands own a process group; Windows commands enter a dedicated Job before execution and keep their descendants inside that Job. The installer uses the standard library.
@@ -17,7 +24,7 @@ Disabled instances hide software, resource and MAA update controls and the globa
 
 During a shared software update, the temporary progress service preserves each instance's permission: unauthorized instances can read progress but cannot cancel the update, and their cancellation control is hidden. Authorization controls who can initiate or cancel maintenance from an instance page, not which version an instance uses. The standalone manager's own Mower and MAA maintenance remains available regardless of these per-instance choices, subject to its existing installation validation, stopped-instance requirements and maintenance locks. A manager update or an authorized instance update can replace shared files used by a disabled instance. This boundary does not restrict users who can directly edit host files or launch a separate standalone process.
 
-The native manager also offers online software-update checks, version/restart confirmation, installation status and preparation cancellation through its local bridge. Update admission accepts a registered desktop instance in the current process or a registered manager in its parent process; an unrelated manager does not authorize direct server deployment. Instance Web software updates remain available when 更新与维护 is enabled. Disabled managed instances reject update checks, installation, cancellation, remote selection and package submission; local version reads remain available. Token and origin checks still apply; managed MAA maintenance remains owned by the standalone manager even when the switch is enabled. Both entry points reuse the same detached installer and restart behavior. The installer can shut down and restore a manager-only launch without a running instance; empty and OCR-only registrations remain rejected. All installation submissions acquire the shared nonblocking manager-maintenance lease, so a manager MAA job and Mower installation cannot terminate each other. An admitted software operation also rejects a new manager MAA job; callers retry explicitly after completion.
+The native manager also offers online software-update checks, version/restart confirmation, installation status and preparation cancellation through its local bridge. Update admission accepts a registered desktop instance in the current process or a registered manager in its parent process; an unrelated manager does not authorize direct server deployment. Instance Web software updates remain available when 更新与维护 is enabled. Disabled managed instances reject update checks, installation, cancellation, remote selection and package submission; local version reads remain available. Token and origin checks still apply. With 更新与维护 enabled, managed instances can also check and install MAA core/resource updates and save their update policies; MAA location and connection settings remain manager-owned. Both entry points reuse the same detached installer and restart behavior. The installer can shut down and restore a manager-only launch without a running instance; empty and OCR-only registrations remain rejected. All installation submissions acquire the shared nonblocking manager-maintenance lease, so a manager MAA job and Mower installation cannot terminate each other. An admitted software operation also rejects a new manager MAA job; callers retry explicitly after completion.
 
 ## 2. Global Update Drop
 
@@ -59,6 +66,11 @@ Cancellation and timeout terminate only the owned command tree. Successful root-
 
 [Command tree cleanup](../../.agents/notes/implemented/bug-fix/2026-10-02-update-command-tree-cleanup.md) records implementation and focused verification.
 
+<a id="source-dependency-environments"></a>
+### Source Dependency Environments
+
+Source updates retain and rebuild an owned project virtual environment with pip when dependency changes require it. Other environments receive in-place dependency installation, which adds or updates target requirements without removing retired distributions. Its rollback reinstalls the original requirements and does not restore the complete shared environment. Source jobs run the detached installer copied from the initiating version; changes in the target checkout do not replace that running installer. The [OCR dependency migration procedure](../cookbook/source-dependency-migration.md) covers replacement environments, conflicting OpenCV distributions and recovery when adopting RapidOCR 3.10 and PP-OCRv6 tiny.
+
 <a id="6-nightly-version-direction"></a>
 ## 6. Online Channel Targets
 
@@ -72,7 +84,9 @@ The [archived Nightly direction decision](../../.agents/notes/archived/bug-fix/2
 
 ## 7. MAA Resource Updates
 
-`/maa-resource-update/info` reports support for installed MAA on Windows, macOS and Linux. `MaaBasic` displays its independent resource controls from that response. `/maa-resource-update/check` uses the selected GitHub or Mirror酱 source; `/maa-resource-update/start` follows the [MAA update admission policy](maa-integration.md#29-independent-update-policies), including unknown local versions. Both resource and core updates share the maintenance lock and reject active MAA use.
+The instance page places MAA core and resource update controls together in 网络与更新, immediately after the Mower resource updater. `MaaUpdates` owns their checks, policies and progress; `MaaBasic` retains connection and game-theme settings. Update permission applies independently of manager ownership of the device configuration.
+
+`/maa-resource-update/info` reports support for installed MAA on Windows, macOS and Linux. `MaaUpdates` displays its independent resource controls from that response. `/maa-resource-update/check` uses the selected GitHub or Mirror酱 source; `/maa-resource-update/start` follows the [MAA update admission policy](maa-integration.md#29-independent-update-policies), including unknown local versions. Both resource and core updates share the maintenance lock and reject active MAA use.
 
 `install_maa_resource_update` stages an incremental resource merge, preserves core and Python files, and replaces only `resource`. The previous resource tree remains in the installation's `.old/resource`; failed replacement or version verification restores the original tree and previous backup. A merged resource tree must satisfy the installed package's file list before replacement. Core updates follow the [MAA package validation and backup boundary](#17-maa-package-validation-and-backups).
 
@@ -148,7 +162,9 @@ Persistent update preferences use the shared data root's
 SHA-256-derived key of the resolved update state directory, retaining installation
 and data-root separation while all its instances share the settings. This file
 stores channel, background mode, automatic checks and updates, source branch,
-source remote and remote history. On first read, an absent destination receives
+source remote and remote history. Background restart defaults to disabled when
+the preference is absent; an explicitly saved choice remains effective. On first
+read, an absent destination receives
 the former update-cache `settings.json` under a migration lock. An existing
 destination wins; migration errors propagate without overwriting the source.
 Update coordination, downloads and temporary workspaces remain in the cache.

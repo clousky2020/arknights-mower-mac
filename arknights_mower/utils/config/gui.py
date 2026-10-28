@@ -1,8 +1,12 @@
 """实例的窗口设置与界面偏好；读改写共用跨进程文件锁。"""
 
 import errno
+import hashlib
+import hmac
+import math
 import os
 import re
+import secrets
 import time
 from contextlib import contextmanager
 from threading import RLock
@@ -15,9 +19,14 @@ from arknights_mower.utils.window_shell import WindowRatio
 
 _gui_lock = RLock()
 _KEY_PATTERN = re.compile(r"[a-zA-Z0-9_-]{1,100}\Z")
+_SNAPSHOT_NUMBER_PATTERN = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z"
+)
 _MAX_GROUPS = 20
 _MAX_KNOWN_KEYS = 100
 _MAX_PLACEMENTS = 2200
+_WATERMARK_CONFIRMATION = "反馈问题时务必说明具体版本"
+_WATERMARK_SIGNATURE_MESSAGE = b"arknights-mower:watermark-hidden:v1"
 
 
 class GuiStorageError(OSError):
@@ -187,6 +196,148 @@ def save_sidebar(value: object) -> dict:
     return sidebar
 
 
+def _depot_defaults() -> dict:
+    return {
+        "favorites": [],
+        "view": {
+            "stockFilter": "all",
+            "deltaFilter": "all",
+            "showDerived": True,
+            "sortMode": "tier",
+            "showcaseTab": "core",
+        },
+        "baseline": {
+            "mode": "time",
+            "preset": "previous",
+            "range": None,
+            "followLatest": True,
+            "startKey": "previous",
+            "endKey": "latest",
+        },
+    }
+
+
+def _finite_number(value) -> bool:
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _valid_snapshot_key(value) -> bool:
+    if not isinstance(value, str) or not 1 <= len(value) <= 100 or not value.strip():
+        return False
+    if value in ("previous", "first", "latest"):
+        return True
+    if _SNAPSHOT_NUMBER_PATTERN.fullmatch(value.strip()) is None:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except ValueError:
+        return False
+
+
+def validate_depot(value: object) -> dict:
+    defaults = _depot_defaults()
+    if not isinstance(value, dict) or not value or not value.keys() <= defaults.keys():
+        raise ValueError("仓库偏好格式无效")
+    clean = {}
+    if "favorites" in value:
+        favorites = value["favorites"]
+        if (
+            not isinstance(favorites, list)
+            or len(favorites) > 1000
+            or any(
+                not isinstance(name, str)
+                or not 1 <= len(name) <= 128
+                or not name.strip()
+                for name in favorites
+            )
+        ):
+            raise ValueError("仓库关注物品无效或超过上限")
+        clean["favorites"] = list(dict.fromkeys(favorites))
+    if "view" in value:
+        view = value["view"]
+        choices = {
+            "stockFilter": ("all", "favorite", "owned", "empty"),
+            "deltaFilter": ("all", "increased", "decreased", "changed"),
+            "sortMode": (
+                "tier",
+                "delta-desc",
+                "delta-asc",
+                "count-desc",
+                "count-asc",
+                "name",
+            ),
+            "showcaseTab": ("core", "favorites"),
+        }
+        if (
+            not isinstance(view, dict)
+            or view.keys() != defaults["view"].keys()
+            or type(view.get("showDerived")) is not bool
+            or any(view.get(key) not in options for key, options in choices.items())
+        ):
+            raise ValueError("仓库显示偏好无效")
+        clean["view"] = dict(view)
+    if "baseline" in value:
+        baseline = value["baseline"]
+        if (
+            not isinstance(baseline, dict)
+            or baseline.keys() != defaults["baseline"].keys()
+            or baseline.get("mode") not in ("time", "snapshot")
+            or baseline.get("preset")
+            not in ("previous", "today", "7d", "14d", "30d", "all", "custom")
+            or type(baseline.get("followLatest")) is not bool
+            or not _valid_snapshot_key(baseline.get("startKey"))
+            or not _valid_snapshot_key(baseline.get("endKey"))
+        ):
+            raise ValueError("仓库对比基准无效")
+        time_range = baseline["range"]
+        if time_range is not None and (
+            not isinstance(time_range, list)
+            or len(time_range) != 2
+            or not all(_finite_number(part) for part in time_range)
+            or time_range[0] > time_range[1]
+        ):
+            raise ValueError("仓库对比时间范围无效")
+        clean["baseline"] = {
+            **baseline,
+            "range": None
+            if baseline["mode"] == "snapshot" or time_range is None
+            else list(time_range),
+        }
+    return clean
+
+
+def _read_depot(data: dict) -> dict | None:
+    try:
+        return {**_depot_defaults(), **validate_depot(data.get("depot"))}
+    except ValueError:
+        return None
+
+
+def load_depot() -> dict | None:
+    return _read_depot(read_gui_data(strict=True))
+
+
+def save_depot(value: object, *, migrate=False) -> dict:
+    changes = validate_depot(value)
+    if type(migrate) is not bool or (
+        migrate and changes.keys() != _depot_defaults().keys()
+    ):
+        raise ValueError("仓库偏好迁移格式无效")
+
+    def update(data):
+        current = _read_depot(data)
+        if migrate and current is not None:
+            return current
+        result = {**(current or _depot_defaults()), **changes}
+        data["depot"] = result
+        return result
+
+    return update_gui_data(update)
+
+
 def load_software_version_display() -> str:
     value = read_gui_data(strict=True).get("software_version_display")
     return value if value in ("version", "channel") else "version"
@@ -207,24 +358,86 @@ def load_task_settings_layout() -> str:
     return value if value in ("checklist", "waterfall") else "checklist"
 
 
+def load_watermark_visible() -> bool:
+    data = read_gui_data(strict=True)
+    if data.get("watermark_visible") is not False:
+        return True
+    signature = data.get("watermark_signature")
+    if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature):
+        return True
+    key = _watermark_key()
+    return key is None or not hmac.compare_digest(signature, _watermark_signature(key))
+
+
+def _watermark_key(*, create=False) -> bytes | None:
+    path = gui_path.with_name("gui-watermark.key")
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(65)
+    except FileNotFoundError:
+        raw = b""
+    try:
+        key = bytes.fromhex(raw.decode("ascii"))
+    except (ValueError, UnicodeDecodeError):
+        key = b""
+    if len(raw) == 64 and len(key) == 32:
+        return key
+    if not create:
+        return None
+    key = secrets.token_bytes(32)
+    atomic_write(path, lambda stream: stream.write(key.hex()))
+    return key
+
+
+def _watermark_signature(key: bytes) -> str:
+    return hmac.new(key, _WATERMARK_SIGNATURE_MESSAGE, hashlib.sha256).hexdigest()
+
+
 def save_appearance(changes: dict) -> dict:
     fields = {
-        "software_version_display": (("version", "channel"), "软件版本显示方式无效"),
-        "software_version_language": (("zh", "en"), "软件版本类型语言无效"),
-        "task_settings_layout": (("checklist", "waterfall"), "任务配置显示方式无效"),
+        "software_version_display": (
+            str,
+            ("version", "channel"),
+            "软件版本显示方式无效",
+        ),
+        "software_version_language": (str, ("zh", "en"), "软件版本类型语言无效"),
+        "task_settings_layout": (
+            str,
+            ("checklist", "waterfall"),
+            "任务配置显示方式无效",
+        ),
+        "watermark_visible": (bool, (True, False), "版本水印显示设置无效"),
     }
     if (
         not isinstance(changes, dict)
         or not changes
-        or not changes.keys() <= fields.keys()
+        or not changes.keys() <= fields.keys() | {"watermark_confirmation"}
     ):
         raise ValueError("请提供有效的外观配置")
-    for key, value in changes.items():
-        choices, message = fields[key]
-        if not isinstance(value, str) or value not in choices:
+    values = {key: value for key, value in changes.items() if key in fields}
+    if not values:
+        raise ValueError("请提供有效的外观配置")
+    for key, value in values.items():
+        value_type, choices, message = fields[key]
+        if not isinstance(value, value_type) or value not in choices:
             raise ValueError(message)
-    _update_gui_data(**changes)
-    return dict(changes)
+    if values.get("watermark_visible") is False:
+        if changes.get("watermark_confirmation") != _WATERMARK_CONFIRMATION:
+            raise ValueError("隐藏版本水印前，请输入：反馈问题时务必说明具体版本")
+    elif "watermark_confirmation" in changes:
+        raise ValueError("仅隐藏版本水印时需要提交确认文字")
+
+    def update(data):
+        data.update(values)
+        if values.get("watermark_visible") is False:
+            data["watermark_signature"] = _watermark_signature(
+                _watermark_key(create=True)
+            )
+        elif values.get("watermark_visible") is True:
+            data.pop("watermark_signature", None)
+
+    update_gui_data(update)
+    return values
 
 
 def load_window_mode() -> str:

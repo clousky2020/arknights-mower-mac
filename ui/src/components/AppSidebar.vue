@@ -768,6 +768,7 @@ const { tipKey, setTip, focusTip, blurTip } = useCollapsedTips(() => props.colla
   font: inherit;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1.6;
   color: var(--sidebar-muted);
   text-align: left;
   white-space: nowrap;
@@ -849,6 +850,15 @@ button.app-sidebar__heading:not(:disabled) {
 .app-sidebar__section.mower-drag-fallback {
   max-height: min(420px, 60dvh);
   border: 0 !important;
+}
+
+.app-sidebar__section.mower-drag-fallback .app-sidebar__heading-row {
+  margin-inline: 0;
+}
+
+.app-sidebar__section.mower-drag-ghost > *,
+.app-sidebar__row.mower-drag-ghost > * {
+  visibility: hidden;
 }
 
 .mower-drag-fallback .app-sidebar__menu {
@@ -1048,6 +1058,10 @@ button.app-sidebar__heading:not(:disabled) {
 
 .app-sidebar--collapsed .app-sidebar__footer {
   padding: 10px 8px 6px;
+}
+
+.app-sidebar:not(.app-sidebar--mobile) .app-sidebar__footer {
+  padding-bottom: 16px;
 }
 
 .app-sidebar--collapsed .app-sidebar__heading-row {

@@ -1371,14 +1371,17 @@ class BaseMixin:
         action = "打开" if opened else "关闭"
         raise AgentSelectionNotReady(f"{action}职业筛选失败")
 
-    def detect_room_number(self, img) -> int:
-        score = []
+    def detect_room_number(self, img) -> int | None:
+        best_digit, best_score = None, -1
         for i in range(1, 5):
             digit = loadres(f"room/{i}")
+            if img.shape[0] < digit.shape[0] or img.shape[1] < digit.shape[1]:
+                continue
             result = cv2.matchTemplate(img, digit, cv2.TM_CCOEFF_NORMED)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-            score.append(max_val)
-        return score.index(max(score)) + 1
+            score = cv2.minMaxLoc(result)[1]
+            if np.isfinite(score) and score > best_score:
+                best_digit, best_score = i, score
+        return best_digit if best_score >= 0.78 else None
 
     def detect_room_type(self) -> str | None:
         """标题优先确认设施类型；未知标题保留图标识别。"""
@@ -1429,8 +1432,10 @@ class BaseMixin:
             if room == "central":
                 logger.debug("控制中枢")
             elif room == "dormitory":
-                digit = cropimg(img, ((174, 24), (195, 54)))
+                digit = cropimg(img, ((168, 18), (201, 60)))
                 digit = self.detect_room_number(digit)
+                if digit is None:
+                    return ""
                 if digit == 4:
                     logger.debug("宿舍B401")
                 else:
@@ -1452,10 +1457,13 @@ class BaseMixin:
             ROOM_TITLE_TYPES[room] if room else self._detect_room_type_by_color()
         )
         if colored_room in ["制造站", "贸易站", "发电站"]:
-            digit_1 = cropimg(img, ((211, 24), (232, 54)))
-            digit_2 = cropimg(img, ((253, 24), (274, 54)))
+            # 订单页标题较房间详情略有偏移，保留六像素边距以匹配完整数字。
+            digit_1 = cropimg(img, ((205, 18), (238, 60)))
+            digit_2 = cropimg(img, ((247, 18), (280, 60)))
             digit_1 = self.detect_room_number(digit_1)
             digit_2 = self.detect_room_number(digit_2)
+            if digit_1 is None or digit_2 is None:
+                return ""
             logger.debug(f"{colored_room}B{digit_1}0{digit_2}")
             return f"room_{digit_1}_{digit_2}"
         elif colored_room == "训练室":
@@ -1521,13 +1529,19 @@ class BaseMixin:
             for retry_times in range(9):
                 if self.find("connecting"):
                     self.sleep()
+                elif self.find("order_label"):
+                    # 同一房间的订单页也不能作为房间进入完成，先恢复地图入口。
+                    logger.info("仍在贸易站订单列表，返回基建地图后进入 %s", room)
+                    self.back_to_infrastructure()
                 elif pos := self.find("control_central"):
                     # 地图观测参与场景计时，避免跨房换班只累计房间结束页。
                     if self.scene() != Scene.INFRA_MAIN:
                         if self.detect_room() == room:
                             return
-                        self.sleep(0.2)
-                        continue
+                        # 场景观测可能清除超时画面；重新确认地图锚点后再点击。
+                        if not (pos := self.find("control_central")):
+                            self.sleep(0.2)
+                            continue
                     if actions >= 5:
                         break
                     actions += 1
@@ -1548,7 +1562,9 @@ class BaseMixin:
                         # 点击后的地图、连接中和未知画面共用同一确认期限。
                         if not self.find("connecting"):
                             self._handle_room_entry_reward(room)
-                            if self.detect_room() == room:
+                            if self.detect_room() == room and not self.find(
+                                "order_label"
+                            ):
                                 return
                         # 先识别再检查期限，保留超时后的首帧；截图耗时计入等待。
                         if perf_counter() >= room_deadline:
@@ -1556,9 +1572,13 @@ class BaseMixin:
                         self.sleep(poll_interval)
                     if self.find("connecting"):
                         break
+                    # 收取产物后仍可能停在地图，沿用本轮点击上限继续进入。
+                    if self.find("control_central") and not self.find("order_label"):
+                        continue
                     if self.scene() in (
                         Scene.INFRA_DETAILS,
                         Scene.CTRLCENTER_ASSISTANT,
+                        Scene.ORDER_LIST,
                     ):
                         logger.info("仍在其他房间，返回基建地图后进入 %s", room)
                         self.back_to_infrastructure()

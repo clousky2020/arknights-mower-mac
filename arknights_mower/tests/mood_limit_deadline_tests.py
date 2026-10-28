@@ -67,7 +67,7 @@ def test_logged_two_order_windows_clear_before_first_order_without_moving_orders
 @pytest.mark.parametrize("kind", [TaskTypes.RUN_ORDER, TaskTypes.SWAP_SUPPORT])
 @pytest.mark.parametrize("offset", [-1, 0, 600])
 def test_due_priority_wins_but_future_priority_allows_early_release(kind, offset):
-    now = datetime.now()
+    now = datetime(2026, 9, 29, 12)
     priority = SchedulerTask(
         time=now + timedelta(seconds=offset),
         task_type=kind,
@@ -152,6 +152,7 @@ def test_early_limit_release_skips_optional_workshop(monkeypatch):
     solver.op_data = SimpleNamespace(
         operators={"令": op},
         has_rest_mood_limit=lambda _: True,
+        is_free_room_excluded=lambda _: False,
     )
     solver.craft_material = MagicMock()
     monkeypatch.setattr(
@@ -222,6 +223,7 @@ def test_unchanged_release_reuses_advanced_task_and_logs_only_changes(caplog):
         is_recovery_dorm=lambda *args: True,
         has_rest_mood_limit=lambda name: True,
         rest_mood_complete=lambda name: False,
+        is_free_room_excluded=lambda name: False,
     )
     caplog.set_level(logging.INFO)
     tasks = plan_mood_limit_releases(data)

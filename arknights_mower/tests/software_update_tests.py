@@ -1290,14 +1290,14 @@ class WorkerTests(unittest.TestCase):
             }
             for i in range(3)
         ] + [{"kind": "manager"}]
-        for background in (True, False):
+        for background, recovery in product((True, False), repeat=2):
             with (
-                self.subTest(background=background),
+                self.subTest(background=background, recovery=recovery),
                 patch.object(subprocess, "Popen") as process,
             ):
                 self.job.update(deployment="release", background=background)
                 worker = self.worker()
-                worker.restart(records, verify=False)
+                worker.restart(records, verify=False, recovery=recovery)
                 self.assertEqual(process.call_count, 3 if background else 4)
                 for call, record in zip(process.call_args_list, records):
                     env = call.kwargs["env"]
@@ -1309,8 +1309,10 @@ class WorkerTests(unittest.TestCase):
                     )
                     if record["kind"] == "instance" and record.get("running"):
                         self.assertEqual(env["MOWER_RESUME_MODE"], "0")
+                        self.assertEqual(env["MOWER_UPDATE_REPLAN"], "1")
                     else:
                         self.assertNotIn("MOWER_RESUME_MODE", env)
+                        self.assertNotIn("MOWER_UPDATE_REPLAN", env)
                     self.assertEqual(
                         env["MOWER_RESTART_PORT"], str(record.get("port") or "")
                     )
@@ -1384,6 +1386,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(instance_env["MOWER_MANAGED"], "1")
         self.assertEqual(instance_env["MOWER_RESUME_RUN"], "1")
         self.assertEqual(instance_env["MOWER_RESUME_MODE"], "0")
+        self.assertEqual(instance_env["MOWER_UPDATE_REPLAN"], "1")
         self.assertEqual(instance_env["MOWER_RESTART_PORT"], "58100")
 
         with patch.object(subprocess, "Popen") as process:
@@ -1703,8 +1706,11 @@ class ArchiveAndLauncherTests(unittest.TestCase):
             config.conf.resource_update.enable = False
             config.stop_mower = threading.Event()
             server = Mock(app=Flask(__name__))
+            server.maa_maintenance_lock = threading.RLock()
             server._job_running.return_value = False
-            server.resource_update.running.side_effect = [True, False]
+            server.resource_update.running.side_effect = (
+                [False] if restart or automatic else []
+            ) + [True, False]
             server.stop.return_value = "true"
             registration = Mock(record={})
             registration.shutdown_requested.return_value = True
@@ -1809,7 +1815,10 @@ class ArchiveAndLauncherTests(unittest.TestCase):
                 stack.enter_context(patch("time.sleep"))
                 webview_ui.run_desktop()
                 auto_check.assert_called_once()
-                self.assertEqual(server.resource_update.running.call_count, 2)
+                self.assertEqual(
+                    server.resource_update.running.call_count,
+                    2 + int(restart or automatic),
+                )
                 targets = [call.args[0] for call in process.call_args_list]
                 expected = [] if background else ["splash"]
                 if (tray_enabled or background) and not managed:

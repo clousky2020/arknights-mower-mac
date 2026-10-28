@@ -3,6 +3,7 @@ import { useConfigStore } from '@/stores/config'
 import { storeToRefs } from 'pinia'
 import { computed, inject } from 'vue'
 import { usePlanStore } from '@/stores/plan'
+import GroupRestingThresholds from './GroupRestingThresholds.vue'
 
 const { disabled } = defineProps({ disabled: Boolean })
 const mobile = inject('mobile')
@@ -13,6 +14,7 @@ const {
   drone_count_limit,
   drone_interval,
   resting_threshold,
+  group_resting_thresholds,
   version_update_resting_threshold,
   version_update_threshold_advance_hours,
   free_room,
@@ -48,11 +50,11 @@ const excludedGroupOptions = computed(() =>
     >
       <n-form-item :show-label="false">
         <n-checkbox v-model:checked="test_mood_calculation">
-          实时心情计算
+          实时心情计算调控
           <help-text
             >默认关闭。开启后使用与收益演算相同的技能规则计算普通基建调度心情；启动时读取实际驻员和心情，后续在正常进房时校准。已同步
             BOX
-            的干员按实际练度选择已解锁技能，缺少练度缓存时按满练技能计算。宿舍氛围按对应等级的满氛围计算。</help-text
+            的干员按实际练度选择已解锁技能，缺少练度缓存时按满练技能计算。宿舍氛围按对应等级的满氛围计算。普通调度沿用原有轮班规则，使用计算心情判断下班、恢复时间和副表条件，不会为避免后续断班而主动提前下班。用尽下班、个人上下限及回满要求继续生效；普通救急召回须确认上岗干员能坚持到对应主班回满。关闭后沿用原识别和轮班策略；收益演算始终计算心情，并按原有阈值轮班。</help-text
           >
         </n-checkbox>
       </n-form-item>
@@ -139,12 +141,13 @@ const excludedGroupOptions = computed(() =>
         <template #label>
           <span>无人机使用阈值</span>
           <help-text>
+            <div>最低为 20，旧配置中小于 20 的值自动调整为 20。</div>
             <div>普通制造站加速仅使用超过阈值的无人机，与跑单房间和自动切产物开关无关。</div>
             <div>如加速贸易，推荐大于 贸易站数*10 + 92</div>
             <div>如加速制造，推荐大于 贸易站数*10</div>
           </help-text>
         </template>
-        <mower-input-number v-model:value="drone_count_limit" />
+        <mower-input-number v-model:value="drone_count_limit" :min="20" />
       </n-form-item>
       <n-form-item>
         <template #label>
@@ -170,21 +173,40 @@ const excludedGroupOptions = computed(() =>
           <n-slider
             v-model:value="resting_threshold"
             :step="5"
-            :min="50"
+            :min="35"
             :max="80"
             :format-tooltip="(v) => `${v}%`"
           />
-          <mower-input-number v-model:value="resting_threshold" :step="5" :min="50" :max="80">
+          <mower-input-number v-model:value="resting_threshold" :step="5" :min="35" :max="80">
             <template #suffix>%</template>
           </mower-input-number>
         </div>
       </n-form-item>
       <n-form-item>
         <template #label>
+          <span>各组心情阈值</span>
+          <help-text label="各组心情阈值说明">
+            <div>对于需要切换产物的大组，建议单独调低心情阈值，以减少产物频繁切换。</div>
+            <div>
+              未设置的组和未绑组干员沿用上方心情阈值。主表、副表按相同组名应用，移除后恢复全局值。
+            </div>
+            <div>普通下班线和急救线均按组阈值换算，多绑组干员独立休息时沿用全局值。</div>
+            <div>大版本维护前的准备时段，所有组统一使用维护阈值。</div>
+          </help-text>
+        </template>
+        <GroupRestingThresholds
+          v-model="group_resting_thresholds"
+          :groups="planStore.all_groups"
+          :default-threshold="resting_threshold"
+          :disabled="disabled"
+        />
+      </n-form-item>
+      <n-form-item>
+        <template #label>
           <span>版本维护心情阈值</span>
           <help-text>
             <div>检测到需要更新客户端的大版本维护后，在维护前指定时长内临时使用此阈值</div>
-            <div>只修改运行中的排班阈值，不覆盖上方的日常心情阈值</div>
+            <div>维护前的准备时段，所有组统一使用此阈值，结束后恢复日常及各组设置</div>
           </help-text>
         </template>
         <div class="threshold">
@@ -327,7 +349,7 @@ const excludedGroupOptions = computed(() =>
         <n-checkbox v-model:checked="fia_fool">
           菲亚防呆
           <help-text
-            >当菲亚替换干员心情均超过90%时菲亚等待半小时，不确定菲亚替换心情消耗请启用本选项</help-text
+            >开启后，菲亚只为心情不超过90%的合格目标充能。已达24心情的目标始终跳过；不确定目标心情消耗时可启用本选项。</help-text
           >
         </n-checkbox>
       </n-form-item>
@@ -344,9 +366,9 @@ const excludedGroupOptions = computed(() =>
         <template #label>
           <span>菲亚阈值</span>
           <help-text>
-            <div>开启防呆设计时，菲亚只充心情在90%以下的干员，且此处设置无效</div>
+            <div>开启防呆设计时，菲亚只为心情不超过90%的合格目标充能，此处设置不生效</div>
             <div>
-              不开启防呆设计时，菲亚优先充心情在该阈值以下的干员，若心情均高于该阈值则充心情最低者
+              不开启防呆设计时，菲亚优先为心情不高于该阈值的合格目标充能；若没有，则选择心情最低且未满24的合格目标
             </div>
           </help-text>
         </template>

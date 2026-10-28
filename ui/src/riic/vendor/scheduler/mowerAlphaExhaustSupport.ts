@@ -150,5 +150,6 @@ function mowerCoordinationSupportOutcome(original:MowerSchedulingData,plan:Mower
  const protectedNames=new Set([...original.busyRestingNames,...original.reservedProductReplacements,...options.reservedNames??[]])
  for(const proposal of [plan,result])for(const [room,row] of Object.entries(proposal))if(row.some((name,index)=>name!=='Current'&&(options.reservedSlots?.has(room+'\0'+index)||protectedNames.has(name))))return false
  const admitted=projectMowerArrangements(state,[result]),recalled=new Set(Object.values(original.operators).filter(op=>op.isHigh()&&op.isResting()&&admitted.operators[op.name]?.currentRoom===op.room&&!op.room.startsWith('dorm')).map(op=>op.name))
- return !recalled.size||mowerRecallCanSustain(original,admitted,recalled,candidates,options)
+ if(!recalled.size)return true
+ return mowerRecallCanSustain(original,admitted,recalled,candidates,options)
 }

@@ -1,7 +1,7 @@
 """截图的内存预览、后台存储和独立过期清理。
 
 识别端提交内存帧，不等待编码或磁盘。预览编码只保留一个待处理槽位，
-历史队列同时限制原始帧及 JPEG 的数量与字节数。
+历史队列同时限制原始帧及编码后 JPEG 的数量与字节数。
 """
 
 import heapq
@@ -31,6 +31,9 @@ _ERROR_WINDOW_NS = 5 * 60 * 10**9
 _RECENT_FRAME_LIMIT = 16
 _RECENT_BYTE_LIMIT = 32 * 1024**2
 _LOG_RETENTION_NS = RUNTIME_LOG_RETENTION_HOURS * 3600 * 10**9
+MAX_ARCHIVE_BYTES = 512 * 1024**2
+ARCHIVE_METADATA_RESERVE = 128 * 1024
+MAX_ARCHIVE_LOG_BYTES = 8 * 1024**2
 _STATUS_FIELDS = (
     "pending_count",
     "pending_bytes",
@@ -473,7 +476,9 @@ class ScreenshotStore:
                 data = bytes(self._encoder(raw))
             else:
                 data = self._encoding_workers.encode(
-                    raw, preview=preview, deadline=self._flush_deadline
+                    raw,
+                    preview=preview,
+                    deadline=self._flush_deadline,
                 )
             if not data or len(data) > 1920 * 1080 * 4:
                 raise ValueError("JPEG 编码结果为空或超过单帧上限")
@@ -805,7 +810,18 @@ class ScreenshotStore:
             )
         return self._archive_bytes
 
-    def _ensure_archive_capacity_locked(self, additional: int, protected_id: str):
+    def _ensure_archive_capacity_locked(
+        self, additional: int, protected_id: str, *, image=False, temporary_bytes=None
+    ):
+        destination = self.folder / "errors" / protected_id
+        reserve = ARCHIVE_METADATA_RESERVE if image else 0
+        peak_additional = additional if temporary_bytes is None else temporary_bytes
+        if (
+            self._archive_size(destination) + peak_additional + reserve
+            > MAX_ARCHIVE_BYTES
+        ):
+            self._mark_archive_truncated_locked(protected_id)
+            return False
         limit = self.archive_limit_mb() * 1024**2
         if limit == 0:
             return True
@@ -821,11 +837,37 @@ class ScreenshotStore:
                 return True
         return False
 
+    def _mark_archive_truncated_locked(self, archive_id):
+        manifest = self.folder / "errors" / archive_id / "event.json"
+        if not manifest.exists():
+            return
+        event = json.loads(manifest.read_text(encoding="utf-8"))
+        if event.get("truncated"):
+            return
+        event["truncated"] = True
+        contents = json.dumps(event, ensure_ascii=False).encode("utf-8")
+        previous = manifest.stat().st_size
+        limit = self.archive_limit_mb() * 1024**2
+        if self._archive_size(manifest.parent) + len(contents) > MAX_ARCHIVE_BYTES:
+            return
+        if limit and self._archive_usage_locked() + len(contents) > limit:
+            return
+        temporary = manifest.with_suffix(".json.tmp")
+        try:
+            temporary.write_bytes(contents)
+            os.replace(temporary, manifest)
+            if self._archive_bytes is not None:
+                self._archive_bytes += len(contents) - previous
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _archive_limit_warning(self):
         now = time.monotonic()
         if now - self._last_archive_limit_log >= 30:
             self._last_archive_limit_log = now
-            self.logger.warning("报错归档已达磁盘上限，部分新截图或日志未保存")
+            self.logger.warning(
+                "报错归档达到单条容量或总容量上限，部分新截图或日志未保存"
+            )
 
     def _archive_frame(self, frame: Screenshot) -> bool:
         if self._flush_expired():
@@ -858,12 +900,12 @@ class ScreenshotStore:
                             archived = True
                             continue
                         if not self._ensure_archive_capacity_locked(
-                            frame.size, archive_id
+                            frame.size, archive_id, image=True
                         ):
                             self._archive_limit_warning()
                             continue
                         destination.parent.mkdir(parents=True, exist_ok=True)
-                        temporary = destination.with_suffix(".jpg.tmp")
+                        temporary = destination.with_suffix(destination.suffix + ".tmp")
                         try:
                             if self._flush_expired():
                                 return archived
@@ -888,10 +930,12 @@ class ScreenshotStore:
             if destination.exists():
                 return
             size = source.stat().st_size
-            if not self._ensure_archive_capacity_locked(size, destination.parent.name):
+            if not self._ensure_archive_capacity_locked(
+                size, destination.parent.name, image=True
+            ):
                 self._archive_limit_warning()
                 return
-            temporary = destination.with_suffix(".jpg.tmp")
+            temporary = destination.with_suffix(destination.suffix + ".tmp")
             try:
                 if self._flush_expired():
                     return
@@ -946,7 +990,11 @@ class ScreenshotStore:
                     if exists:
                         event = json.loads(manifest.read_text(encoding="utf-8"))
                     elif increment:
-                        event = {"time_ns": int(archive_id), "message": message}
+                        event = {
+                            "time_ns": int(archive_id),
+                            "message": message,
+                            "byte_limit": MAX_ARCHIVE_BYTES,
+                        }
                     else:
                         continue
                     if increment:
@@ -966,7 +1014,9 @@ class ScreenshotStore:
                     contents = json.dumps(event, ensure_ascii=False).encode("utf-8")
                     previous_size = manifest.stat().st_size if exists else 0
                     if not self._ensure_archive_capacity_locked(
-                        max(0, len(contents) - previous_size), archive_id
+                        max(0, len(contents) - previous_size),
+                        archive_id,
+                        temporary_bytes=len(contents),
                     ):
                         self._archive_limit_warning()
                         if not exists:
@@ -1034,26 +1084,34 @@ class ScreenshotStore:
                     self._release_archive_buffer_locked(buffered, reserved)
 
     def _save_error_logs(self, archive_id: str):
-        from arknights_mower.utils.diagnostics import timeline
+        from arknights_mower.utils.diagnostics import _log_rows, screenshots_between
 
         destination = self.folder / "errors" / archive_id
         try:
             event = json.loads((destination / "event.json").read_text(encoding="utf-8"))
             timestamp = int(event["time_ns"])
             last_error = int(event.get("last_error_ns", timestamp))
-            center = datetime.fromtimestamp(timestamp / 10**9)
-            rows = timeline(
+            start = datetime.fromtimestamp((timestamp - _ERROR_WINDOW_NS) / 10**9)
+            end = datetime.fromtimestamp((last_error + _ERROR_WINDOW_NS) / 10**9)
+            rows = _log_rows(
                 self.folder.parent / "log",
-                destination,
-                center,
-                limit=None,
-                start=datetime.fromtimestamp((timestamp - _ERROR_WINDOW_NS) / 10**9),
-                end=datetime.fromtimestamp((last_error + _ERROR_WINDOW_NS) / 10**9),
+                start,
+                end,
+                screenshots_between(destination, start, end),
             )
+            contents = bytearray(b"[")
+            truncated = False
             for row in rows:
                 if row["screenshot"]:
                     row["screenshot"] = f"errors/{archive_id}/{row['screenshot']}"
-            contents = json.dumps(rows, ensure_ascii=False).encode("utf-8")
+                item = json.dumps(row, ensure_ascii=False).encode("utf-8")
+                if len(contents) + len(item) + 2 > MAX_ARCHIVE_LOG_BYTES:
+                    truncated = True
+                    break
+                if len(contents) > 1:
+                    contents.extend(b",")
+                contents.extend(item)
+            contents.extend(b"]")
             with self._archive_lock:
                 if self._flush_expired():
                     with self._lock:
@@ -1064,7 +1122,9 @@ class ScreenshotStore:
                 saved = destination / "logs.json"
                 previous_size = saved.stat().st_size if saved.exists() else 0
                 if not self._ensure_archive_capacity_locked(
-                    max(0, len(contents) - previous_size), archive_id
+                    max(0, len(contents) - previous_size),
+                    archive_id,
+                    temporary_bytes=len(contents),
                 ):
                     self._archive_limit_warning()
                     return
@@ -1078,6 +1138,9 @@ class ScreenshotStore:
                     os.replace(temporary, saved)
                     if self._archive_bytes is not None:
                         self._archive_bytes += len(contents) - previous_size
+                    if truncated:
+                        self._mark_archive_truncated_locked(archive_id)
+                        self._archive_limit_warning()
                 finally:
                     temporary.unlink(missing_ok=True)
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -1175,7 +1238,7 @@ class ScreenshotStore:
 
     def _write(self, frame: Screenshot):
         destination = self.folder / frame.filename
-        temporary = destination.with_suffix(".jpg.tmp")
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
         try:
             for attempt in range(2):
                 destination.parent.mkdir(parents=True, exist_ok=True)

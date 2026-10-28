@@ -1,3 +1,4 @@
+import {restingThresholdFor} from './mowerOperatorState'
 import {admitMowerDerivedTasks,type MowerDependencyReturnAdmission} from './mowerTaskDerivation'
 // Port of default plan_metadata and plan_mood_limit_releases, Mower alpha.
 // Source: c6bdbb292fe7fcd84c6dfb66154a12a1a9bc5b88 (MIT, Copyright 2021 Nano).
@@ -21,7 +22,7 @@ function stableGroupReturnMicros(data:MowerSchedulingData,beds:MowerDormState[])
   const op=data.operators[bed.name]
   if(!op?.isHigh()||op.workaholic||op.group&&data.canStandby(op)||op.exhaustRequire||['dorm','factory','train'].some(room=>op.room.startsWith(room)))continue
   const mood=op.currentMood(data.nowMicros)
-  const threshold=op.restMoodLimit?op.upperLimit:Math.min(op.upperLimit,Math.floor((op.upperLimit-op.lowerLimit)*data.policy.restingThreshold+op.lowerLimit)+.125)
+  const threshold=op.restMoodLimit?op.upperLimit:Math.min(op.upperLimit,Math.floor((op.upperLimit-op.lowerLimit)*restingThresholdFor(op,data.policy)+op.lowerLimit)+.125)
   if(mood>=threshold)continue
   if(bed.timeMicros===undefined||bed.timeMicros<=data.nowMicros||mood>=op.upperLimit){ready=Math.max(ready,data.nowMicros+toMowerMicros(.5));continue}
   const fraction=(threshold-mood)/(op.upperLimit-mood)
@@ -32,7 +33,7 @@ function stableGroupReturnMicros(data:MowerSchedulingData,beds:MowerDormState[])
 export function planMowerMoodLimitReleases(data:MowerSchedulingData):MowerTask[] {
  const result:MowerTask[]=[]
  for(const bed of data.dorms){
-  const op=data.operators[bed.name];if(!op?.restMoodLimit)continue
+  const op=data.operators[bed.name];if(!op?.restMoodLimit||data.freeRoomExcluded(op.name))continue
   const [room,index]=bed.position;if(op.currentRoom!==room||op.currentIndex!==index||!data.recoveryDorm(bed,op.name))continue
   const due=data.restMoodComplete(op.name)?data.nowMicros:bed.timeMicros===undefined?undefined:Math.max(data.nowMicros,bed.timeMicros);if(due===undefined)continue
   const names=Array(data.plan[room]!.length).fill('Current');names[index]='Free'
@@ -41,6 +42,10 @@ export function planMowerMoodLimitReleases(data:MowerSchedulingData):MowerTask[]
  return result
 }
 export function planMowerMetadata(data:MowerSchedulingData,queue:MowerTaskQueue,dependencyReturn?:MowerDependencyReturnAdmission):void {
+ for(const task of [...queue.tasks])if(task.type===T.RELEASE_DORM){
+  for(const name of Object.keys(task.releaseDormTargets()))if(data.freeRoomExcluded(name))task.removeReleaseDormOperator(name)
+  if(!Object.keys(task.plan).length)queue.consume(task)
+ }
  if(queue.tasks.some(task=>task.backupShiftActive))return
  if(data.alpha){planMowerAlphaMetadata(data,queue,planMowerMoodLimitReleases(data),dependencyReturn);return}
  if(data.policy.experimentalDormLogic)throw new Error('Experimental product locks and dorm projection require their source port')

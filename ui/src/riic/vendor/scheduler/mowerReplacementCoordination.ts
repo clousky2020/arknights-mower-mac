@@ -7,7 +7,7 @@ import {projectMowerArrangements} from './mowerObservations'
 import type {MowerRestingOptions} from './mowerOrdinaryPlanning'
 import type {MowerSchedulingData} from './mowerSchedulingData'
 import {mowerRestingBindingGroups,mowerSharedReplacements,mowerSameGroupPrimaryReplacement} from './mowerSharedGroups'
-import {toMowerMicros,type MowerTask,type MowerTaskPlan} from './mowerTaskQueue'
+import {toMowerMicros,MowerTask,type MowerTaskPlan} from './mowerTaskQueue'
 
 export interface MowerCoordinationRates {work:Readonly<Record<string,number>>;recovery:Readonly<Record<string,number>>}
 function replacements(data:MowerSchedulingData,op:MowerOperatorState,required:ReadonlySet<string>=new Set()):string[]{
@@ -108,7 +108,16 @@ export function mowerRecallMoodAdmissible(data:MowerSchedulingData,recalled:Read
   return mood!==undefined
  })
 }
-/** Recall is admitted only with a complete post-admission recovery/depletion forecast. */
+function materializeCoordinationMoods(original:MowerSchedulingData,shadow:MowerSchedulingData):boolean {
+ for(const op of Object.values(shadow.operators)){
+  const source=original.operators[op.name]
+  const mood=source?mowerDormCandidateMood(original,source.name):undefined
+  if(op.currentRoom&&mood===undefined)return false
+  op.mood=mood??op.mood;op.timeStampMicros=shadow.nowMicros;op.depletionRate=0
+ }
+ return true
+}
+/** 连接组中的在岗干员须始终高于个人下限，直到入宿主班全部恢复至个人上限。 */
 export function mowerRecallCanSustain(original:MowerSchedulingData,admitted:MowerSchedulingData,recalled:ReadonlySet<string>,candidates:readonly string[],options:MowerRestingOptions):boolean {
  if(recalled.size&&(mowerUrgentRecallBlocked(original,candidates,options.urgentRecoveryPendingSupporters)||[...recalled].some(name=>name in original.urgentRecoverySupporters)))return false
  for(const name of recalled){
@@ -124,20 +133,18 @@ export function mowerRecallCanSustain(original:MowerSchedulingData,admitted:Mowe
  for(const bed of admitted.allDorms())if(bed.name&&admitted.operators[bed.name]?.isHigh())connected.add(bed.name)
  connected=mowerReplacementDependencyNames(original,connected)
  const shadow=projectMowerArrangements(admitted,[])
- for(const op of Object.values(shadow.operators)){
-  const source=original.operators[op.name]
-  const mood=source?mowerDormCandidateMood(original,source.name):undefined
-  if(op.currentRoom&&mood===undefined)return false
-  op.mood=mood??op.mood;op.timeStampMicros=shadow.nowMicros;op.depletionRate=0
- }
+ if(!materializeCoordinationMoods(original,shadow))return false
  const waiting=[...connected].map(name=>shadow.operators[name]).filter((op):op is MowerOperatorState=>!!op?.isHigh()&&op.isResting()&&!op.workaholic&&!op.room.startsWith('dorm'))
  if(!waiting.length)return false
  // Fixed staffing is deliberately conservative: no hypothetical future rescue is credited.
  // Every physical actor participates in mood boundaries because global skills affect rates.
  const actors=Object.values(shadow.operators).filter(op=>op.currentRoom)
+ const working=actors.filter(op=>connected.has(op.name)&&!op.isResting()&&!op.workaholic)
  const boundaries=(op:MowerOperatorState)=>[0,4,8,12,16,18,20,24,op.lowerLimit,op.upperLimit]
  for(let step=0;step<actors.length*16+1;step++){
-  if(waiting.every(op=>op.mood>=op.upperLimit-1e-8))return true
+  if(working.some(op=>op.mood<=op.lowerLimit+1e-8))return false
+  const recovered=waiting.every(op=>op.mood>=op.upperLimit-1e-8)
+  if(recovered)return true
   const rates=options.coordinationRates(shadow);if(!rates)return false
   let hours=Infinity
   const velocities=new Map<string,number>()
@@ -145,7 +152,6 @@ export function mowerRecallCanSustain(original:MowerSchedulingData,admitted:Mowe
    const rate=op.isResting()?rates.recovery[op.name]:rates.work[op.name]
    if(rate===undefined||!Number.isFinite(rate)||op.isResting()&&rate<0)return false
    const velocity=op.isResting()?rate:-rate;velocities.set(op.name,velocity)
-   if(connected.has(op.name)&&!op.isResting()&&!op.workaholic&&op.mood<=op.lowerLimit+1e-8)return false
    if(velocity===0)continue
    const next=boundaries(op).filter(value=>velocity>0?value>op.mood+1e-8:value<op.mood-1e-8)
    for(const value of next)hours=Math.min(hours,(value-op.mood)/velocity)

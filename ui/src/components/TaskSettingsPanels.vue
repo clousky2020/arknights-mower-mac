@@ -20,6 +20,7 @@ import WorkshopManualSettings from '@/components/WorkshopManualSettings.vue'
 import DailyMission from '@/components/DailyMission.vue'
 import Recruit from '@/components/Recruit.vue'
 import MaaReward from '@/components/MaaReward.vue'
+import MaaEventShop from '@/components/MaaEventShop.vue'
 import Clue from '@/components/Clue.vue'
 import MaaWeekly from '@/components/MaaWeekly.vue'
 import LongTasks from '@/components/LongTasks.vue'
@@ -146,7 +147,7 @@ function resolveTarget(id) {
 
 function revealActive(target = '') {
   if (!pageActive) return
-  const id = ['report', 'skland', 'mail'].includes(props.active)
+  const id = ['report', 'skland', 'mail', 'event-sign-in'].includes(props.active)
     ? 'daily'
     : ['visit', 'credit-fight', 'shop'].includes(props.active)
       ? 'credit'
@@ -531,11 +532,12 @@ const idleOptions = computed(() => [
               <template #label>
                 <span>无人机使用阈值</span>
                 <help-text>
+                  <div>最低为 20，旧配置中小于 20 的值自动调整为 20。</div>
                   <div>如加速贸易，推荐大于 贸易站数*10 + 92</div>
                   <div>如加速制造，推荐大于 贸易站数*10</div>
                 </help-text>
               </template>
-              <mower-input-number v-model:value="drone_count_limit" />
+              <mower-input-number v-model:value="drone_count_limit" :min="20" />
             </n-form-item>
             <n-form-item>
               <template #label>
@@ -649,6 +651,12 @@ const idleOptions = computed(() => [
     <section data-task-editor="rewards">
       <div class="settings-card-grid">
         <MaaReward />
+      </div>
+    </section>
+
+    <section id="task-event-shop" data-task-editor="event-shop">
+      <div class="settings-card-grid">
+        <MaaEventShop />
       </div>
     </section>
 
@@ -941,10 +949,6 @@ const idleOptions = computed(() => [
 .task-waiting-scroll:focus-visible {
   outline: 2px solid var(--mower-primary);
   outline-offset: 2px;
-}
-
-.task-settings-panels :deep([data-task-editor='stage-plan'] .weekly-plan-editors .n-tab-pane) {
-  overflow-x: auto;
 }
 
 .task-settings-panels :deep([data-task-editor='long'] .n-grid) {

@@ -8,14 +8,23 @@ const props = defineProps({
 })
 const emit = defineEmits(['configure-accounts'])
 const title = computed(
-  () => ({ report: '读取基报', skland: '森空岛签到', mail: '领取邮件' })[props.task] || '每日任务'
+  () =>
+    ({ report: '读取基报', skland: '森空岛签到', mail: '领取邮件', 'event-sign-in': '活动签到' })[
+      props.task
+    ] || '每日任务'
 )
 const axios = inject('axios')
 
 const store = useConfigStore()
 
-const { check_mail_enable, mail_skip_clear_read, report_enable, skland_info, skland_enable } =
-  storeToRefs(store)
+const {
+  check_mail_enable,
+  mail_skip_clear_read,
+  event_sign_in_enable,
+  report_enable,
+  skland_info,
+  skland_enable
+} = storeToRefs(store)
 
 const sign_msg = ref('')
 const testing = ref(false)
@@ -91,7 +100,7 @@ const SyncStatus = (item, game) => {
             添加森空岛账号
           </n-button>
         </div>
-        <n-tabs v-else type="line" animated>
+        <n-tabs v-else type="line">
           <n-tab-pane name="arknights" tab="明日方舟">
             <div v-for="account_info in skland_info" :key="account_info.account">
               <n-flex>
@@ -184,6 +193,21 @@ const SyncStatus = (item, game) => {
       </n-flex>
       <n-divider v-show="task === 'all'" />
       <n-flex
+        v-show="task === 'all' || task === 'event-sign-in'"
+        align="center"
+        data-daily-task="event-sign-in"
+        data-task-editor="event-sign-in"
+      >
+        <n-checkbox v-if="showEnable" v-model:checked="event_sign_in_enable">
+          <div class="item">活动签到</div>
+        </n-checkbox>
+        <help-text label="活动签到说明">
+          识别已适配活动的登录进度，检查奖励卡片是否已领取，补领已解锁的奖励。
+          多个签到活动按首页从上到下的顺序依次检查。暂不支持特殊登录活动和不同布局的十五日签到页面。
+        </help-text>
+      </n-flex>
+      <n-divider v-show="task === 'all'" />
+      <n-flex
         v-show="task === 'all' || task === 'report'"
         data-daily-task="report"
         data-task-editor="report"
@@ -193,13 +217,6 @@ const SyncStatus = (item, game) => {
         </n-checkbox>
       </n-flex>
       <p v-if="!showEnable && task === 'report'">无需额外设置</p>
-      <n-divider v-show="task === 'all'" />
-      <!-- <n-flex>
-        <n-checkbox v-model:checked="sign_in.enable">
-          <div class="item">签到活动</div>
-        </n-checkbox>
-        <help-text>游戏内签到、矿区、限定池每日单抽等</help-text>
-      </n-flex> -->
     </n-flex>
   </n-card>
 </template>

@@ -7,8 +7,9 @@ export function mowerAdvancedAssumptions(workspace: RosterWorkspace): Partial<Si
   if (raw == null) return {}
   if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('高级设置必须为对象')
   const fields = {
+    test_mood_calculation: 'predictiveMoodControl',
     dorm_isolation: 'dormIsolation',
-    resting_threshold: 'restingThreshold', rescue_threshold: 'rescueThreshold',
+    resting_threshold: 'restingThreshold', group_resting_thresholds: 'groupRestingThresholds', rescue_threshold: 'rescueThreshold',
     free_room: 'freeRoom', group_rest_in_full_on_mood_gap: 'groupRestInFullOnMoodGap',
     group_mood_gap_threshold_minutes: 'groupMoodGapThresholdMinutes',
     group_mood_gap_max_extra_wait_hours: 'groupMoodGapMaxExtraWaitHours',

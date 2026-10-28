@@ -1,6 +1,6 @@
 """全局运行配置中随排班文件携带的高级设置。"""
 
-from arknights_mower.utils.config.conf import Conf
+from arknights_mower.utils.config.conf import Conf, validate_drone_count_limit
 
 ADVANCED_SETTING_KEYS = (
     "test_mood_calculation",
@@ -8,6 +8,7 @@ ADVANCED_SETTING_KEYS = (
     "drone_count_limit",
     "drone_interval",
     "resting_threshold",
+    "group_resting_thresholds",
     "version_update_resting_threshold",
     "version_update_threshold_advance_hours",
     "free_room",
@@ -50,4 +51,8 @@ def apply_advanced_settings(conf: Conf, settings: dict | None) -> Conf:
     unknown = settings.keys() - ADVANCED_SETTING_KEYS
     if unknown:
         raise ValueError(f"未知的高级设置：{', '.join(sorted(unknown))}")
+    if "drone_count_limit" in settings:
+        settings["drone_count_limit"] = validate_drone_count_limit(
+            settings["drone_count_limit"]
+        )
     return Conf.model_validate({**conf.model_dump(), **settings})

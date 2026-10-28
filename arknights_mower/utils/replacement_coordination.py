@@ -76,7 +76,6 @@ def _eligible(data, owner, name, protected, slots, is_busy, required=()):
         and name not in TRADE_ORDER_AGENTS
         and (op.current_room, op.current_index) not in slots
         and not data.is_dorm_replacement(name)
-        and not data.is_free_room_excluded(name)
         and not data.replacement_exhausted(name, operator=owner)
         and not is_busy(name)
     )
@@ -215,7 +214,7 @@ def preferred_replacement_restore(data, is_busy, protected=(), slots=()):
 
 def ordinary_recall_mood_admissible(data, recalled, candidates, *, now=None):
     """普通请求到急救线后才评估召回，双方必须有有效心情读数。"""
-    now = now or datetime.now()
+    now = now or getattr(data, "_projection_now", None) or datetime.now()
 
     def anchor(op):
         return data.is_group_shift_anchor(op) or (
@@ -337,7 +336,12 @@ def recall_can_sustain(
                     return False
                 working.append((name, op.lower_limit))
         for name, lower in working:
-            exhausted = forecast.calculated_mood_deadline(name, lower, now)
+            exhausted = forecast.calculated_mood_deadline(
+                name,
+                lower,
+                now,
+                max_hours=max(0, (horizon - now).total_seconds() / 3600),
+            )
             if exhausted is not None and exhausted <= horizon:
                 return False
         for name, lower in working:

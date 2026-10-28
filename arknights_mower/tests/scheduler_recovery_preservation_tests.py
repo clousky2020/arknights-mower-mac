@@ -14,6 +14,7 @@ from arknights_mower.utils.csleep import MowerExit
 from arknights_mower.utils.device import recovery
 from arknights_mower.utils.operators import Operators
 from arknights_mower.utils.scheduler_task import (
+    MAINTENANCE_TASK_TYPES,
     MANUAL_TASK_TYPES,
     SchedulerTask,
     TaskTypes,
@@ -26,13 +27,17 @@ CRITICAL_TYPES = {
     TaskTypes.SWITCH_PRODUCT,
     TaskTypes.FIAMMETTA,
 }
-FUTURE_TYPES = {
-    TaskTypes.RUN_ORDER,
-    TaskTypes.FURNITURE,
-    TaskTypes.DEPOT,
-    TaskTypes.CLUE,
-    TaskTypes.WORKSHOP,
-} | MANUAL_TASK_TYPES
+FUTURE_TYPES = (
+    {
+        TaskTypes.RUN_ORDER,
+        TaskTypes.FURNITURE,
+        TaskTypes.DEPOT,
+        TaskTypes.CLUE,
+        TaskTypes.WORKSHOP,
+    }
+    | MANUAL_TASK_TYPES
+    | MAINTENANCE_TASK_TYPES
+)
 MANUAL_TYPES = (
     TaskTypes.FURNITURE,
     TaskTypes.DEPOT,
@@ -63,6 +68,7 @@ def scheduler(monkeypatch):
     solver.emergency_state = None
     solver.error = False
     solver.op_data = SimpleNamespace(
+        mood_calculation_enabled=False,
         plan={},
         operators={},
         dorm=[],
@@ -75,6 +81,8 @@ def scheduler(monkeypatch):
     solver.device = Mock()
     solver.recog = Mock()
     solver.party_time = solver.free_clue = solver.credit_fight = None
+    solver.daily_event_sign_in = Clock.current.date() - timedelta(days=1)
+    solver.daily_event_sign_in_attempt = None
     solver.scene = Mock(return_value=base_schedule.Scene.INFRA_MAIN)
     solver.find = Mock(return_value=True)
     solver.check_current_focus = Mock()
@@ -96,6 +104,7 @@ def scheduler(monkeypatch):
     monkeypatch.setattr(
         scheduler_task.NewsChecker, "get_update_time", Mock(return_value=(None, None))
     )
+    monkeypatch.setattr(scheduler_task.NewsChecker, "get_maintenance", lambda: None)
     monkeypatch.setattr(main, "base_scheduler", solver)
     return SimpleNamespace(
         solver=solver, clock=Clock, module=base_schedule, main=main, io=forbidden_io
@@ -152,6 +161,16 @@ def test_stale_cleanup_preserves_only_critical_or_future_explicit_tasks(
     scheduler.io.assert_not_called()
 
 
+def test_overdue_maintenance_order_alone_does_not_rebuild_schedule(scheduler):
+    now = scheduler.clock.now()
+    order = SchedulerTask(now - timedelta(minutes=20), task_type=TaskTypes.RUN_ORDER)
+    order.maintenance_start = now - timedelta(minutes=10)
+    scheduler.solver.tasks = [order]
+    scheduler.solver.handle_error(True)
+    assert scheduler.solver.tasks == [order]
+    assert order.time == now - timedelta(minutes=20)
+
+
 def test_depot_mastery_dispatch_keeps_source_release_available(
     scheduler, monkeypatch, tmp_path
 ):
@@ -165,6 +184,11 @@ def test_depot_mastery_dispatch_keeps_source_release_available(
     monkeypatch.setattr(main, "refresh_resource_at_boundary", Mock())
     monkeypatch.setattr(main.NewsChecker, "get_maintenance", Mock(return_value=None))
     monkeypatch.setattr(main, "_apply_version_update_resting_threshold", Mock())
+    monkeypatch.setattr(
+        main,
+        "_resume_device_dispatch",
+        Mock(side_effect=AssertionError("unexpected device recovery during dispatch")),
+    )
     depot = tmp_path / "depotresult.csv"
     depot.touch()
     monkeypatch.setattr(main, "get_path", lambda value: depot)
@@ -195,8 +219,9 @@ def test_depot_mastery_dispatch_keeps_source_release_available(
         solver.tasks.append(upgrade)
 
     solver.仓库扫描 = Mock(side_effect=scan)
-    solver.find_next_task = lambda task_type: next(
-        (task for task in solver.tasks if task.type == task_type), None
+    solver.find_next_task = lambda task_type=None: next(
+        (task for task in solver.tasks if task_type is None or task.type == task_type),
+        None,
     )
     dispatched = []
 

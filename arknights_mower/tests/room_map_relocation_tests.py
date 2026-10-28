@@ -443,6 +443,186 @@ def test_enter_room_passes_configured_right_side_layout(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("map_scene", [Scene.UNKNOWN, Scene.FACTORY_ROOMS])
+def test_visible_map_anchor_allows_entry_without_overview_scene(monkeypatch, map_scene):
+    room = rectangle(450, 350, 750, 600)
+    solver, _ = navigation_solver(monkeypatch, [map_frame(room), {"kind": "room"}])
+    solver.scene.return_value = map_scene
+
+    solver.enter_room(ROOM, max_attempts=1)
+
+    solver.tap.assert_called_once()
+    solver.back_to_index.assert_not_called()
+    solver.back_to_infrastructure.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "map_scene", [Scene.INFRA_MAIN, Scene.UNKNOWN, Scene.FACTORY_ROOMS]
+)
+def test_collection_leaving_map_retries_room_click_without_home_recovery(
+    monkeypatch, map_scene
+):
+    room = rectangle(450, 350, 750, 600)
+    collected_room = rectangle(460, 350, 760, 600)
+    collected = {**map_frame(collected_room), "collected": True}
+    solver, _ = navigation_solver(
+        monkeypatch, [map_frame(room)] + [collected] * 21 + [{"kind": "room"}]
+    )
+    solver.scene.side_effect = lambda: (
+        map_scene if solver.recog.img.get("collected") else Scene.INFRA_MAIN
+    )
+    clicked_at = []
+
+    def tap(*_, **__):
+        clicked_at.append(base_mixin.perf_counter())
+        solver.recog.update()
+
+    solver.tap.side_effect = tap
+
+    solver.enter_room(ROOM, max_attempts=1)
+
+    assert clicked_at == [0, 2]
+    np.testing.assert_array_equal(solver.tap.call_args_list[0].args[0], room)
+    np.testing.assert_array_equal(solver.tap.call_args_list[1].args[0], collected_room)
+    assert solver.recog.img["kind"] == "room"
+    solver.back_to_index.assert_not_called()
+    solver.back_to_infrastructure.assert_not_called()
+
+
+@pytest.mark.parametrize("max_attempts", [1, 3])
+def test_unknown_map_keeps_existing_click_and_home_recovery_limits(
+    monkeypatch, max_attempts
+):
+    solver, _ = navigation_solver(
+        monkeypatch, [map_frame(rectangle(450, 350, 750, 600))]
+    )
+    solver.scene.return_value = Scene.UNKNOWN
+
+    with pytest.raises(RuntimeError, match="未成功进入房间"):
+        solver.enter_room(ROOM, max_attempts=max_attempts)
+
+    assert solver.tap.call_count == 5 * max_attempts
+    assert solver.back_to_index.call_count == max_attempts - 1
+    assert solver.back_to_infrastructure.call_count == max_attempts - 1
+
+
+@pytest.mark.parametrize("observed_room", [ROOM, "room_2_1"])
+@pytest.mark.parametrize("retain_anchor", [False, True])
+@pytest.mark.parametrize("connecting", [False, True])
+def test_order_list_returns_to_map_before_entering_room(
+    monkeypatch, observed_room, retain_anchor, connecting
+):
+    room = rectangle(450, 350, 750, 600)
+    solver, _ = navigation_solver(
+        monkeypatch,
+        ([{"kind": "mask"}] if connecting else [])
+        + [{"kind": "order"}, map_frame(room), {"kind": "room"}],
+    )
+    find = solver.find.side_effect
+
+    def find_on_page(name):
+        if solver.recog.img["kind"] in ("mask", "order"):
+            if name == "order_label" or (retain_anchor and name == "control_central"):
+                return ((10, 10), (30, 30))
+        return find(name)
+
+    solver.find.side_effect = find_on_page
+    solver.detect_room.side_effect = lambda: (
+        ROOM if solver.recog.img["kind"] == "room" else observed_room
+    )
+    solver.scene.side_effect = lambda: {
+        "mask": Scene.CONNECTING,
+        "order": Scene.ORDER_LIST,
+        "map": Scene.INFRA_MAIN,
+        "room": Scene.INFRA_DETAILS,
+    }[solver.recog.img["kind"]]
+
+    solver.enter_room(ROOM, max_attempts=1)
+
+    solver.back_to_infrastructure.assert_called_once()
+    solver.back_to_index.assert_not_called()
+    solver.tap.assert_called_once()
+    assert solver.sleep.call_args_list == ([()] if connecting else [])
+    assert solver.recog.img["kind"] == "room"
+
+
+@pytest.mark.parametrize("observed_room", [ROOM, "room_2_1"])
+def test_order_list_after_entry_click_waits_for_deadline_then_returns_to_map(
+    monkeypatch, observed_room
+):
+    room = rectangle(450, 350, 750, 600)
+    solver, _ = navigation_solver(
+        monkeypatch,
+        [map_frame(room)]
+        + [{"kind": "order"}] * 21
+        + [map_frame(room), {"kind": "room"}],
+    )
+    find = solver.find.side_effect
+    solver.find.side_effect = lambda name: (
+        ((10, 10), (30, 30))
+        if name == "order_label" and solver.recog.img["kind"] == "order"
+        else find(name)
+    )
+    solver.detect_room.side_effect = lambda: (
+        ROOM if solver.recog.img["kind"] == "room" else observed_room
+    )
+    solver.scene.side_effect = lambda: {
+        "order": Scene.ORDER_LIST,
+        "map": Scene.INFRA_MAIN,
+        "room": Scene.INFRA_DETAILS,
+    }[solver.recog.img["kind"]]
+    recovery_times = []
+
+    def back_to_map():
+        recovery_times.append(base_mixin.perf_counter())
+        solver.recog.update()
+
+    solver.back_to_infrastructure.side_effect = back_to_map
+
+    solver.enter_room(ROOM, max_attempts=1)
+
+    assert recovery_times == [2.0]
+    assert solver.sleep.call_args_list == [((0.1,),)] * 20
+    assert solver.tap.call_count == 2
+    solver.back_to_index.assert_not_called()
+    assert solver.recog.img["kind"] == "room"
+
+
+def test_stop_during_order_list_navigation_does_not_retry_entry(monkeypatch):
+    solver, _ = navigation_solver(monkeypatch, [{"kind": "order"}])
+    solver.find.side_effect = lambda name: (
+        ((10, 10), (30, 30)) if name == "order_label" else None
+    )
+    solver.detect_room.return_value = "room_2_1"
+    solver.detect_room.side_effect = None
+    solver.scene.return_value = Scene.ORDER_LIST
+    solver.back_to_infrastructure.side_effect = MowerExit
+
+    with pytest.raises(MowerExit):
+        solver.enter_room(ROOM)
+
+    solver.back_to_infrastructure.assert_called_once()
+    solver.back_to_index.assert_not_called()
+    solver.tap.assert_not_called()
+    solver.sleep.assert_not_called()
+
+
+def test_unchanged_order_list_keeps_existing_entry_attempt_budget(monkeypatch):
+    solver, _ = navigation_solver(monkeypatch, [{"kind": "order"}])
+    solver.find.side_effect = lambda name: (
+        ((10, 10), (30, 30)) if name == "order_label" else None
+    )
+    solver.scene.return_value = Scene.ORDER_LIST
+
+    with pytest.raises(RuntimeError, match="未成功进入房间"):
+        solver.enter_room(ROOM, max_attempts=1)
+
+    assert solver.back_to_infrastructure.call_count == 9
+    solver.back_to_index.assert_not_called()
+    solver.tap.assert_not_called()
+    solver.sleep.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "timeout,screenshot_interval,waits",
     [(1.0, 400, 3), (2.5, 500, 5), (4.5, 700, 7), (1.0, 1500, 1)],

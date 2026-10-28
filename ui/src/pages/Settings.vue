@@ -5,12 +5,16 @@ import { storeToRefs } from 'pinia'
 import { computed, inject, onMounted, onUnmounted, provide, ref } from 'vue'
 import ChatBotSetting from '@/components/ChatBotSetting.vue'
 import SoftwareUpdate from '@/components/SoftwareUpdate.vue'
+import MaaUpdates from '@/components/MaaUpdates.vue'
 import NetworkSettings from '@/components/NetworkSettings.vue'
 import ConfigBackup from '@/components/ConfigBackup.vue'
 import ConfigProfilesSettings from '@/components/ConfigProfilesSettings.vue'
 import { settingsSectionKey } from '@/composables/settingsNavigation'
+import { themeSelectionKey } from '@/composables/themeSelection'
 import SettingsSection from '@/components/SettingsSection.vue'
 import SoftwareVersionPreference from '@/components/SoftwareVersionPreference.vue'
+import VersionWatermarkPreference from '@/components/VersionWatermarkPreference.vue'
+import LogBackgroundPreference from '@/components/LogBackgroundPreference.vue'
 import SettingsSegmented from '@/components/SettingsSegmented.vue'
 import InterfaceIcon from '@vicons/fluent/es/PaintBrush24Regular'
 import NotifyIcon from '@vicons/fluent/es/Alert24Regular'
@@ -62,7 +66,7 @@ const { updates_enabled, running } = storeToRefs(useMowerStore())
 const mobile = inject('mobile')
 const { theme, webview, runtime_platform, screenshot, screenshot_archive_limit_mb } =
   storeToRefs(config_store)
-const setTheme = inject('set_theme_with_transition', (value) => (theme.value = value))
+const setTheme = inject(themeSelectionKey, (value) => (theme.value = value))
 const themeOptions = [
   { value: 'light', label: '亮色', icon: SunIcon },
   { value: 'dark', label: '暗色', icon: MoonIcon },
@@ -220,13 +224,16 @@ onUnmounted(() => window.removeEventListener('pywebviewready', loadDesktopPrefer
           >
             <SettingsSegmented
               :value="theme"
-              :options="themeOptions"
               @update:value="setTheme"
+              emit-reselect
+              :options="themeOptions"
               class="settings-theme-choices"
               label="显示主题"
             />
           </n-form-item>
           <SoftwareVersionPreference />
+          <VersionWatermarkPreference />
+          <LogBackgroundPreference />
         </n-form>
       </n-card>
       <n-card v-if="runtime_platform !== 'android'" id="window-settings" title="窗口">
@@ -324,6 +331,7 @@ onUnmounted(() => window.removeEventListener('pywebviewready', loadDesktopPrefer
     >
       <SoftwareUpdate v-if="updates_enabled === true" />
       <ResourceUpdate v-if="updates_enabled === true" />
+      <div v-if="updates_enabled === true" class="settings-card-wide"><MaaUpdates /></div>
       <div class="settings-card-wide"><NetworkSettings /></div>
     </SettingsSection>
     <SettingsSection
@@ -369,7 +377,8 @@ onUnmounted(() => window.removeEventListener('pywebviewready', loadDesktopPrefer
               <span class="settings-row-copy">
                 <span>报错归档空间上限</span>
                 <span id="screenshot-archive-limit-description" class="settings-row-description">
-                  达到上限后清理较早的报错归档，0 表示不限容量。
+                  达到上限后清理较早的报错归档，0 表示不限制总容量。 单条归档仍限 512
+                  MiB，达到上限后省略后续图片或日志。
                   <template v-if="inheritsFromManager('screenshot_archive_limit_mb')">
                     当前使用通用设置，请在多开管理器中修改或选择使用本实例值。
                   </template>

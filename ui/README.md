@@ -8,6 +8,8 @@ Mower 的 Vue 3 前端与 Python 后端同在本仓库。界面可运行在桌�
 
 多开管理器启动的实例由管理器配置连接和运行参数，可选择通用配置或逐实例独立配置。实例页面的显示范围、更新与维护显示开关及独立启动的区别见[受管理实例设置](../docs/subsystems/web-access.md#managed-device-configuration)。
 
+全部设置 → 界面与窗口 → 常规中的“版本水印”切换后立即生效。隐藏前的提醒、确认输入和防止直接修改配置的凭据规则见[版本水印说明](../docs/subsystems/web-access.md#version-watermark)。实现入口为 [VersionWatermarkPreference.vue](src/components/VersionWatermarkPreference.vue)，组件测试为 [VersionWatermarkPreference.test.js](src/components/VersionWatermarkPreference.test.js)。
+
 侧栏的分组、页面副本、固定区域和保存边界由 Arknights Mower Web 访问子系统说明中的[侧栏偏好](../docs/subsystems/web-access.md#sidebar-preferences)与[布局和编辑规则](../docs/subsystems/web-access.md#sidebar-layout-and-editing)维护。源码启动标识、软件渠道徽标、资源名称与随活动时间变化的颜色见[侧栏版本徽标规则](../docs/subsystems/web-access.md#sidebar-version-badges)；资源元数据来自[已安装资源](../docs/subsystems/resource-update.md#installed-resource-metadata)。
 
 在全部设置 → 界面与窗口 → 常规中，“软件版本显示”选择版本号或版本类型，常驻预览标题旁的小型“版本类型语言”控件可切换中文或 English，默认使用 English。中文类型显示为“源码部署”“公测版”“开发版”“正式版”，沿用更新渠道的发布版本名称。预览徽标与侧栏共用这些选择，窄屏中的长版本号在节点内换行。保存失败时恢复原来的显示，并提供重试。完整行为见[软件版本徽标规则](../docs/subsystems/web-access.md#sidebar-version-badges)。
@@ -56,7 +58,7 @@ Mower 的 Vue 3 前端与 Python 后端同在本仓库。界面可运行在桌�
 npm run preview:mock
 ```
 
-打开 [离线预览](http://127.0.0.1:5179/?window_shell=1)，可查看带有 64 行日志、五项任务和示例截图的界面。预览使用真实页面组件，数据和设置编辑仅保存在浏览器内存中，刷新后恢复示例；截图标注为“离线预览 · 示例截图”。预览模式拦截接口和 WebSocket 请求，未提供的操作会返回拒绝结果。
+打开 [离线预览](http://127.0.0.1:5179/?window_shell=1)，可查看带有 64 行日志、五项任务和示例截图的界面。养成规划页面另带 26 位干员的练度、计划、材料与公开样本示例数据，可在预览中切换总览、干员、材料与统计视图。预览使用真实页面组件，数据和设置编辑仅保存在浏览器内存中，刷新后恢复示例；截图标注为“离线预览 · 示例截图”。预览模式拦截接口和 WebSocket 请求，未提供的操作会返回拒绝结果。预览地址追加 `watermark=0` 可关闭示例水印，仅影响当前预览会话；该参数不改变真实页面的水印设置。
 
 [本地启动配置](../.claude/launch.json)的 `ui` 使用此浏览器预览入口；`ui-real` 保留真实后端联调入口。
 
@@ -120,6 +122,7 @@ npm run dev
 | 全部设置显示偏好与保存                     | [TaskLayoutPreference.vue](src/components/TaskLayoutPreference.vue)、[gui.js](src/stores/gui.js)、[外观 API](../arknights_mower/views/gui.py)                                                                                                                                                                                                                               | [TaskLayoutPreference.test.js](src/components/TaskLayoutPreference.test.js)、[gui.test.js](src/stores/gui.test.js)、[gui_appearance_tests.py](../arknights_mower/tests/gui_appearance_tests.py)                                                                                                                                                                                      |
 | 软件版本显示、类型语言与资源版本徽标       | [SoftwareVersionPreference.vue](src/components/SoftwareVersionPreference.vue)、[SoftwareVersionBadge.vue](src/components/SoftwareVersionBadge.vue)、[SidebarBrand.vue](src/components/SidebarBrand.vue)、[versionBadges.js](src/utils/versionBadges.js)                                                                                                                     | [SoftwareVersionPreference.test.js](src/components/SoftwareVersionPreference.test.js)、[SidebarBrand.test.js](src/components/SidebarBrand.test.js)、[versionBadges.test.js](src/utils/versionBadges.test.js)、[gui.test.js](src/stores/gui.test.js)、[gui_appearance_tests.py](../arknights_mower/tests/gui_appearance_tests.py)                                                     |
 | 排班验证                                   | [plan.js](src/stores/plan.js)                                                                                                                                                                                                                                                                                                                                               | [planValidation.test.js](src/stores/planValidation.test.js)                                                                                                                                                                                                                                                                                                                          |
+| 养成规划工作区                             | [MasteryRecommendation.vue](src/pages/MasteryRecommendation.vue)、[growth/](src/growth/)、[GrowthCraftingOrder.vue](src/components/GrowthCraftingOrder.vue)、[growth-planning.md](../docs/subsystems/growth-planning.md#workspace-views)                                                                                                                                                 | [MasteryRecommendation.test.js](src/pages/MasteryRecommendation.test.js)、[growthFormatters.test.js](src/growth/growthFormatters.test.js)、[growthRecommendation.test.js](src/growth/growthRecommendation.test.js)、[GrowthOperatorCard.test.js](src/growth/GrowthOperatorCard.test.js)、[GrowthCraftingOrder.test.js](src/components/GrowthCraftingOrder.test.js)、[preview/mock.test.js](preview/mock.test.js) |
 
 从 `ui/` 执行与改动有关的测试，例如：
 

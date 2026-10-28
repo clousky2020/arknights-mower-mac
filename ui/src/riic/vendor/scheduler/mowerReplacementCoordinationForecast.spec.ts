@@ -3,7 +3,7 @@ import {MowerOperatorState,rescueMoodThreshold} from './mowerOperatorState'
 import {MowerDormState,MowerSchedulingData} from './mowerSchedulingData'
 import {projectMowerArrangements} from './mowerObservations'
 import {mowerRecallCanSustain,type MowerCoordinationRates} from './mowerReplacementCoordination'
-import {toMowerMicros} from './mowerTaskQueue'
+import {MowerTask,MOWER_TASK_TYPES as T,toMowerMicros} from './mowerTaskQueue'
 import {planMowerExhaustSupport} from './mowerExhaustPlanning'
 import {validateMowerCoordinationSupport} from './mowerAlphaExhaustSupport'
 
@@ -37,6 +37,10 @@ describe('replacement recall forecast covers the connected recovery cycle',()=>{
  })
  it('clamps an exhausted cached prediction instead of reusing the old positive mood',()=>{
   const {original,admit}=fixture(4);original.nowMicros=toMowerMicros(10)
+  expect(allowed(original,admit(),fixed)).toBe(false)
+ })
+ it('rejects reaching the work floor at the same instant recovery completes',()=>{
+  const {original,admit}=fixture(6)
   expect(allowed(original,admit(),fixed)).toBe(false)
  })
  it('includes a third resting group sharing replacements and beds',()=>{
@@ -94,6 +98,31 @@ describe('recall uses the recovering room operation allowance',()=>{
 
 
 describe('ordinary recall rescue admission',()=>{
+ it.each([false,true].flatMap(predictiveMoodControl=>['run-order','patrol','replacement'].map(recheck=>({predictiveMoodControl,recheck}))))('requires endurance to full recovery despite $recheck with saved mood mode=$predictiveMoodControl',({predictiveMoodControl,recheck})=>{
+  const {original}=fixture(4);original.policy.predictiveMoodControl=predictiveMoodControl
+  const task=new MowerTask({time:1})
+  if(recheck==='run-order'){task.type=T.RUN_ORDER;task.metadata='room_2_1';task.observedOrderDueMicros=toMowerMicros(1.05)}
+  if(recheck==='replacement')task.workingReplacementCheck={room:'room_1_1',index:0,owner:'A',cover:'X'}
+  const before=JSON.stringify(original)
+  expect(planMowerExhaustSupport(original,['B'],{coordinationRates:fixed,tasks:[task]})).toBeUndefined()
+  expect(JSON.stringify(original)).toBe(before)
+  expect(task.timeMicros).toBe(toMowerMicros(1))
+  original.operators.A!.mood=20
+  expect(planMowerExhaustSupport(original,['B'],{coordinationRates:fixed,tasks:[task]})).toEqual({room_1_1:['A']})
+ })
+ it('does not count a future observation as recovery when the forecast recovery rate is zero',()=>{
+  const {original}=fixture(4),recheck=new MowerTask({time:1});recheck.executionRetained=true
+  const zero=(data:MowerSchedulingData)=>({...fixed(data),recovery:Object.fromEntries(Object.keys(data.operators).map(name=>[name,0]))})
+  expect(planMowerExhaustSupport(original,['B'],{coordinationRates:zero,tasks:[recheck]})).toBeUndefined()
+ })
+ it('revalidates full recovery endurance against current rates before support dispatch',()=>{
+  const {original}=fixture(20),options={coordinationRates:fixed}
+  const plan=planMowerExhaustSupport(original,['B'],options)!
+  expect(plan).toEqual({room_1_1:['A']})
+  const faster=(data:MowerSchedulingData)=>({...fixed(data),work:{...fixed(data).work,A:5}})
+  expect(validateMowerCoordinationSupport(original,plan,['B'],{coordinationRates:faster})).toBe(false)
+  expect(validateMowerCoordinationSupport(original,plan,['B'],options)).toBe(true)
+ })
  it.each([
   {request:7.8001,target:20,expected:false},
   {request:7.8,target:20,expected:true},

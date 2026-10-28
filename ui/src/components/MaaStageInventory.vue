@@ -95,15 +95,18 @@ const limitStageOptions = computed(() => {
   }))
 })
 
-const previewResult = computed(() =>
-  previewInventorySelection(
+const previewResult = computed(() => {
+  if (!maa_stage_inventory_enable.value) {
+    return { stages: [...currentPlanStages.value], limitSkipped: [], ratioDecisions: [] }
+  }
+  return previewInventorySelection(
     currentPlanStages.value,
     maa_stage_limit_rules.value,
     maa_stage_ratio_rules.value,
     inventory.value,
     itemAliasMap.value
   )
-)
+})
 
 function stageLabel(stage) {
   return stageOptionMap.value.get(stage)?.label || stage || '未选择关卡'
@@ -226,8 +229,9 @@ function applyChipLimits() {
     maa_stage_limit_rules.value,
     stageOptions.value
   )
+  maa_stage_inventory_enable.value = true
   emit('chip-limits-applied')
-  message.success('已绑定芯片上限、勾选芯片关卡，并将排序提升到剿灭之后')
+  message.success('已启用库存选关、绑定芯片上限、勾选芯片关卡，并将排序提升到剿灭之后')
 }
 
 function removeLimitRule(index) {
@@ -338,7 +342,11 @@ watch([maa_weekly_plan_active, () => resourceVersion.info.current_version], load
               库存更新于 {{ inventoryUpdatedAt }}
             </n-text>
             <n-button :loading="refreshing" @click="refreshInventory">刷新库存</n-button>
-            <n-switch v-model:value="maa_stage_inventory_enable" size="large" />
+            <n-switch
+              v-model:value="maa_stage_inventory_enable"
+              size="large"
+              aria-label="启用库存选关"
+            />
           </n-space>
         </n-flex>
         <n-divider />
@@ -363,11 +371,15 @@ watch([maa_weekly_plan_active, () => resourceVersion.info.current_version], load
         </n-space>
       </n-card>
 
+      <n-alert v-if="!maa_stage_inventory_enable" type="info" :closable="false" class="top-gap">
+        库存选关未启用，物品上限和比例规则均不生效，将按原计划执行。
+      </n-alert>
+
       <n-alert v-if="selectedStageValues.size === 0" type="info" :closable="false" class="top-gap">
         请先在方案“{{ activePlanLabel }}”的列表计划或表格计划中选择关卡，再配置库存上限或比例。
       </n-alert>
 
-      <n-tabs type="segment" animated class="top-gap">
+      <n-tabs type="segment" class="top-gap">
         <n-tab-pane name="limit" tab="物品上限">
           <n-card size="small">
             <n-flex align="center" class="add-toolbar">
@@ -393,7 +405,7 @@ watch([maa_weekly_plan_active, () => resourceVersion.info.current_version], load
                 </n-button>
                 <help-text label="一键芯片上限说明">
                   绑定全部 8 个芯片关卡：小芯片上限 5、芯片组上限 8，两种都达到才跳过。
-                  覆盖已有芯片上限，仅对当前方案已选关卡生效。
+                  同时启用当前方案的库存选关，覆盖已有芯片上限，仅对当前方案已选关卡生效。
                   同时勾选全部芯片关卡：开启开放日过滤时仅勾选开放日，关闭时每天勾选。
                   将全部芯片关卡排在剿灭之后，保留原有其他关卡勾选；之后所有关卡均可自由拖动排序。
                 </help-text>
@@ -428,6 +440,10 @@ watch([maa_weekly_plan_active, () => resourceVersion.info.current_version], load
                 />
                 <n-tag v-if="!selectedStageValues.has(rule.stage)" type="warning" :bordered="false">
                   周计划未选择，不会刷取
+                </n-tag>
+                <n-tag v-else-if="rule.enabled === false" :bordered="false">规则未启用</n-tag>
+                <n-tag v-else-if="!maa_stage_inventory_enable" :bordered="false">
+                  库存选关未启用，规则不生效
                 </n-tag>
                 <n-tag
                   v-else-if="limitEvaluation(rule).active"
@@ -532,7 +548,11 @@ watch([maa_weekly_plan_active, () => resourceVersion.info.current_version], load
               <n-flex align="center">
                 <n-switch v-model:value="rule.enabled" size="small" />
                 <n-input v-model:value="rule.name" class="ratio-name" placeholder="比例规则名称" />
-                <n-tag v-if="selectedRatioMember(rule)" type="info" :bordered="false">
+                <n-tag v-if="rule.enabled === false" :bordered="false">规则未启用</n-tag>
+                <n-tag v-else-if="!maa_stage_inventory_enable" :bordered="false">
+                  库存选关未启用，规则不生效
+                </n-tag>
+                <n-tag v-else-if="selectedRatioMember(rule)" type="info" :bordered="false">
                   当前优先 {{ selectedRatioMember(rule).stage }}
                 </n-tag>
                 <n-tag
@@ -658,9 +678,7 @@ watch([maa_weekly_plan_active, () => resourceVersion.info.current_version], load
             <n-text depth="3">实际执行</n-text>
             <n-space :size="6" wrap>
               <n-tag
-                v-for="(stage, index) in maa_stage_inventory_enable
-                  ? previewResult.stages
-                  : currentPlanStages"
+                v-for="(stage, index) in previewResult.stages"
                 :key="`selected-${stage}-${index}`"
                 type="success"
               >

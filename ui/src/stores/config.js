@@ -16,7 +16,7 @@ export const useConfigStore = defineStore('config', () => {
   const config_saving = ref(false)
   const configLoading = ref(false)
   let savedConfig = null
-  const drone_count_limit = ref(0)
+  const drone_count_limit = ref(100)
   const drone_room = ref('')
   const right_side_room_order = ref(['contact', 'train', 'recycle'])
 
@@ -91,6 +91,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_gap = ref(3)
   const simulator = ref({ name: '', index: -1 })
   const resting_threshold = ref(50)
+  const group_resting_thresholds = ref({})
   const version_update_resting_threshold = ref(80)
   const version_update_threshold_advance_hours = ref(12)
   const fia_threshold = ref(90)
@@ -144,7 +145,20 @@ export const useConfigStore = defineStore('config', () => {
   const maa_rcl_theme = ref('Tales')
   const rcl = ref({})
   const rogue = ref({})
-  const sss = ref({})
+  const sss = ref({ type: 1, ec: 1, scripts: [], run_id: '' })
+  const paradox = ref({ scripts: [], run_id: '' })
+  const copilot = ref({
+    run_id: '',
+    scripts: [],
+    formation: false,
+    formation_index: 0,
+    use_sanity_potion: false,
+    add_trust: false,
+    ignore_requirements: false,
+    support_unit_usage: 0,
+    support_unit_name: '',
+    user_additional: []
+  })
   const screenshot = ref(1)
   const screenshot_archive_limit_mb = ref(5120)
   const screenshot_interval = ref(500)
@@ -165,6 +179,7 @@ export const useConfigStore = defineStore('config', () => {
   const product_switching = ref({})
   const check_mail_enable = ref(true)
   const mail_skip_clear_read = ref(true)
+  const event_sign_in_enable = ref(false)
   const report_enable = ref(true)
   const trust_rotation_enable = ref(false)
   const trust_rotation_prefer_low = ref(false)
@@ -210,6 +225,18 @@ export const useConfigStore = defineStore('config', () => {
   const maa_recruit = ref(false)
   const maa_orundum = ref(false)
   const maa_mining = ref(false)
+  const maa_signinevent = ref(false)
+  const eventShopDefaults = () => ({
+    enable: false,
+    activity: '',
+    custom_entry: false,
+    x: 0,
+    y: 0,
+    confirm_text: '',
+    blacklist: ['数据增补条', '数据增补仪', '家具零件'],
+    switch_source: ''
+  })
+  const maa_event_shop = ref(eventShopDefaults())
   const maa_specialaccess = ref(false)
   const syncingWeeklyPlan = ref(false)
   const skipNextWeeklyPlanSync = ref(false)
@@ -564,6 +591,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_gap.value = response.data.maa_gap
       simulator.value = response.data.simulator
       resting_threshold.value = response.data.resting_threshold * 100
+      group_resting_thresholds.value = { ...(response.data.group_resting_thresholds ?? {}) }
       version_update_resting_threshold.value =
         (response.data.version_update_resting_threshold ?? 0.8) * 100
       version_update_threshold_advance_hours.value =
@@ -591,7 +619,21 @@ export const useConfigStore = defineStore('config', () => {
       maa_rcl_theme.value = response.data.maa_rcl_theme
       rcl.value = response.data.rcl
       rogue.value = response.data.rogue
-      sss.value = response.data.sss
+      sss.value = { scripts: [], run_id: '', ...response.data.sss }
+      paradox.value = { scripts: [], run_id: '', ...(response.data.paradox ?? {}) }
+      copilot.value = {
+        run_id: '',
+        scripts: [],
+        formation: false,
+        formation_index: 0,
+        use_sanity_potion: false,
+        add_trust: false,
+        ignore_requirements: false,
+        support_unit_usage: 0,
+        support_unit_name: '',
+        user_additional: [],
+        ...(response.data.copilot ?? {})
+      }
       screenshot.value = response.data.screenshot
       screenshot_archive_limit_mb.value = response.data.screenshot_archive_limit_mb ?? 5120
       screenshot_interval.value =
@@ -627,6 +669,7 @@ export const useConfigStore = defineStore('config', () => {
       }
       check_mail_enable.value = response.data.check_mail_enable
       mail_skip_clear_read.value = response.data.mail_skip_clear_read ?? true
+      event_sign_in_enable.value = response.data.event_sign_in_enable ?? false
       report_enable.value = response.data.report_enable
       trust_rotation_enable.value = response.data.trust_rotation_enable ?? false
       trust_rotation_prefer_low.value = response.data.trust_rotation_prefer_low ?? false
@@ -680,6 +723,8 @@ export const useConfigStore = defineStore('config', () => {
       maa_recruit.value = response.data.maa_recruit
       maa_orundum.value = response.data.maa_orundum
       maa_mining.value = response.data.maa_mining
+      maa_signinevent.value = response.data.maa_signinevent ?? false
+      maa_event_shop.value = { ...eventShopDefaults(), ...(response.data.maa_event_shop ?? {}) }
       maa_specialaccess.value = response.data.maa_specialaccess
       await load_weekly_plan_state()
       savedConfig = configSnapshot(build_config())
@@ -754,6 +799,7 @@ export const useConfigStore = defineStore('config', () => {
       simulator: simulator.value,
       ...(runtime_platform.value === 'android' ? {} : { theme: theme.value }),
       resting_threshold: resting_threshold.value / 100,
+      group_resting_thresholds: { ...group_resting_thresholds.value },
       version_update_resting_threshold: version_update_resting_threshold.value / 100,
       version_update_threshold_advance_hours: version_update_threshold_advance_hours.value,
       fia_threshold: fia_threshold.value / 100,
@@ -791,6 +837,8 @@ export const useConfigStore = defineStore('config', () => {
       rcl: rcl.value,
       rogue: rogue.value,
       sss: sss.value,
+      copilot: copilot.value,
+      paradox: paradox.value,
       ...(runtime_platform.value === 'android' ? {} : { screenshot: screenshot.value }),
       screenshot_archive_limit_mb: screenshot_archive_limit_mb.value,
       screenshot_interval: screenshot_interval.value,
@@ -811,6 +859,7 @@ export const useConfigStore = defineStore('config', () => {
       product_switching: product_switching.value,
       check_mail_enable: check_mail_enable.value,
       mail_skip_clear_read: mail_skip_clear_read.value,
+      event_sign_in_enable: event_sign_in_enable.value,
       report_enable: report_enable.value,
       trust_rotation_enable: trust_rotation_enable.value,
       trust_rotation_prefer_low: trust_rotation_prefer_low.value,
@@ -866,6 +915,8 @@ export const useConfigStore = defineStore('config', () => {
       maa_recruit: maa_recruit.value,
       maa_orundum: maa_orundum.value,
       maa_mining: maa_mining.value,
+      maa_signinevent: maa_signinevent.value,
+      maa_event_shop: maa_event_shop.value,
       maa_specialaccess: maa_specialaccess.value
     }
   }
@@ -876,6 +927,7 @@ export const useConfigStore = defineStore('config', () => {
       drone_count_limit: drone_count_limit.value,
       drone_interval: drone_interval.value,
       resting_threshold: resting_threshold.value / 100,
+      group_resting_thresholds: { ...group_resting_thresholds.value },
       version_update_resting_threshold: version_update_resting_threshold.value / 100,
       version_update_threshold_advance_hours: version_update_threshold_advance_hours.value,
       free_room: free_room.value,
@@ -1118,6 +1170,7 @@ export const useConfigStore = defineStore('config', () => {
     defaultLaunchCommand,
     simulator,
     resting_threshold,
+    group_resting_thresholds,
     version_update_resting_threshold,
     version_update_threshold_advance_hours,
     fia_threshold,
@@ -1156,6 +1209,8 @@ export const useConfigStore = defineStore('config', () => {
     rcl,
     rogue,
     sss,
+    copilot,
+    paradox,
     screenshot,
     screenshot_archive_limit_mb,
     screenshot_interval,
@@ -1176,6 +1231,7 @@ export const useConfigStore = defineStore('config', () => {
     product_switching,
     check_mail_enable,
     mail_skip_clear_read,
+    event_sign_in_enable,
     report_enable,
     trust_rotation_enable,
     trust_rotation_prefer_low,
@@ -1222,6 +1278,8 @@ export const useConfigStore = defineStore('config', () => {
     maa_orundum,
     maa_mining,
     maa_specialaccess,
+    maa_signinevent,
+    maa_event_shop,
     load_weekly_plan_state,
     refresh_weekly_plan_metadata,
     update_weekly_plan_active,

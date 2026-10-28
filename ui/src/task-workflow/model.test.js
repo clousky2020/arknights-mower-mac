@@ -1,6 +1,7 @@
 import { computed, reactive } from 'vue'
 import { describe, expect, it } from 'vitest'
 import { createTaskWorkflow, setTaskEnabled } from './model'
+import { matchesSettingsSearch } from '@/utils/settingsSearch'
 
 const switches = [
   ['clue', 'enable_party'],
@@ -8,6 +9,7 @@ const switches = [
   ['trust', 'trust_rotation_enable'],
   ['skland', 'skland_enable'],
   ['mail', 'check_mail_enable'],
+  ['event-sign-in', 'event_sign_in_enable'],
   ['report', 'report_enable'],
   ['recruit', 'recruit_enable'],
   ['depot', 'maa_depot_enable'],
@@ -27,6 +29,50 @@ function freeze(value) {
 }
 
 describe('task configuration checklist', () => {
+  it.each([
+    ['限时签到', 'rewards'],
+    ['Copilot', 'long'],
+    ['普通自动战斗', 'long']
+  ])('finds the MAA editor for %s', (query, expected) => {
+    const workflow = createTaskWorkflow({})
+    const matches = workflow.tasks.filter((task) =>
+      matchesSettingsSearch(query, task.title, task.description, task.searchKeywords)
+    )
+    expect(matches.map(({ id }) => id)).toEqual([expected])
+  })
+
+  it.each(['MAA 资源', 'MAA 自动更新', 'Mirror酱 CDK'])(
+    'finds the network and updates editor for %s',
+    (query) => {
+      const workflow = createTaskWorkflow({})
+      const matches = workflow.tasks.filter((task) =>
+        matchesSettingsSearch(query, task.title, task.description, task.searchKeywords)
+      )
+      expect(matches.map(({ id }) => id)).toEqual(['mower-updates'])
+    }
+  )
+
+  it.each(['十日 签到', '十五日 签到', '10天 签到', '14天 签到', '15天 补领'])(
+    'finds event sign-in for %s without enabling it',
+    (query) => {
+      const config = { event_sign_in_enable: false }
+      const workflow = createTaskWorkflow(config)
+      const matches = workflow.tasks.filter((task) =>
+        matchesSettingsSearch(query, task.title, task.description, task.searchKeywords)
+      )
+      expect(matches.map(({ id }) => id)).toEqual(['event-sign-in'])
+      expect(config.event_sign_in_enable).toBe(false)
+    }
+  )
+
+  it.each(['版本水印', '显示水印', '隐藏水印'])('finds the interface editor for %s', (query) => {
+    const workflow = createTaskWorkflow({})
+    const matches = workflow.tasks.filter((task) =>
+      matchesSettingsSearch(query, task.title, task.description, task.searchKeywords)
+    )
+    expect(matches.map(({ id }) => id)).toEqual(['mower-interface'])
+  })
+
   it.each([
     [false, false],
     [true, false],
@@ -122,13 +168,15 @@ describe('task configuration checklist', () => {
         'trust',
         'skland',
         'mail',
+        'event-sign-in',
         'report',
         'recruit',
         'depot',
         'visit',
         'credit-fight',
         'shop',
-        'rewards'
+        'rewards',
+        'event-shop'
       ],
       combat: ['stage-plan', 'long'],
       support: ['intervals', 'runtime', 'accounts', 'maa'],
@@ -232,6 +280,7 @@ describe('task configuration checklist', () => {
       maa_orundum: true,
       maa_mining: true,
       maa_specialaccess: true,
+      maa_signinevent: true,
       stage_plan_runner: 'maa',
       visit_friend_mode: 'mower',
       maa_mall_mode: 'maa',
@@ -247,7 +296,8 @@ describe('task configuration checklist', () => {
       maa_recruit: false,
       maa_orundum: false,
       maa_mining: false,
-      maa_specialaccess: false
+      maa_specialaccess: false,
+      maa_signinevent: false
     })
     for (const [id] of switches) setTaskEnabled(config, id, true)
     setTaskEnabled(config, 'rewards', true)
@@ -308,24 +358,29 @@ describe('task configuration checklist', () => {
     expect(createTaskWorkflow(config).statuses.rewards).toBe(enabled)
   })
 
-  it.each(['maa_mail', 'maa_recruit', 'maa_orundum', 'maa_mining', 'maa_specialaccess'])(
-    'recognizes %s as an additional MAA reward without enabling public recruitment',
-    (key) => {
-      const workflow = createTaskWorkflow({ [key]: true, recruit_enable: false })
-      expect(workflow.statuses.rewards).toBe(false)
-      expect(workflow.tasks.find(({ id }) => id === 'rewards').indeterminate).toBe(true)
-      expect(workflow.statuses.recruit).toBe(false)
-      expect(workflow.tasks.find(({ id }) => id === 'rewards').mode).toBe('aggregate')
-    }
-  )
+  it.each([
+    'maa_mail',
+    'maa_recruit',
+    'maa_orundum',
+    'maa_mining',
+    'maa_specialaccess',
+    'maa_signinevent'
+  ])('recognizes %s as an additional MAA reward without enabling public recruitment', (key) => {
+    const workflow = createTaskWorkflow({ [key]: true, recruit_enable: false })
+    expect(workflow.statuses.rewards).toBe(false)
+    expect(workflow.tasks.find(({ id }) => id === 'rewards').indeterminate).toBe(true)
+    expect(workflow.statuses.recruit).toBe(false)
+    expect(workflow.tasks.find(({ id }) => id === 'rewards').mode).toBe('aggregate')
+  })
 
-  it('selects all five rewards and clears them without modifying other tasks or Mower mail', () => {
+  it('selects all six rewards and clears them without modifying other tasks or Mower mail', () => {
     const config = {
       maa_mail: false,
       maa_recruit: true,
       maa_orundum: false,
       maa_mining: true,
       maa_specialaccess: false,
+      maa_signinevent: false,
       check_mail_enable: true,
       mail_skip_clear_read: false,
       recruit_enable: false,
@@ -342,7 +397,8 @@ describe('task configuration checklist', () => {
       maa_recruit: true,
       maa_orundum: true,
       maa_mining: true,
-      maa_specialaccess: true
+      maa_specialaccess: true,
+      maa_signinevent: true
     })
     expect(createTaskWorkflow(config).statuses.rewards).toBe(true)
     expect(createTaskWorkflow(config).tasks.find(({ id }) => id === 'rewards').indeterminate).toBe(
@@ -355,7 +411,8 @@ describe('task configuration checklist', () => {
       maa_recruit: false,
       maa_orundum: false,
       maa_mining: false,
-      maa_specialaccess: false
+      maa_specialaccess: false,
+      maa_signinevent: false
     })
     expect(createTaskWorkflow(config).statuses.rewards).toBe(false)
     expect(createTaskWorkflow(config).tasks.find(({ id }) => id === 'rewards').indeterminate).toBe(

@@ -2,11 +2,10 @@ import datetime
 import os
 
 import cv2
-import pandas as pd
 
 from arknights_mower.models import noto_sans
 from arknights_mower.utils.csleep import MowerExit
-from arknights_mower.utils.csv_utils import EmptyDataError
+from arknights_mower.utils.csv_utils import EmptyDataError, read_csv_rows
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.device.device import Device
 from arknights_mower.utils.device.recovery import DeviceRecoveryError
@@ -27,24 +26,6 @@ def match_digit(digit, template) -> float | None:
     except cv2.error:
         return None
     return cv2.minMaxLoc(result)[0]
-
-
-def read_csv_with_encoding_fallback(path: str, **kwargs):
-    """尝试 UTF-8 BOM / UTF-8 读取 CSV，失败则回退到 GBK
-
-    注意编码顺序：必须先试 ``utf-8-sig``（UTF-8 的安全超集，能正确去除 BOM），
-    再试 ``utf-8``。若先试 ``utf-8``，带 BOM 的文件会被"成功"读入但首列名会带上
-    ``\\ufeff`` 前缀，导致后续按列名取值（如 ``data[0]["Unnamed: 0"]``）触发 KeyError。
-    """
-    last_exc = None
-    for enc in ("utf-8-sig", "utf-8", "gbk"):
-        try:
-            return pd.read_csv(path, encoding=enc, **kwargs)
-        except (UnicodeDecodeError, pd.errors.ParserError) as e:
-            last_exc = e
-            continue
-    # 所有编码均失败，抛出最后一个异常而非静默返回 None
-    raise last_exc
 
 
 class ReportSolver(SceneGraphSolver):
@@ -213,11 +194,9 @@ class ReportSolver(SceneGraphSolver):
             if os.path.exists(self.record_path) is False:
                 logger.debug("基报不存在")
                 return False
-            df = read_csv_with_encoding_fallback(self.record_path, on_bad_lines="warn")
-            # 首列列名为空串（pandas 读作 Unnamed: 0），行 Series 按列标签索引，
-            # 用标签 0 取首列在 pandas 2+ 会 KeyError，须按位置取首列比较日期。
-            for value in df.iloc[:, 0]:
-                if value == self.date:
+            _, rows = read_csv_rows(self.record_path, encoding="gbk")
+            for item in rows:
+                if item[0] == self.date:
                     return True
             return False
         except PermissionError:
@@ -356,19 +335,3 @@ class ReportSolver(SceneGraphSolver):
                 return None
             value = value * 10 + number
         return value
-
-
-def get_report_data():
-    record_path = get_path("@app/tmp/report.csv")
-    try:
-        if os.path.exists(record_path) is False:
-            logger.debug("基报不存在")
-            return False
-        df = read_csv_with_encoding_fallback(record_path, on_bad_lines="warn")
-        return df.to_dict("dict")
-    except PermissionError:
-        logger.info("report.csv正在被占用")
-        return False
-    except (UnicodeDecodeError, pd.errors.ParserError) as e:
-        logger.warning(f"report.csv 编码无法识别或格式损坏: {e}")
-        return False

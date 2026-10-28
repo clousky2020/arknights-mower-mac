@@ -27,6 +27,7 @@ export interface RuntimePosition {
 export interface RuntimeBed { id: string; roomId: string; vip: boolean; managedRecovery?: boolean }
 export interface RuntimeConfig {
  majorMaintenanceStartHours?:number
+ majorMaintenanceDurationHours?:number
  /** The application simulation selects the October 3 source contract. */
  mowerDormIsolation?:string[][]
  mowerAlpha?:boolean;mowerDormOrder?:string[]
@@ -56,7 +57,7 @@ export interface RuntimeConfig {
   mowerServices?:{enableParty:boolean;droneIntervalHours:number;reloadRooms:readonly string[]|null;maaGapHours:number;leifengMode:boolean}
   mowerClueObservations?:{partyEndMicros:number|null;clueCount:number}
   mowerTaskScheduling?:MowerTaskSchedulingOptions
-  mowerPolicy?: { groupRestInFullOnMoodGap?:boolean; groupMoodGapThresholdMinutes?:number; groupMoodGapMaxExtraWaitHours?:number; groupMoodGapExclusions?:string[]; mergeIntervalMinutes?:number; restMoodLimits?: Record<string,number>; freeRoom?: boolean; taskBuffers?: boolean; rescueThreshold?: number; restingThreshold: number; powerPlantCount: number; opeRestingPriority: string[] }
+  mowerPolicy?: { predictiveMoodControl?:boolean; groupRestInFullOnMoodGap?:boolean; groupMoodGapThresholdMinutes?:number; groupMoodGapMaxExtraWaitHours?:number; groupMoodGapExclusions?:string[]; mergeIntervalMinutes?:number; restMoodLimits?: Record<string,number>; freeRoom?: boolean; taskBuffers?: boolean; rescueThreshold?: number; restingThreshold: number; groupRestingThresholds?: Record<string,number>; powerPlantCount: number; opeRestingPriority: string[] }
   runOrderPolicies?: RunOrderPolicy[]
 }
 export interface RuntimeEvent {

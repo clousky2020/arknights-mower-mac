@@ -38,7 +38,7 @@ def _replacement_tier(op_data, name):
     return RestingTier.REPLACEMENT
 
 
-def resting_tier(op_data, name, now=None):
+def resting_tier(op_data, name, now=None, *, replacement_names=None):
     op = op_data.operators.get(name)
     if name in op_data.config.free_blacklist or (op is not None and op.workaholic):
         return RestingTier.EXCLUDED
@@ -62,11 +62,15 @@ def resting_tier(op_data, name, now=None):
         if getattr(op, "resting_from_train", False):
             return _replacement_tier(op_data, name)
     # 菲亚梅塔的名单是充能目标，不是普通替班。
-    if any(
-        name in slot.all_replacements
-        for slots in op_data.plan.values()
-        for slot in slots
-        if slot.agent != "菲亚梅塔"
+    if (
+        any(
+            name in slot.all_replacements
+            for slots in op_data.plan.values()
+            for slot in slots
+            if slot.agent != "菲亚梅塔"
+        )
+        if replacement_names is None
+        else name in replacement_names
     ):
         return _replacement_tier(op_data, name)
     return RestingTier.IDLE
@@ -90,7 +94,7 @@ def is_full_dynamic_candidate(op_data, name, now=None):
 
 def is_full_dorm_filler(op_data, name, now=None):
     """实读回满的动态住客优先腾床，固定宿舍岗位和保留名单除外。"""
-    now = now or datetime.now()
+    now = now or getattr(op_data, "_projection_now", None) or datetime.now()
     op = op_data.operators.get(name)
     return bool(
         op is not None
@@ -112,7 +116,7 @@ def is_full_dorm_filler(op_data, name, now=None):
 
 def bed_takeover_allowed(op_data, requester, resident):
     """先让实读回满补位者腾床；未完成恢复者沿用层级和八成门槛。"""
-    now = datetime.now()
+    now = getattr(op_data, "_projection_now", None) or datetime.now()
     requester_tier = resting_tier(op_data, requester, now)
     resident_tier = resting_tier(op_data, resident, now)
     if is_full_dynamic_candidate(op_data, requester, now):
@@ -137,6 +141,7 @@ def bed_takeover_allowed(op_data, requester, resident):
 
 def has_resting_mood(op, now=None):
     """是否有当前模式可用于恢复计时的有效心情。"""
+    now = now or getattr(op, "_projection_now", None)
     if (
         op is not None
         and (model := getattr(op, "_mood_model", None)) is not None
@@ -155,6 +160,7 @@ def has_resting_mood(op, now=None):
 
 def resting_mood(op, now=None):
     """没有有效缓存时沿用默认 24 心情，读到实际心情后再更新。"""
+    now = now or getattr(op, "_projection_now", None)
     if (
         op is not None
         and (model := getattr(op, "_mood_model", None)) is not None
@@ -167,7 +173,7 @@ def resting_mood(op, now=None):
     return op.current_mood(now) if has_resting_mood(op, now) else 24
 
 
-def resting_key(op_data, name, now=None):
+def resting_key(op_data, name, now=None, *, replacement_names=None):
     from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
 
     op = op_data.operators.get(name)
@@ -175,15 +181,15 @@ def resting_key(op_data, name, now=None):
     mood = 24 if mood is None else mood
     # 同级按尚需恢复的心情点数降序；恢复速度不按个人上下限成比例。
     mood -= op.upper_limit if op is not None else 24
-    return resting_tier(op_data, name, now), mood
+    return resting_tier(op_data, name, now, replacement_names=replacement_names), mood
 
 
-def crafting_rest_candidates(op_data, names):
+def crafting_rest_candidates(op_data, names, *, replacement_names=None):
     """按加工顺序返回本轮符合条件的普通空闲候选。"""
     from arknights_mower.utils import config
     from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
 
-    conf = config.conf
+    conf = getattr(op_data, "runtime_conf", None) or config.conf
     if not (conf.enable_mastery and conf.workshop_auto_active):
         return []
     present = set(names)
@@ -199,17 +205,20 @@ def crafting_rest_candidates(op_data, names):
         name
         for name in configured
         if name in present
-        and resting_tier(op_data, name) == RestingTier.IDLE
+        and resting_tier(op_data, name, replacement_names=replacement_names)
+        == RestingTier.IDLE
         and not op_data.rest_mood_complete(name)
         and (mood := dorm_candidate_mood(op_data, name)) is not None
         and mood < getattr(op_data.operators.get(name), "upper_limit", 24)
     ]
 
 
-def crafting_rest_order(op_data, names):
+def crafting_rest_order(op_data, names, *, replacement_names=None):
     """只交换已排序名单中普通空闲加工干员的位置，不提升整个加工层。"""
     names = list(names)
-    ordered = crafting_rest_candidates(op_data, names)
+    ordered = crafting_rest_candidates(
+        op_data, names, replacement_names=replacement_names
+    )
     positions = [index for index, name in enumerate(names) if name in ordered]
     for index, name in zip(positions, ordered):
         names[index] = name

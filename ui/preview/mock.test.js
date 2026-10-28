@@ -15,6 +15,88 @@ import {
 afterEach(() => vi.useRealTimers())
 
 describe('offline preview', () => {
+  it('loads the new shop and copilot forms without device or resource access', async () => {
+    const client = axios.create({ adapter: createPreviewAdapter(createPreviewData({})) })
+    expect((await client.get('/maa-event-shop')).data).toEqual({ shops: [] })
+    expect((await client.get('/maa-paradox')).data).toEqual({ scripts: [] })
+    expect((await client.get('/maa-copilot')).data).toEqual({ scripts: [] })
+    await expect(client.post('/maa-event-shop', {})).rejects.toMatchObject({
+      response: { status: 405 }
+    })
+  })
+  it('keeps depot choices across independent edits and ignores a later migration', async () => {
+    const data = createPreviewData({ theme: 'light' })
+    const client = axios.create({ adapter: createPreviewAdapter(data) })
+    const options = { headers: { 'X-Mower-Config-Generation': 'obsolete' } }
+    expect((await client.get('/gui/depot')).data).toEqual({ depot: null })
+
+    const migrated = await client.put(
+      '/gui/depot',
+      { depot: { favorites: ['龙门币'] }, migrate: true },
+      options
+    )
+    expect(migrated.data.depot).toEqual({
+      favorites: ['龙门币'],
+      view: {
+        stockFilter: 'all',
+        deltaFilter: 'all',
+        showDerived: true,
+        sortMode: 'tier',
+        showcaseTab: 'core'
+      },
+      baseline: {
+        mode: 'time',
+        preset: 'previous',
+        range: null,
+        followLatest: true,
+        startKey: 'previous',
+        endKey: 'latest'
+      }
+    })
+    const view = { ...migrated.data.depot.view, sortMode: 'name', showcaseTab: 'favorites' }
+    await client.put('/gui/depot', { depot: { view } }, options)
+    const afterRace = await client.put(
+      '/gui/depot',
+      { depot: { favorites: ['赤金'] }, migrate: true },
+      options
+    )
+    expect(afterRace.data.depot).toEqual({ ...migrated.data.depot, view })
+    afterRace.data.depot.favorites.push('赤金')
+    expect((await client.get('/gui/depot')).data.depot.favorites).toEqual(['龙门币'])
+    expect(data.config).toEqual({ theme: 'light' })
+    const freshClient = axios.create({ adapter: createPreviewAdapter(createPreviewData({})) })
+    expect((await freshClient.get('/gui/depot')).data).toEqual({ depot: null })
+  })
+
+  it.each([
+    {},
+    { depot: {} },
+    { depot: [] },
+    { depot: { unknown: true } },
+    { depot: { favorites: [] }, migrate: 'yes' }
+  ])('rejects malformed depot preference group update %j', async (payload) => {
+    const client = axios.create({ adapter: createPreviewAdapter(createPreviewData({})) })
+    await expect(client.put('/gui/depot', payload)).rejects.toMatchObject({
+      response: { status: 400 }
+    })
+    expect((await client.get('/gui/depot')).data).toEqual({ depot: null })
+  })
+
+  it('previews image selection and reset independently of profile generation', async () => {
+    const client = axios.create({ adapter: createPreviewAdapter(createPreviewData({})) })
+    const options = { headers: { 'X-Mower-Config-Generation': 'obsolete' } }
+    expect((await client.get('/gui/log-background')).status).toBe(204)
+    const uploaded = await client.put(
+      '/gui/log-background',
+      new Blob(['png image'], { type: 'image/png' }),
+      options
+    )
+    expect(uploaded.status).toBe(200)
+    expect(uploaded.data.type).toBe('image/webp')
+    expect((await client.get('/gui/log-background')).data).toBe(uploaded.data)
+    expect((await client.delete('/gui/log-background', options)).status).toBe(204)
+    expect((await client.get('/gui/log-background')).status).toBe(204)
+  })
   it('serves all waiting scene rows while preserving supplied values and fixture isolation', async () => {
     const initial = { waiting_scene: { LOADING: [4, 20] } }
     const data = createPreviewData(createPreviewConfiguration(initial))
@@ -40,25 +122,38 @@ describe('offline preview', () => {
     expect((await client.get('/gui/appearance')).data).toEqual({
       software_version_display: 'version',
       software_version_language: 'en',
+      watermark_visible: true,
       task_settings_layout: 'checklist'
     })
     await client.put('/gui/appearance', { task_settings_layout: 'waterfall' })
     await client.put('/gui/appearance', { software_version_display: 'channel' })
     await client.put('/gui/appearance', { software_version_language: 'zh' })
+    await expect(
+      client.put('/gui/appearance', {
+        watermark_visible: false,
+        watermark_confirmation: '反馈问题时务必说明具体版本'
+      })
+    ).resolves.toMatchObject({
+      data: { watermark_visible: false }
+    })
     expect((await client.get('/gui/appearance')).data).toEqual({
       software_version_display: 'channel',
       software_version_language: 'zh',
+      watermark_visible: false,
       task_settings_layout: 'waterfall'
     })
     expect(data.config).toEqual(originalConfig)
+    expect(data.appearance).not.toHaveProperty('watermark_confirmation')
     await client.put('/gui/appearance', {
       software_version_display: 'version',
       software_version_language: 'en',
+      watermark_visible: true,
       task_settings_layout: 'checklist'
     })
     expect(data.appearance).toEqual({
       software_version_display: 'version',
       software_version_language: 'en',
+      watermark_visible: true,
       task_settings_layout: 'checklist'
     })
   })
@@ -70,6 +165,20 @@ describe('offline preview', () => {
     { task_settings_layout: 'invalid', software_version_display: 'channel' },
     { software_version_language: 'zh-CN', software_version_display: 'channel' },
     { software_version_language: null },
+    { watermark_visible: null },
+    { watermark_visible: 0 },
+    { watermark_visible: 1 },
+    { watermark_visible: 'false' },
+    { watermark_visible: [] },
+    { watermark_visible: {} },
+    { watermark_visible: false },
+    { watermark_visible: false, watermark_confirmation: '我知道了' },
+    { watermark_visible: false, watermark_confirmation: true },
+    { watermark_visible: false, watermark_confirmation: ['反馈问题时务必说明具体版本'] },
+    { watermark_confirmation: '反馈问题时务必说明具体版本' },
+    { watermark_visible: true, watermark_confirmation: '反馈问题时务必说明具体版本' },
+    { software_version_display: 'channel', watermark_visible: false },
+    { software_version_display: 'channel', watermark_visible: 'true' },
     { task_settings_layout: 'waterfall', unknown: true },
     { task_settings_layout: 'waterfall', constructor: 'channel' }
   ])('rejects invalid appearance update %j without partial writes', async (payload) => {
@@ -682,5 +791,133 @@ describe('offline preview', () => {
     })
     socket.close()
     expect(socket.readyState).toBe(Socket.CLOSED)
+  })
+})
+
+describe('成长规划离线示例', () => {
+  function growthClient() {
+    return axios.create({
+      adapter: createPreviewAdapter(createPreviewData(createPreviewConfiguration({})))
+    })
+  }
+
+  it('列表接口不携带材料明细，详情接口带材料与目标', async () => {
+    const client = growthClient()
+    const list = await client.get('/mastery-recommendation', { params: { materials: 0 } })
+    expect(list.data.has_data).toBe(true)
+    expect(list.data.operators.length).toBeGreaterThan(10)
+    const operator = list.data.operators.find((entry) => entry.recommendations.length)
+    expect(operator.recommendations[0]).not.toHaveProperty('targets')
+    const detail = await client.get('/mastery-recommendation', {
+      params: { char_id: operator.char_id }
+    })
+    expect(detail.data.operators[0].recommendations[0].targets).toBeTruthy()
+    expect(detail.data).not.toHaveProperty('goals')
+  })
+
+  it('养成计划、目标与顺序的修改只保存在预览内存中', async () => {
+    const client = growthClient()
+    const plan = await client.get('/mastery-plan')
+    expect(plan.data.plans.length).toBeGreaterThan(0)
+    const target = plan.data.plans[0]
+    const added = await client.post('/mastery-plan', {
+      planning: true,
+      items: [
+        {
+          char_id: target.char_id,
+          name: target.name,
+          skill_index: 0,
+          target_level: 2
+        }
+      ]
+    })
+    expect(['added', 'existing']).toContain(added.data.results[0].status)
+    const goals = await client.post('/growth-plan', {
+      char_id: target.char_id,
+      module_id: 'elite2',
+      selected: true
+    })
+    expect(goals.data.goals.some((goal) => goal.module_id === 'elite2')).toBe(true)
+    const order = await client.get('/growth-crafting-order')
+    expect(Array.isArray(order.data.planning_items)).toBe(true)
+    expect(Array.isArray(order.data.items)).toBe(true)
+    const survey = await client.get('/growth-survey')
+    expect(survey.data.operators.length).toBeGreaterThan(10)
+  })
+
+  it('提供工作区需要的干员名列表与工作室状态', async () => {
+    const client = growthClient()
+    const names = await client.get('/operator')
+    expect(names.data.length).toBeGreaterThan(10)
+    const status = await client.get('/workshop-status')
+    expect(status.data).toHaveProperty('execution')
+    await expect(client.get('/growth-not-provided')).rejects.toMatchObject({
+      code: 'ERR_PREVIEW_OPERATION'
+    })
+  })
+
+  it('同阶段升级保留在完整计划中，跨阶段升级才进入合成列表', async () => {
+    const client = growthClient()
+    const list = await client.get('/mastery-recommendation', { params: { materials: 0 } })
+    const leveling = list.data.operators.find(
+      (operator) =>
+        operator.elite === 2 &&
+        operator.level < operator.level_goals.find((goal) => goal.id === 'elite2_max')?.level
+    )
+    const promotion = list.data.operators.find(
+      (operator) => operator.elite < 2 && operator.level_goals.some((goal) => goal.id === 'elite2')
+    )
+    expect(leveling).toBeTruthy()
+    expect(promotion).toBeTruthy()
+    await client.post('/growth-plan', {
+      char_id: leveling.char_id,
+      module_id: 'elite2_max',
+      selected: true
+    })
+    await client.post('/growth-plan', {
+      char_id: promotion.char_id,
+      module_id: 'elite2',
+      selected: true
+    })
+    const { data: order } = await client.get('/growth-crafting-order')
+    const levelingKey = `goal:${leveling.char_id}:elite2_max`
+    const promotionKey = `goal:${promotion.char_id}:elite2`
+    expect(order.planning_items.find((item) => item.key === levelingKey)).toMatchObject({
+      crafting_required: false,
+      label: leveling.level_goals.find((goal) => goal.id === 'elite2_max').label
+    })
+    expect(order.items.some((item) => item.key === levelingKey)).toBe(false)
+    expect(order.planning_items.find((item) => item.key === promotionKey)).toMatchObject({
+      crafting_required: true
+    })
+    expect(order.items.some((item) => item.key === promotionKey)).toBe(true)
+  })
+
+  it('失败计划保留失败原因并排除在可执行顺序之外', async () => {
+    const client = growthClient()
+    const { data: plans } = await client.get('/mastery-plan')
+    const failed = plans.plans.find((plan) => plan.status === 'failed')
+    expect(failed.failed_reason).toBeTruthy()
+    const { data: order } = await client.get('/growth-crafting-order')
+    expect(order.planning_items.some((item) => item.plan_id === failed.id)).toBe(false)
+    expect(order.items.some((item) => item.plan_id === failed.id)).toBe(false)
+  })
+
+  it('既有计划和新建计划的辅助工时都使用小时', async () => {
+    const client = growthClient()
+    const { data: initial } = await client.get('/mastery-plan')
+    const existing = initial.plans.find((plan) => plan.name === '泥岩')
+    expect(existing.support_plan.stages.map((stage) => stage.hours)).toEqual([4.57, 9.14, 15])
+    expect(existing.support_plan.hours).toBe(28.71)
+
+    const { data: added } = await client.post('/mastery-plan', {
+      planning: true,
+      items: [{ char_id: 'char_2023_ling', name: '令', skill_index: 0, target_level: 3 }]
+    })
+    expect(added.results[0].status).toBe('added')
+    const { data: updated } = await client.get('/mastery-plan')
+    const created = updated.plans.find((plan) => plan.id === added.results[0].id)
+    expect(created.support_plan.stages.map((stage) => stage.hours)).toEqual([4.57, 9.14, 15])
+    expect(created.support_plan.hours).toBe(28.71)
   })
 })

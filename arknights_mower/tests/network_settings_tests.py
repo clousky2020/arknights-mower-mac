@@ -77,6 +77,94 @@ class ProxySettingsBase(unittest.TestCase):
 
 
 class ProxySettingsTests(ProxySettingsBase):
+    def test_unconfigured_download_uses_second_default_station(self):
+        url = resource_pkg.RESOURCE_ZIP_URL
+        for first_failure in (
+            requests.ConnectionError,
+            requests.Timeout,
+            403,
+            429,
+            503,
+        ):
+            with self.subTest(first_failure=first_failure):
+                client = Mock()
+                response = Mock()
+                failed = Mock(status_code=first_failure)
+                failed.raise_for_status.side_effect = requests.HTTPError()
+                client.get.side_effect = [
+                    requests.ConnectionError("direct unavailable"),
+                    failed if isinstance(first_failure, int) else first_failure(),
+                    response,
+                ]
+                actual, selected = github.request_download(
+                    client, "get", url, timeout=3
+                )
+                self.assertIs(actual, response)
+                self.assertEqual(selected, "https://gh-proxy.com/" + url)
+                self.assertEqual(
+                    [call.args[0] for call in client.get.call_args_list],
+                    [url, "https://ghfast.top/" + url, "https://gh-proxy.com/" + url],
+                )
+                if isinstance(first_failure, int):
+                    failed.close.assert_called_once_with()
+
+    def test_default_stations_stop_after_all_connections_fail(self):
+        client = Mock()
+        client.get.side_effect = requests.Timeout("unavailable")
+        with self.assertRaises(requests.Timeout):
+            github.request_download(
+                client, "get", resource_pkg.RESOURCE_ZIP_URL, proxy=""
+            )
+        self.assertEqual(client.get.call_count, 5)
+
+    def test_unconfigured_download_uses_official_service_alternate_stations(self):
+        url = resource_pkg.RESOURCE_ZIP_URL
+        expected = [
+            url,
+            "https://ghfast.top/" + url,
+            "https://gh-proxy.com/" + url,
+            "https://gh-proxy.org/" + url,
+            "https://edgeone.gh-proxy.org/" + url,
+        ]
+        for index in (3, 4):
+            with self.subTest(station=expected[index]):
+                client = Mock()
+                response = Mock()
+                client.get.side_effect = [requests.Timeout()] * index + [response]
+                actual, selected = github.request_download(client, "get", url, proxy="")
+                self.assertIs(actual, response)
+                self.assertEqual(selected, expected[index])
+                self.assertEqual(
+                    [call.args[0] for call in client.get.call_args_list],
+                    expected[: index + 1],
+                )
+
+    def test_connection_test_reports_selected_station_and_requires_token(self):
+        app = Flask(__name__)
+        app.token = "local-test-token"
+        app.register_blueprint(network_bp)
+        client = app.test_client()
+        response = requests.Response()
+        response.status_code = 200
+        response._content_consumed = True
+        with patch("requests.Session.head") as head:
+            for token in ("", "invalid-token"):
+                denied = client.post(
+                    "/network/test", headers={"token": token, "X-Mower-Settings": "1"}
+                )
+                self.assertEqual(denied.status_code, 403)
+            head.assert_not_called()
+            head.side_effect = [requests.Timeout()] * 4 + [response]
+            result = client.post(
+                "/network/test",
+                headers={"token": app.token, "X-Mower-Settings": "1"},
+            ).get_json()
+        self.assertTrue(result["results"][0]["ok"])
+        self.assertEqual(
+            result["results"][0]["message"],
+            "默认站点 edgeone.gh-proxy.org 回退连接成功",
+        )
+
     def test_unconfigured_download_retries_connection_failure_via_default_station(self):
         url = resource_pkg.RESOURCE_ZIP_URL
         response = Mock()
@@ -341,6 +429,77 @@ class ProxySettingsTests(ProxySettingsBase):
             )
         self.assertEqual(network.get_settings()["github_proxy"], "https://ghfast.top/")
 
+    def test_copilot_set_requires_token_before_network_and_preserves_member_order(self):
+        app = Flask(__name__)
+        app.token = "local-test-token"
+        app.register_blueprint(network_bp)
+        client = app.test_client()
+        with patch("arknights_mower.views.network.requests.get") as get:
+            for method in (client.get, client.head):
+                for headers in ({}, {"token": "wrong"}):
+                    self.assertEqual(
+                        method(
+                            "/network/maa-copilot-set/123", headers=headers
+                        ).status_code,
+                        403,
+                    )
+            get.assert_not_called()
+            get.return_value.json.return_value = {
+                "status_code": 200,
+                "data": {"copilot_ids": [456, 789, 456]},
+            }
+            response = client.get(
+                "/network/maa-copilot-set/123", headers={"token": app.token}
+            )
+            self.assertEqual(response.get_json(), {"ids": ["456", "789", "456"]})
+            get.assert_called_once_with(
+                "https://prts.maa.plus/set/get", params={"id": 123}, timeout=30
+            )
+
+            get.reset_mock()
+            self.assertEqual(
+                client.head(
+                    "/network/maa-copilot-set/123", headers={"token": app.token}
+                ).status_code,
+                200,
+            )
+            get.assert_called_once_with(
+                "https://prts.maa.plus/set/get", params={"id": 123}, timeout=30
+            )
+
+    def test_copilot_set_rejects_missing_invalid_or_oversized_members(self):
+        app = Flask(__name__)
+        app.token = "local-test-token"
+        app.register_blueprint(network_bp)
+        client = app.test_client()
+        for payload in (
+            {},
+            {"data": {"copilot_ids": []}},
+            {"data": {"copilot_ids": [True]}},
+            {"data": {"copilot_ids": [-1]}},
+            {"data": {"copilot_ids": [1.5]}},
+            {"data": {"copilot_ids": ["https://other.test"]}},
+            {"data": {"copilot_ids": list(range(1, 34))}},
+            {"status_code": 400, "data": {"copilot_ids": [456]}},
+        ):
+            with self.subTest(payload=payload):
+                with patch("arknights_mower.views.network.requests.get") as get:
+                    get.return_value.json.return_value = payload
+                    response = client.get(
+                        "/network/maa-copilot-set/123", headers={"token": app.token}
+                    )
+                    self.assertIn(response.status_code, (400, 502))
+                    self.assertNotIn("ids", response.get_json())
+        with patch(
+            "arknights_mower.views.network.requests.get", side_effect=requests.Timeout
+        ):
+            self.assertEqual(
+                client.get(
+                    "/network/maa-copilot-set/123", headers={"token": app.token}
+                ).status_code,
+                502,
+            )
+
     def test_copilot_download_uses_fixed_backend_endpoint_without_forwarding_token(
         self,
     ):
@@ -437,7 +596,7 @@ class LocalProxyIntegrationTests(ProxySettingsBase):
             return direct_get(url, **kwargs)
 
         with (
-            patch.object(github, "FALLBACK_PROXY", station + "/"),
+            patch.object(github, "FALLBACK_PROXIES", (station + "/",)),
             patch.object(requests, "get", side_effect=get),
         ):
             self.assertEqual(resource_pkg.download_resource_pkg(), b"fixture resource")

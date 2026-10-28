@@ -1,5 +1,6 @@
 <template>
   <n-config-provider
+    inline-theme-disabled
     :locale="zhCN"
     :date-locale="dateZhCN"
     class="provider"
@@ -50,7 +51,7 @@
       placement="top-right"
       :container-style="windowShellActive ? { top: '48px' } : undefined"
     >
-      <n-dialog-provider>
+      <n-message-provider>
         <n-modal
           v-model:show="closeModal"
           preset="card"
@@ -83,7 +84,7 @@
             </n-space>
           </n-space>
         </n-modal>
-        <n-message-provider>
+        <n-dialog-provider>
           <ConfigProfilesController :controller="configProfiles" />
           <SidebarEditor v-model:show="sidebarEditorOpen" :request="sidebarEditorRequest" />
           <HelpDialog
@@ -141,6 +142,7 @@
               </n-layout-sider>
               <n-layout-content class="layout-content-container">
                 <n-watermark
+                  v-if="watermarkVisible"
                   class="content-watermark"
                   :content="watermarkData"
                   cross
@@ -177,25 +179,34 @@
                   preset="card"
                   style="width: min(720px, calc(100vw - 32px))"
                   title="版本更新"
+                  content-style="display: flex; flex-direction: column; overflow: hidden"
                   :mask-closable="false"
                   :close-on-esc="false"
                   closable
                   @close="handleUpdateNoticeAck"
                 >
-                  <div style="font-size: 18px; font-weight: 600">
+                  <div style="flex: none; font-size: 18px; font-weight: 600">
                     {{ `已更新到 ${updateNotice.current_version}` }}
                   </div>
                   <div
                     v-if="updateNotice.previous_version"
-                    style="margin-top: 8px; color: var(--n-text-color-3)"
+                    style="flex: none; margin-top: 8px; color: var(--n-text-color-3)"
                   >
                     {{ `从 ${updateNotice.previous_version} 更新` }}
                   </div>
                   <div
-                    style="margin-top: 16px; max-height: 50vh; overflow: auto; line-height: 1.6"
+                    style="
+                      min-height: 0;
+                      margin-top: 16px;
+                      max-height: 50vh;
+                      overflow: auto;
+                      line-height: 1.6;
+                    "
                     v-html="renderedChangelog"
                   ></div>
-                  <div style="margin-top: 20px; display: flex; justify-content: flex-end">
+                  <div
+                    style="flex: none; margin-top: 20px; display: flex; justify-content: flex-end"
+                  >
                     <n-button type="primary" @click="handleUpdateNoticeAck">我知道了</n-button>
                   </div>
                 </n-modal>
@@ -248,8 +259,8 @@
               />
             </Teleport>
           </n-loading-bar-provider>
-        </n-message-provider>
-      </n-dialog-provider>
+        </n-dialog-provider>
+      </n-message-provider>
     </n-notification-provider>
   </n-config-provider>
 </template>
@@ -260,7 +271,6 @@ import {
   computed,
   defineAsyncComponent,
   inject,
-  nextTick,
   onBeforeUnmount,
   onMounted,
   provide,
@@ -284,6 +294,7 @@ import SidebarUpdateChecks from '@/components/SidebarUpdateChecks.vue'
 import SidebarEditor from '@/components/SidebarEditor.vue'
 import { useSidebarPreferences } from '@/composables/sidebarPreferences'
 import { useResolvedTheme } from '@/composables/theme'
+import { themeSelectionKey, useThemeSelection } from '@/composables/themeSelection'
 import {
   mowerDarkCssVariables,
   mowerDarkThemeOverrides,
@@ -421,7 +432,7 @@ async function openDeviceConnection(action) {
   if (configProfiles.busy.value || configProfiles.stale.value || configProfiles.pendingReload.value)
     return
   if (action === 'test' && (running.value || deviceConnectionNavigation.locked.value)) return
-  const failure = await router.push({ name: 'task-settings', hash: '#task-devices' })
+  const failure = await router.push({ name: 'settings', hash: '#task-devices' })
   if (failure && !isNavigationFailure(failure, NavigationFailureType.duplicated)) return
   deviceConnectionNavigation.open(action)
 }
@@ -477,20 +488,15 @@ const {
   adb
 } = storeToRefs(config_store)
 const theme = useResolvedTheme(themePreference)
+const setTheme = useThemeSelection(themePreference, theme)
+provide(themeSelectionKey, setTheme)
 // Also applied to the page drawer, which teleports out of the provider element.
 const mowerCssVariables = computed(() =>
   theme.value === 'dark' ? mowerDarkCssVariables : mowerLightCssVariables
 )
-let activeThemeColours = null
-let themeControlWrite = false
 watch(
   theme,
   () => {
-    if (themeControlWrite) return
-    if (activeThemeColours) {
-      activeThemeColours = null
-      document.documentElement.classList.remove('mower-theme-colours')
-    }
     document.documentElement.classList.add('mower-theme-changing')
   },
   { flush: 'sync' }
@@ -505,48 +511,6 @@ watchPostEffect(() => {
   root.classList.remove('mower-theme-changing')
 })
 
-async function setThemeWithTransition(nextTheme) {
-  const root = document.documentElement
-  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  if (reduceMotion) {
-    activeThemeColours = null
-    root.classList.remove('mower-theme-colours')
-    root.classList.add('mower-theme-changing')
-    themePreference.value = nextTheme
-    await nextTick()
-    void root.offsetWidth
-    root.classList.remove('mower-theme-changing')
-    return
-  }
-  if (nextTheme === themePreference.value) return
-
-  const change = {}
-  activeThemeColours = change
-  root.classList.add('mower-theme-colours')
-  void root.offsetWidth
-  try {
-    themeControlWrite = true
-    try {
-      themePreference.value = nextTheme
-    } finally {
-      themeControlWrite = false
-    }
-    await nextTick()
-    if (activeThemeColours !== change) return
-    void root.offsetWidth
-    const transitions = document
-      .getAnimations()
-      .filter((animation) => typeof animation.transitionProperty === 'string')
-    await Promise.allSettled(transitions.map((animation) => animation.finished))
-  } finally {
-    if (activeThemeColours === change) {
-      activeThemeColours = null
-      root.classList.remove('mower-theme-colours')
-    }
-  }
-}
-
-provide('set_theme_with_transition', setThemeWithTransition)
 const windowShellTitle = computed(() =>
   formatWindowTitle({
     version: windowTitleVersion.value,
@@ -589,7 +553,7 @@ const {
 } = storeToRefs(mower_store)
 const { get_running, listen_ws } = mower_store
 const guiStore = useGuiStore()
-const { softwareVersionDisplay } = storeToRefs(guiStore)
+const { softwareVersionDisplay, watermarkVisible } = storeToRefs(guiStore)
 
 const update_notice_store = useUpdateNoticeStore()
 const { notice: updateNotice } = storeToRefs(update_notice_store)
@@ -789,7 +753,7 @@ function apply_zoom(scale) {
 const isMobileNav = ref(false)
 const mobile = ref(false)
 provide('mobile', mobile)
-const allSettingsOpen = computed(() => route.name === 'task-settings')
+const allSettingsOpen = computed(() => route.name === 'settings')
 let sidebarBeforeSettings = null
 let settingsSidebarManuallyToggled = false
 watch(
@@ -1013,8 +977,6 @@ onBeforeUnmount(() => {
   clearTimeout(closePollTimer)
   disposeModalDrag?.()
   windowShell.dispose()
-  activeThemeColours = null
-  document.documentElement.classList.remove('mower-theme-colours')
   document.documentElement.classList.remove('mower-theme-changing')
   delete document.documentElement.dataset.windowShellTheme
   delete document.documentElement.dataset.mowerTheme
@@ -1263,14 +1225,22 @@ html.mower-theme-changing *::after {
   transition: none !important;
 }
 
-html.mower-theme-colours,
-html.mower-theme-colours *,
-html.mower-theme-colours *::before,
-html.mower-theme-colours *::after {
-  transition-property: color, background-color, border-color, box-shadow, fill, stroke !important;
-  transition-duration: 180ms !important;
-  transition-timing-function: ease-out !important;
-  transition-delay: 0s !important;
+html.mower-theme-transition::view-transition {
+  pointer-events: none;
+}
+
+html.mower-theme-transition::view-transition-group(root),
+html.mower-theme-transition::view-transition-old(root),
+html.mower-theme-transition::view-transition-new(root) {
+  animation-duration: 160ms;
+  animation-timing-function: ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.mower-theme-transition::view-transition-old(root),
+  html.mower-theme-transition::view-transition-new(root) {
+    animation: none;
+  }
 }
 
 /* naive-ui 弹窗 teleport 到 <body>，不在 .provider--window-shell 内，
@@ -1381,7 +1351,6 @@ html[data-window-shell-theme='dark'] {
   flex-grow: 1;
   display: flex;
   flex-direction: column;
-  overflow: auto;
 }
 
 .n-card-header__main {

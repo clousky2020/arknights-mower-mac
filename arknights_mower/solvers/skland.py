@@ -1,11 +1,10 @@
 import datetime
 import os
 
-import pandas as pd
 import requests
 
-from arknights_mower.solvers.report import read_csv_with_encoding_fallback
 from arknights_mower.utils import config
+from arknights_mower.utils.csv_utils import EmptyDataError, read_csv_rows
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.skland import (
@@ -238,16 +237,14 @@ class SKLand:
             if os.path.exists(self.record_path) is False:
                 logger.debug("无森空岛记录")
                 return False
-            df = read_csv_with_encoding_fallback(
-                self.record_path, header=None, on_bad_lines="warn", dtype=str
-            )
+            rows = read_csv_rows(self.record_path, header=False, encoding="gbk")
 
             sign_arknights_official = False
             sign_arknights_bilbili = False
             sign_endfield_official = False
             sign_endfield_bilibili = False
 
-            for line_no, item in enumerate(df.values, start=1):
+            for line_no, item in enumerate(rows, start=1):
                 if len(item) < 3:
                     logger.warning(
                         "跳过不完整的森空岛签到记录：第%s行，仅%s列",
@@ -290,7 +287,7 @@ class SKLand:
             return False
         except PermissionError:
             logger.info("skland.csv正在被占用")
-        except pd.errors.EmptyDataError:
+        except EmptyDataError:
             return False
 
     # 用于测试连接

@@ -39,10 +39,17 @@ export class MowerTask {
  correctionSkipDorm=false
  get retainsExecution():boolean{return !!this.executionFailure||this.executionRetained}
  previewReturnVeto?:{conditions:number[];names:string[]}
+ backupRetentionWait?:{names:string[]}
+ backupRetentionReleasedNames:string[]=[]
+ backupRetentionAdmissions:string[]=[]
+ backupRetentionEmptySlots:Record<string,string>={}
  groupShiftTransitions:Record<string,boolean>={}
  /** Once room execution begins, remaining rooms retain the confirmed shift intent. */
  arrangementStarted=false
  productShiftLocked=false
+ /** 兼容旧快照标记：只用于清除未执行的提前轮休，不再生成预测建议。 */
+ moodControlEvent?:{fingerprint:string;timeMicros:number}
+ moodControlEvidence?:unknown
  ordinaryCoordination=false
  exhaustSupport=false
  coordinationRequestNames:string[]=[]
