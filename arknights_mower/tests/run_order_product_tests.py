@@ -253,7 +253,7 @@ def use_order_pages(solver, order_states):
 
 
 def use_mood_pages(solver, monkeypatch, occupants):
-    monkeypatch.setattr(base_schedule, "_training_room_scan_disabled", True)
+    solver.op_data.facility_levels["train"] = 0
     monkeypatch.setattr(base_schedule, "try_workshop_tasks", MagicMock())
     solver.back = MagicMock()
     solver._plan_dorm_recovery = MagicMock(return_value=True)
@@ -534,6 +534,7 @@ def test_paused_order_reconciles_empty_room_despite_recent_occupancy_cache(
             ),
         )
         arrangement.setattr(solver, "scene", MagicMock(return_value=Scene.INFRA_MAIN))
+        arrangement.setattr(solver.recog, "update", MagicMock(), raising=False)
         arrangement.setattr(solver, "choose_agent", MagicMock())
 
         def confirm_staffing(room, new_plan):

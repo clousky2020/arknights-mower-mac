@@ -76,6 +76,7 @@ export const useConfigStore = defineStore('config', () => {
   const custom_smtp_server = ref({})
   const package_type = ref('official')
   const run_order_delay = ref(10)
+  const run_order_network_adaptive = ref(false)
   const low_frame_rate_mode = ref(false)
   const performance_mode = ref('auto')
   const performance_effective_mode = ref('xhigh')
@@ -204,12 +205,13 @@ export const useConfigStore = defineStore('config', () => {
   const merge_interval = ref(10)
   const test_mood_calculation = ref(false)
   const group_rest_in_full_on_mood_gap = ref(true)
-  const group_mood_gap_threshold_minutes = ref(60)
+  const group_mood_gap_threshold_minutes = ref(null)
   const group_mood_gap_max_extra_wait_hours = ref(0)
   const group_mood_gap_exclusions = ref([])
   const fia_fool = ref(true)
   const assistant_follows_schedule = ref(false)
   const enable_mastery = ref(true)
+  const save_mastery_screenshots = ref(false)
   const sign_in = ref({ enable: true })
   const droidcast = ref({})
   const mumu12IPC = ref(false)
@@ -221,6 +223,7 @@ export const useConfigStore = defineStore('config', () => {
   const resource_update_auto_update = ref(false)
   const notification_level = ref('INFO')
   const waiting_scene = ref({})
+  const waiting_scene_network_adaptive = ref(false)
   const maa_mail = ref(false)
   const maa_recruit = ref(false)
   const maa_orundum = ref(false)
@@ -582,6 +585,7 @@ export const useConfigStore = defineStore('config', () => {
       custom_smtp_server.value = response.data.custom_smtp_server
       package_type.value = response.data.package_type == 1 ? 'official' : 'bilibili'
       run_order_delay.value = response.data.run_order_delay ?? fallbackProfile.runOrderDelay
+      run_order_network_adaptive.value = response.data.run_order_network_adaptive ?? false
 
       start_automatically.value = response.data.start_automatically
       maa_mall_buy.value =
@@ -689,13 +693,15 @@ export const useConfigStore = defineStore('config', () => {
       merge_interval.value = response.data.merge_interval
       test_mood_calculation.value = response.data.test_mood_calculation ?? false
       group_rest_in_full_on_mood_gap.value = response.data.group_rest_in_full_on_mood_gap ?? true
-      group_mood_gap_threshold_minutes.value = response.data.group_mood_gap_threshold_minutes ?? 60
+      group_mood_gap_threshold_minutes.value =
+        response.data.group_mood_gap_threshold_minutes ?? null
       group_mood_gap_max_extra_wait_hours.value =
         response.data.group_mood_gap_max_extra_wait_hours ?? 0
       group_mood_gap_exclusions.value = [...(response.data.group_mood_gap_exclusions ?? [])]
       fia_fool.value = response.data.fia_fool
       assistant_follows_schedule.value = response.data.assistant_follows_schedule
       enable_mastery.value = response.data.enable_mastery ?? true
+      save_mastery_screenshots.value = response.data.save_mastery_screenshots ?? false
       right_side_room_order.value =
         response.data.right_side_room_order ??
         (response.data.swap_contact_train
@@ -719,6 +725,7 @@ export const useConfigStore = defineStore('config', () => {
       resource_update_auto_update.value = response.data.resource_update?.auto_update ?? false
       notification_level.value = response.data.notification_level
       waiting_scene.value = response.data.waiting_scene
+      waiting_scene_network_adaptive.value = response.data.waiting_scene_network_adaptive ?? false
       maa_mail.value = response.data.maa_mail
       maa_recruit.value = response.data.maa_recruit
       maa_orundum.value = response.data.maa_orundum
@@ -788,6 +795,7 @@ export const useConfigStore = defineStore('config', () => {
       timezone_offset: timezone_offset.value,
       custom_smtp_server: custom_smtp_server.value,
       run_order_delay: run_order_delay.value,
+      run_order_network_adaptive: run_order_network_adaptive.value,
       low_frame_rate_mode: performanceProfile(performance_mode.value).lowFrameRateMode,
       performance_mode: performance_mode.value,
       selection_poll_interval: selection_poll_interval.value,
@@ -890,6 +898,7 @@ export const useConfigStore = defineStore('config', () => {
       fia_fool: fia_fool.value,
       assistant_follows_schedule: assistant_follows_schedule.value,
       enable_mastery: enable_mastery.value,
+      save_mastery_screenshots: save_mastery_screenshots.value,
       sign_in: sign_in.value,
       droidcast: droidcast.value,
       mumu12IPC: mumu12IPC.value,
@@ -911,6 +920,7 @@ export const useConfigStore = defineStore('config', () => {
       },
       notification_level: notification_level.value,
       waiting_scene: waiting_scene.value,
+      waiting_scene_network_adaptive: waiting_scene_network_adaptive.value,
       maa_mail: maa_mail.value,
       maa_recruit: maa_recruit.value,
       maa_orundum: maa_orundum.value,
@@ -1152,6 +1162,7 @@ export const useConfigStore = defineStore('config', () => {
     custom_smtp_server,
     package_type,
     run_order_delay,
+    run_order_network_adaptive,
     low_frame_rate_mode,
     performance_mode,
     performance_effective_mode,
@@ -1262,6 +1273,7 @@ export const useConfigStore = defineStore('config', () => {
     fia_fool,
     assistant_follows_schedule,
     enable_mastery,
+    save_mastery_screenshots,
     sign_in,
     droidcast,
     mumu12IPC,
@@ -1273,6 +1285,7 @@ export const useConfigStore = defineStore('config', () => {
     resource_update_auto_update,
     notification_level,
     waiting_scene,
+    waiting_scene_network_adaptive,
     maa_mail,
     maa_recruit,
     maa_orundum,

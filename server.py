@@ -2448,8 +2448,15 @@ def diagnostic_errors():
 
 
 def _send_diagnostic_bundle(center, archive_id=None, **options):
+    plan_data = config.plan.model_dump(exclude_none=True)
+    plan_data["advanced_settings"] = export_advanced_settings(config.conf)
     bundle = export_bundle(
-        get_path("@app/log"), get_path("@app/screenshot"), center, archive_id, **options
+        get_path("@app/log"),
+        get_path("@app/screenshot"),
+        center,
+        archive_id,
+        scheduling_plan=plan_data,
+        **options,
     )
     response = send_file(
         bundle,
@@ -2556,6 +2563,9 @@ def diagnostic_error_analyze(archive_id):
 @app.route("/diagnostics/errors/<archive_id>/export")
 @require_log_read
 def diagnostic_error_export(archive_id):
+    screenshots = request.args.get("screenshots", "1")
+    if screenshots not in ("0", "1"):
+        return {"error": "请选择是否包含截图"}, 400
     if not archive_id.isascii() or not archive_id.isdigit() or len(archive_id) > 20:
         abort(404)
     folder = get_path("@app/screenshot") / "errors" / archive_id
@@ -2565,7 +2575,9 @@ def diagnostic_error_export(archive_id):
         center = datetime.datetime.fromtimestamp(int(archive_id) / 10**9)
     except (OverflowError, OSError, ValueError):
         abort(404)
-    return _send_diagnostic_bundle(center, archive_id)
+    return _send_diagnostic_bundle(
+        center, archive_id, include_screenshots=screenshots == "1"
+    )
 
 
 @app.route("/diagnostics/errors/<archive_id>", methods=["DELETE"])
@@ -3701,6 +3713,27 @@ def getTradingHistory():
     from arknights_mower.solvers import record
 
     return record.get_trading_history(start_date, end_date)
+
+
+@app.get("/report/order-candles")
+@require_token
+def get_order_candles():
+    import sqlite3
+
+    from arknights_mower.solvers.order_candles import get_order_candles as query
+
+    try:
+        return query(
+            get_path("@app/tmp") / "data.db",
+            request.args.get("startDate"),
+            request.args.get("endDate"),
+            request.args.get("period", "4h"),
+        )
+    except (ValueError, OverflowError) as exc:
+        return {"error": str(exc)}, 400
+    except (sqlite3.Error, OSError):
+        logger.exception("订单价格记录读取失败")
+        return {"error": "订单价格记录读取失败，请检查数据库后重试"}, 503
 
 
 @app.route("/report/recycling_history")

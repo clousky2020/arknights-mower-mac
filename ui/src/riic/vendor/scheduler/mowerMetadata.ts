@@ -1,3 +1,4 @@
+import {mowerHeldRestGroups} from './mowerBackupGroupTasks'
 import {restingThresholdFor} from './mowerOperatorState'
 import {admitMowerDerivedTasks,type MowerDependencyReturnAdmission} from './mowerTaskDerivation'
 // Port of default plan_metadata and plan_mood_limit_releases, Mower alpha.
@@ -30,14 +31,17 @@ function stableGroupReturnMicros(data:MowerSchedulingData,beds:MowerDormState[])
  }
  return ready
 }
-export function planMowerMoodLimitReleases(data:MowerSchedulingData):MowerTask[] {
+export function planMowerMoodLimitReleases(data:MowerSchedulingData,previousTasks:MowerTask[]=[]):MowerTask[] {
  const result:MowerTask[]=[]
  for(const bed of data.dorms){
   const op=data.operators[bed.name];if(!op?.restMoodLimit||data.freeRoomExcluded(op.name))continue
   const [room,index]=bed.position;if(op.currentRoom!==room||op.currentIndex!==index||!data.recoveryDorm(bed,op.name))continue
   const due=data.restMoodComplete(op.name)?data.nowMicros:bed.timeMicros===undefined?undefined:Math.max(data.nowMicros,bed.timeMicros);if(due===undefined)continue
   const names=Array(data.plan[room]!.length).fill('Current');names[index]='Free'
-  const task=new MowerTask({plan:{[room]:names},type:T.RELEASE_DORM,metadata:op.name,strictMoodLimit:true,moodLimit:op.upperLimit});task.timeMicros=due;result.push(task)
+  const task=new MowerTask({plan:{[room]:names},type:T.RELEASE_DORM,metadata:op.name,strictMoodLimit:true,moodLimit:op.upperLimit});task.timeMicros=due
+  task.moodLimitSource=JSON.stringify([bed.timeMicros,op.upperLimit,data.restMoodComplete(op.name)])
+  const previous=previousTasks.find(old=>old.strictMoodLimit&&old.metadata===op.name&&old.moodLimitSource===task.moodLimitSource&&JSON.stringify(old.plan)===JSON.stringify(task.plan))
+  result.push(previous??task)
  }
  return result
 }
@@ -47,7 +51,7 @@ export function planMowerMetadata(data:MowerSchedulingData,queue:MowerTaskQueue,
   if(!Object.keys(task.plan).length)queue.consume(task)
  }
  if(queue.tasks.some(task=>task.backupShiftActive))return
- if(data.alpha){planMowerAlphaMetadata(data,queue,planMowerMoodLimitReleases(data),dependencyReturn);return}
+ if(data.alpha){planMowerAlphaMetadata(data,queue,planMowerMoodLimitReleases(data,queue.tasks),dependencyReturn);return}
  if(data.policy.experimentalDormLogic)throw new Error('Experimental product locks and dorm projection require their source port')
  const existingTargets:MowerReturnTargets={}
  if(data.planConditions.some(Boolean))for(const task of queue.tasks)if(task.type===T.SHIFT_ON)for(const [room,names] of Object.entries(task.plan))for(const [index,name] of names.entries())if(!['Current','Free',''].includes(name))existingTargets[name]=[room,index]
@@ -65,7 +69,9 @@ export function planMowerMetadata(data:MowerSchedulingData,queue:MowerTaskQueue,
  }
  const newTasks=new Map<number,MowerDormBatch>()
  const add=(timeMicros:number,dorms:MowerDormState[],restInFull:boolean)=>{const previous=newTasks.get(timeMicros);if(previous){previous.dorms.push(...dorms);previous.restInFull=!!(previous.restInFull||restInFull)}else newTasks.set(timeMicros,{timeMicros,dorms:[...dorms],restInFull})}
+ const held=mowerHeldRestGroups(data)
  for(const [group,dorms] of grouped){
+  if(held.has(group))continue
   const highPriority=dorms.filter(b=>data.operators[b.name]!.isHigh()&&data.operators[b.name]!.restingPriority==='high')
   const ordinary=dorms.filter(b=>data.operators[b.name]!.isHigh()&&data.operators[b.name]!.restingPriority!=='standby')
   const high=highPriority.length?highPriority:ordinary.length?ordinary:dorms.filter(b=>data.operators[b.name]!.isHigh()&&!(group&&data.canStandby(data.operators[b.name]!)))
@@ -109,7 +115,7 @@ export function planMowerMetadata(data:MowerSchedulingData,queue:MowerTaskQueue,
  const generated=admitMowerDerivedTasks(data,queue.tasks,generateMowerDormTasks([...newTasks.values(),...releases.values()],data,existingTargets),dependencyReturn);queue.tasks.push(...generated)
  const returning=new Set(generated.flatMap(t=>Object.values(t.plan).flat())),busy=data.busyRestingNames
  for(const op of Object.values(data.operators)){
-  if(!op.isHigh()||op.room.startsWith('dorm')||op.currentRoom||op.group&&data.canStandby(op)||!data.restMoodComplete(op.name))continue
+  if(!op.isHigh()||held.has(op.group)||op.room.startsWith('dorm')||op.currentRoom||op.group&&data.canStandby(op)||!data.restMoodComplete(op.name))continue
   const members=op.group?data.group(op.group):[op.name]
   if(members.some(name=>returning.has(name)||busy.has(name)))continue
   const workers=members.map(name=>data.operators[name]!).filter(worker=>!worker.room.startsWith('dorm')&&!worker.workaholic&&!(worker.group&&data.canStandby(worker)))

@@ -334,6 +334,7 @@ def build_global_plan(
                 backup_config,
                 trigger=backup_trigger,
                 task=backup_task,
+                group_tasks=i.get("group_tasks", []),
                 name=i.get("name"),
                 products=backup_products,
                 group_ids=i["group_ids"],
@@ -875,6 +876,12 @@ class Operators:
             if room and room[0].product == BaseProduct.Electricity
         )
         self.refresh_dorm_manager_flags(force=True)
+        from arknights_mower.utils.backup_group_tasks import validate_group_tasks
+
+        try:
+            validate_group_tasks(self)
+        except ValueError as error:
+            return str(error)
 
     def refresh_dorm_manager_flags(self, *, force=False):
         """标记配置中的宿舍成员及其替班；资源未变时不再匹配。"""
@@ -1463,8 +1470,8 @@ class Operators:
         }
         self.commit_group_shifts({})
 
-    def working_replacement_blockers(self, names, plan=None):
-        """其他组仍占用成员的工作替班岗位时，整组等待岗位释放。"""
+    def working_replacement_assignments(self, names, plan=None):
+        """取得本次成员仍承担的其他主班工作岗位。"""
         names = set(names)
         plan = plan or {}
         sources = {}
@@ -1486,7 +1493,7 @@ class Operators:
                 if name in names
             }
         )
-        groups = set()
+        assignments = {}
         for (room, index), name in sources.items():
             op = self.operators[name]
             slots = self.plan.get(room, [])
@@ -1498,8 +1505,24 @@ class Operators:
                 and owner.name not in names
                 and self.is_same_group_primary_replacement(owner, name)
             ):
-                groups.add(owner.group)
-        return groups
+                assignments[owner.name] = name
+        return assignments
+
+    def working_replacement_blockers(self, names, plan=None):
+        """共享成员保留工作替班岗位；实际离岗仍须完成交接。"""
+        plan = plan or {}
+        return {
+            self.operators[owner].group
+            for owner, name in self.working_replacement_assignments(names, plan).items()
+            if not self.operators[name].multi_group
+            or any(
+                target == name
+                and (room, index)
+                != (self.operators[owner].room, self.operators[owner].index)
+                for room, row in plan.items()
+                for index, target in enumerate(row)
+            )
+        }
 
     def normalize_shared_arrangement(
         self,
@@ -2212,6 +2235,8 @@ class Operators:
                 operator.replacement = list(
                     operator.replacements_for_group(exist.group)
                 )
+            if hasattr(exist, "_projected_mood_resting"):
+                operator._projected_mood_resting = exist._projected_mood_resting
             operator.mood = exist.mood
             operator.time_stamp = exist.time_stamp
             operator.mood_is_prediction = getattr(exist, "mood_is_prediction", False)
@@ -2552,6 +2577,10 @@ class Operators:
             self.mood_model.advance(now)
         if getattr(self, "_projection_now", None) is not None:
             self._projection_deadlines = {}
+        for op in self.operators.values():
+            # 位置预演保留原心情的房间状态，不把入宿意图当作实读。
+            if not hasattr(op, "_projected_mood_resting"):
+                op._projected_mood_resting = op.is_resting()
         for plan in plans:
             previous_positions = {
                 name: (op.current_room, op.current_index)
@@ -3176,6 +3205,9 @@ class Operators:
             and self.is_effective_free_slot(bed)
             and (op := self.operators[bed.name]).is_high()
             and self.is_group_shift_anchor(op)
+            and (op.current_room, op.current_index) == bed.position
+            and has_resting_mood(op)
+            and resting_mood(op) < op.upper_limit
             and not self.rest_mood_complete(op.name)
             and (group is None or op.group == group)
             for bed in self.all_dorms()
@@ -3193,18 +3225,25 @@ class Operators:
             and 0 <= op.mood < op.upper_limit
             and op.current_mood() < op.upper_limit
         }
+
+        def has_anchor(group):
+            return bool(group) and (
+                group in anchor_groups or self.has_resting_anchor(group)
+            )
+
         return {
             name
             for name in names
             if self._can_standby(self.operators[name])
             and (
-                self.operators[name].group in anchor_groups
+                has_anchor(self.operators[name].group)
                 or self.operators[name].independent_rest
                 and any(
-                    binding["group"] in anchor_groups
+                    has_anchor(binding["group"])
                     for binding in self.operators[name].group_bindings
                 )
                 or not self.operators[name].group
+                and not self.operators[name].independent_rest
                 and self.has_resting_anchor()
             )
         }
@@ -3322,6 +3361,14 @@ class Operators:
             json.dumps(vars(self.config), sort_keys=True, default=sorted),
             tuple(sorted(self.products.items())),
             tuple(sorted(self.maintenance_primary_slots)),
+            tuple(
+                sorted(
+                    (task["group"], task["action"], task.get("mode", "once"))
+                    for backup, active in zip(self.backup_plans, self.plan_condition)
+                    if active
+                    for task in backup.group_tasks
+                )
+            ),
         )
 
     def validate_backup_plans(

@@ -2,7 +2,10 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { resourceVersionBadge, resourceVersionHint } from '@/utils/versionBadges'
 import SoftwareVersionBadge from '@/components/SoftwareVersionBadge.vue'
+import HalloweenDecor from '@/components/HalloweenDecor.vue'
+import { useHalloweenSeason } from '@/composables/halloween'
 
+const halloweenActive = useHalloweenSeason()
 const props = defineProps({
   collapsed: { type: Boolean, default: false },
   collapsible: { type: Boolean, default: true },
@@ -82,8 +85,16 @@ onUnmounted(() => {
       <div class="sidebar-brand-home">
         <slot name="home">
           <img v-if="showLogo" :src="'/favicon.ico'" alt="" width="28" height="28" />
-          <span class="sidebar-brand-name" :aria-hidden="collapsed">Mower</span>
+          <span class="sidebar-brand-name" :aria-hidden="collapsed">
+            Mower
+            <HalloweenDecor v-if="halloweenActive && !collapsed" kind="wordmark" />
+          </span>
         </slot>
+        <HalloweenDecor
+          v-if="halloweenActive && !collapsed"
+          kind="lantern"
+          class="sidebar-brand-lantern"
+        />
       </div>
       <button
         v-if="collapsible"
@@ -184,6 +195,12 @@ onUnmounted(() => {
   object-fit: contain;
   transition: opacity 0.16s;
 }
+.sidebar-brand-lantern {
+  margin-left: auto;
+  flex: none;
+  width: 26px;
+  height: 26px;
+}
 .sidebar-brand:not(.sidebar-brand--collapsed) .sidebar-brand-home {
   overflow: visible;
 }
@@ -195,6 +212,7 @@ onUnmounted(() => {
   max-width: 100%;
 }
 .sidebar-brand-name {
+  position: relative;
   flex: none;
   font-size: 18px;
   font-weight: 600;
@@ -236,13 +254,10 @@ onUnmounted(() => {
   outline-offset: -2px;
 }
 .sidebar-brand-versions {
-  display: grid;
-  grid-template-rows: 1fr;
+  /* WKWebView can retain narrow-width grid row heights after the sider expands.
+     Let this block follow the wrapped version badges' intrinsic height. */
   overflow: hidden;
   margin: 8px 0 0 38px;
-  transition:
-    grid-template-rows 0.24s,
-    opacity 0.16s;
 }
 .sidebar-brand-version-lines {
   display: flex;
@@ -356,10 +371,7 @@ onUnmounted(() => {
   transform: translateX(-4px);
 }
 .sidebar-brand--collapsed .sidebar-brand-versions {
-  grid-template-rows: 0fr;
-  margin-top: 0;
-  visibility: hidden;
-  opacity: 0;
+  display: none;
 }
 .sidebar-brand--collapsed .sidebar-brand-toggle {
   position: absolute;
@@ -389,7 +401,6 @@ onUnmounted(() => {
   .sidebar-brand-home img,
   .sidebar-brand-name,
   .sidebar-brand-toggle svg,
-  .sidebar-brand-versions,
   .sidebar-brand-resource {
     transition: none;
   }

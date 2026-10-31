@@ -774,6 +774,41 @@ def test_event_sign_in_follows_daily_profile_group(storage, enabled, inherit):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("operation", ["create", "activate", "import"])
+@pytest.mark.parametrize("selected", [[], ["base"], ["other_settings"]])
+def test_mastery_screenshots_follow_base_profile_group(
+    storage, enabled, operation, selected
+):
+    config.conf.save_mastery_screenshots = not enabled
+    config.save_conf()
+    original = profiles.list_profiles()["active_id"]
+    incoming = backup.export_archive()
+    if operation == "activate":
+        _create("目标配置")
+    config.conf.save_mastery_screenshots = enabled
+    config.save_conf()
+
+    if operation == "create":
+        _create("专精截图配置", selected)
+    elif operation == "activate":
+        _activate(original, selected)
+    else:
+        profiles.import_profile(
+            incoming,
+            "专精截图配置",
+            selected,
+            expected_generation=profiles.current_generation(),
+        )
+
+    expected = False if operation == "create" else not enabled
+    if "base" in selected:
+        expected = enabled
+    assert config.conf.save_mastery_screenshots is expected
+    saved = config.Conf(**yaml.safe_load(config.conf_path.read_text(encoding="utf-8")))
+    assert saved.save_mastery_screenshots is expected
+
+
+@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("inherit", [[], ["base"]])
 def test_mood_calculation_follows_base_profile_group(storage, enabled, inherit):
     config.conf.test_mood_calculation = enabled
@@ -1613,3 +1648,22 @@ def test_event_shop_settings_follow_daily_profile_group(storage, inherit):
     if "daily" in inherit:
         assert config.conf.maa_event_shop.x == 900
         assert config.conf.maa_event_shop.switch_source == "活动"
+
+
+@pytest.mark.parametrize(
+    "inherit", [[], ["runorder"], ["runtime"], ["runorder", "runtime"]]
+)
+def test_network_adaptive_switches_follow_their_own_profile_groups(storage, inherit):
+    config.conf = config.conf.updated(
+        {"run_order_network_adaptive": True, "waiting_scene_network_adaptive": True}
+    )
+    config.save_conf()
+    original = profiles.list_profiles()["active_id"]
+
+    _create("网络自适应配置", inherit)
+
+    assert config.conf.run_order_network_adaptive is ("runorder" in inherit)
+    assert config.conf.waiting_scene_network_adaptive is ("runtime" in inherit)
+    _activate(original)
+    assert config.conf.run_order_network_adaptive is True
+    assert config.conf.waiting_scene_network_adaptive is True

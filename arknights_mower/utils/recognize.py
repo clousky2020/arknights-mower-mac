@@ -1,4 +1,5 @@
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from typing import List, Optional, Tuple
@@ -27,6 +28,13 @@ from arknights_mower.utils.vector import va
 
 class RecognizeError(Exception):
     pass
+
+
+@dataclass
+class NetworkWaitGuard:
+    deadline: float
+    scene_budgets: dict[str, float] = field(default_factory=dict)
+    allowance_remaining: float = 0
 
 
 class Recognizer:
@@ -116,6 +124,7 @@ class Recognizer:
 
     def reset_after_external_control(self) -> None:
         """重新开始连续观测时，丢弃旧标准画面帧及场景停留计时。"""
+        self.__dict__.pop("_network_wait_episode", None)
         self.update()
         self.last_scene = None
         self.last_scene_time = datetime.now()
@@ -149,6 +158,8 @@ class Recognizer:
         return False
 
     def check_loading_time(self):
+        if self._network_wait_is_managed():
+            return
         if self.scene == Scene.CONNECTING:
             self.loading_time += 1
             if self.loading_time > 1:
@@ -170,7 +181,18 @@ class Recognizer:
         if min_val < 0.02:
             return (min_loc[0] + 960 + 42, min_loc[1] + 42)
 
+    def _network_wait_is_managed(self):
+        if self.scene not in (Scene.CONNECTING, Scene.LOADING):
+            self.__dict__.pop("_network_wait_episode", None)
+            return False
+        return isinstance(getattr(self, "_network_wait_guard", None), NetworkWaitGuard)
+
     def check_freeze(self, current_time):
+        # 等待函数按同一截止时间决定是否重启，此处不提前关闭游戏。
+        if self._network_wait_is_managed():
+            self.last_scene = self.scene
+            self.last_scene_time = current_time
+            return
         if self.scene != self.last_scene:
             self.last_scene_time = current_time
             self.last_scene = self.scene
@@ -198,6 +220,8 @@ class Recognizer:
         # 连接中，优先级最高
         if self.find("connecting"):
             self.scene = Scene.CONNECTING
+        elif self.find("clue/access_record"):
+            self.scene = Scene.CLUE_ACCESS_RECORD
         # 导航栏会覆盖在原场景上；下层的制造站收取等特征仍可能可见。
         elif self.find("nav_bar"):
             self.scene = Scene.NAVIGATION_BAR
@@ -649,6 +673,10 @@ class Recognizer:
             self.scene = Scene.TERMINAL_MAIN
         elif self.find("terminal_regular"):
             self.scene = Scene.TERMINAL_REGULAR
+        elif self.find("sss/deploy_button"):
+            self.scene = Scene.SSS_DEPLOY
+        elif self.find("sss/redeploy_button"):
+            self.scene = Scene.SSS_REDEPLOY
         elif self.find("sss/main"):
             self.scene = Scene.SSS_MAIN
         elif self.find("sss/start_button"):
@@ -659,10 +687,8 @@ class Recognizer:
             self.scene = Scene.SSS_DEVICE
         elif self.find("sss/squad_button"):
             self.scene = Scene.SSS_SQUAD
-        elif self.find("sss/deploy_button") or self.find("sss/action_preparation"):
+        elif self.find("sss/action_preparation"):
             self.scene = Scene.SSS_DEPLOY
-        elif self.find("sss/redeploy_button"):
-            self.scene = Scene.SSS_REDEPLOY
         elif self.find("sss/confirm"):
             self.scene = Scene.SSS_CONFIRM
         elif self.find("sss/loading"):
@@ -752,6 +778,32 @@ class Recognizer:
         """check if the current scene is all black"""
         return np.max(self.gray[:, 105:-105]) < 16
 
+    def find_clue_access_record(self):
+        """在固定区域比较完整标题字形，不读取文字或比较背景纹理。"""
+        title = self.img[250:365, 800:1120].astype(np.int16)
+        foreground = (
+            (title.min(axis=2) >= 190) & (title.max(axis=2) - title.min(axis=2) <= 40)
+        ).astype(np.uint8) * 255
+        template = loadres("clue/access_record_title", True)
+        # 两种标题尺寸分别来自标准截图和已有视频素材的标准化画面。
+        for scale_x, scale_y in ((1, 1), (0.85, 0.95)):
+            shape = cv2.resize(
+                template,
+                (
+                    round(template.shape[1] * scale_x),
+                    round(template.shape[0] * scale_y),
+                ),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            result = cv2.matchTemplate(foreground, shape, cv2.TM_CCOEFF_NORMED)
+            _, score, _, (x, y) = cv2.minMaxLoc(result)
+            if score >= 0.68:
+                return (
+                    (800 + x, 250 + y),
+                    (800 + x + shape.shape[1], 250 + y + shape.shape[0]),
+                )
+        return None
+
     def find(
         self,
         res: tp.Res,
@@ -778,6 +830,8 @@ class Recognizer:
         """
         if score is not None:
             threshold = score
+        if res == "clue/access_record":
+            return self.find_clue_access_record()
         normalized_res = str(res).replace("\\", "/")
         force_feature_match = "navigation/stage/" in normalized_res
 
@@ -919,7 +973,12 @@ class Recognizer:
             return None
 
         template_matching = {
+            "sss/main": ((1450, 180), (1920, 370)),
             "sss/action_preparation": (1080, 652),
+            "sss/deploy_button": ((1450, 850), (1920, 1080)),
+            "sss/redeploy_button": ((1450, 850), (1920, 1080)),
+            "sss/device_button": ((1450, 850), (1920, 1080)),
+            "sss/next_step_button": ((1450, 850), (1920, 1080)),
             "recycle/dashboard": ((465, 148), (682, 264)),
             "infra_collect_recycle": ((240, 980), (1920, 1080)),
             # "arrange_check_in": ((30, 300), (175, 700)),

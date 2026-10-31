@@ -1142,7 +1142,7 @@ class TestBaseScheduler(unittest.TestCase):
         solver.planned = False
         solver.defer_backup_plan_until_mood_read = True
         with (
-            patch.object(base_schedule, "_training_room_scan_disabled", True),
+            patch.dict(solver.op_data.facility_levels, {"train": 0}),
             patch.object(BaseSchedulerSolver, "_read_initial_card_mood"),
             patch.object(BaseSchedulerSolver, "find", return_value=True),
             patch.object(BaseSchedulerSolver, "enter_room") as enter,
@@ -1179,7 +1179,7 @@ class TestBaseScheduler(unittest.TestCase):
         solver.planned = False
         solver.defer_backup_plan_until_mood_read = True
         with (
-            patch.object(base_schedule, "_training_room_scan_disabled", True),
+            patch.dict(solver.op_data.facility_levels, {"train": 0}),
             patch.object(BaseSchedulerSolver, "_read_initial_card_mood"),
             patch.object(BaseSchedulerSolver, "find", return_value=True),
             patch.object(BaseSchedulerSolver, "enter_room") as enter,
@@ -2080,7 +2080,11 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         solver.refresh_current_room = MagicMock()
         solver.turn_on_room_detail = MagicMock()
         solver.enter_room = MagicMock()
-        solver.back = MagicMock()
+        solver.back = MagicMock(
+            side_effect=lambda *args, **kwargs: setattr(
+                solver.scene, "return_value", Scene.INFRA_MAIN
+            )
+        )
         solver.recog = MagicMock()
         return solver
 
@@ -3212,6 +3216,12 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         solver.recog.w = 1920
         solver.recog.h = 1080
         solver.waiting_scene = []
+        solver._selection_profile_snapshot = SimpleNamespace(
+            mode="xhigh",
+            low_frame_rate=False,
+            transition_timeout=2,
+            screenshot_interval=100,
+        )
         solver.enter_room = MagicMock()
         solver.back_to_infrastructure = MagicMock()
         solver.turn_on_room_detail = MagicMock()
@@ -3236,7 +3246,11 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
             side_effect=lambda: events.append("countdown") or 120
         )
         solver.scene = MagicMock(return_value=Scene.INFRA_DETAILS)
-        solver.back = MagicMock()
+        solver.back = MagicMock(
+            side_effect=lambda *args, **kwargs: setattr(
+                solver.scene, "return_value", Scene.INFRA_MAIN
+            )
+        )
         solver.reset_room_time = MagicMock()
         return solver, room, events
 

@@ -116,6 +116,9 @@ def pending_normal_order(solver, monkeypatch):
     from arknights_mower.utils import scheduler_task
 
     selection_harness(solver, monkeypatch)
+    solver.prepare_dorm_selection = (
+        base_schedule.BaseSchedulerSolver.prepare_dorm_selection.__get__(solver)
+    )
     solver.op_data.plan["room_1_1"].pop()
     setup_startup(solver)
     config.conf.automatic_rescue_enable = True
@@ -1007,6 +1010,7 @@ def test_handoff_uses_real_arrangement_with_its_own_task_context(solver, previou
     )
     solver.back = MagicMock()
     solver.scene = MagicMock(return_value=Scene.INFRA_MAIN)
+    solver.recog = SimpleNamespace(update=MagicMock())
     solver.run_order_solver = MagicMock()
     solver.plan_metadata = MagicMock()
 
@@ -1313,7 +1317,7 @@ def test_selection_rechecks_card_mood_and_preserves_actual_readings(
         assert solver.op_data.dorm_mood_estimates[name][0] == mood
 
 
-def test_rejected_staffing_candidate_cancels_only_failed_room_and_requests_repair(
+def test_rejected_staffing_candidate_retains_remaining_plan_after_bounded_retries(
     solver, monkeypatch
 ):
     from arknights_mower.solvers import base_schedule
@@ -1324,24 +1328,43 @@ def test_rejected_staffing_candidate_cancels_only_failed_room_and_requests_repai
     state["staffing_plan"] = {room: names.copy() for room, names in plan.items()}
     solver.task = SchedulerTask(task_plan=plan)
     solver.task.emergency_staffing = True
+    solver.tasks = [solver.task]
+    original_time = solver.task.time
+    original_read_time = state["next_read"]
     solver.enter_room = MagicMock()
     solver.turn_on_room_detail = MagicMock()
     solver.ensure_dorm_recovery_order = MagicMock(return_value=False)
     solver._can_refresh_idle_dorm_search = MagicMock(return_value=False)
     solver.find = MagicMock(return_value=True)
-    solver.scene = MagicMock(return_value=Scene.INFRA_ARRANGE_ORDER)
+    solver.scene = MagicMock(return_value=Scene.INFRA_MAIN)
+    solver.recog = SimpleNamespace(update=MagicMock())
+    solver.get_agent_from_room = MagicMock(
+        side_effect=lambda room, *args, **kwargs: [
+            {"agent": name} for name in solver.op_data.get_current_room(room, True)
+        ]
+    )
     solver.choose_agent = MagicMock(side_effect=AgentSelectionNotReady("心情不足"))
     solver.back_to_infrastructure = MagicMock()
     solver._emergency_read_rooms = MagicMock()
     solver._emergency_save = MagicMock()
     monkeypatch.setattr(base_schedule, "save_exception", MagicMock())
-    assert solver.agent_arrange_room({}, "room_1_1", plan) is False
-    assert state["staffing_plan"] == {"room_1_2": [COVERS[1]]}
-    assert plan == {"room_1_2": [COVERS[1]]}
-    assert state["next_read"] == NOW
-    solver.choose_agent.assert_called_once()
-    solver._emergency_read_rooms.assert_called_once_with(["room_1_1"])
-    solver._emergency_save.assert_called_once()
+    with pytest.raises(base_schedule.RoomArrangementDeferred) as raised:
+        solver.agent_arrange_room({}, "room_1_1", plan)
+    assert raised.value.room == "room_1_1"
+    assert (
+        state["staffing_plan"]
+        == plan
+        == {
+            "room_1_1": [COVERS[0]],
+            "room_1_2": [COVERS[1]],
+        }
+    )
+    assert solver.tasks == [solver.task]
+    assert solver.task.time == original_time
+    assert state["next_read"] == original_read_time
+    assert solver.choose_agent.call_count == 4
+    solver._emergency_read_rooms.assert_not_called()
+    solver._emergency_save.assert_not_called()
 
 
 @pytest.mark.parametrize("path", ["planner", "selection"])
@@ -2706,3 +2729,51 @@ def test_rescue_training_selection_never_reads_card_mood(solver, monkeypatch):
     ) == {name}
     assert estimates == {name: (24, NOW)}
     read.assert_not_called()
+
+
+def test_startup_handoff_preserves_pending_once_group_departure(solver):
+    from arknights_mower.utils.backup_group_tasks import sync_group_tasks
+    from arknights_mower.utils.plan import Plan, PlanConfig
+
+    setup_startup(solver)
+    config.conf.automatic_rescue_enable = True
+    data = solver.op_data
+    target = data.operators[PRIMARY[2]]
+    target.group = "待下班组"
+    data.groups[target.group] = [target.name]
+    for name in PRIMARY[2:]:
+        data.operators[name].mood = 24
+    data.operators[COVERS[0]].mood = 24
+    backup = Plan(
+        {},
+        PlanConfig("", "", ""),
+        group_tasks=[{"group": target.group, "action": "off", "mode": "once"}],
+    )
+    data.backup_plans = [backup]
+    data.global_plan["backup_plans"] = [backup]
+    data.plan_condition = [True]
+    sync_group_tasks(solver, now=NOW)
+    request = next(
+        task for task in solver.tasks if getattr(task, "backup_group_request", None)
+    )
+    assert request.type == TaskTypes.EXHAUST_OFF and request.plan == {}
+    assert request.backup_group_request in solver.backup_group_task_issued
+    solver.op_data = data.project_arrangements(
+        [{"dormitory_1": ["冰酿", "闪灵", *PRIMARY[:2], "Free"]}]
+    )
+    solver._emergency_startup()
+    handoff = next(
+        task for task in solver.tasks if task.meta_data == "初始化正常轮休交接"
+    )
+    projected = solver.op_data.project_arrangements([handoff.plan])
+    assert projected.operators[target.name].is_working()
+    assert not projected.group_is_resting(target.group)
+    assert any(task is request for task in solver.tasks)
+    assert request.time == NOW and request.plan == {}
+    for _ in range(4):
+        sync_group_tasks(solver, now=NOW + timedelta(hours=1))
+    assert [
+        task for task in solver.tasks if getattr(task, "backup_group_request", None)
+    ] == [request]
+    assert request.time == NOW
+    solver.enter_room.assert_not_called()

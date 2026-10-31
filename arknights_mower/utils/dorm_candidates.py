@@ -49,7 +49,12 @@ def scheduling_mood_observation(op_data, name, now=None, *, estimates=None):
         return (value, now) if value is not None else None
     op = op_data.operators.get(name)
     measured = (
-        (op.mood if op.is_resting() else resting_mood(op, now), op.time_stamp)
+        (
+            op.mood
+            if getattr(op, "_projected_mood_resting", op.is_resting())
+            else resting_mood(op, now),
+            op.time_stamp,
+        )
         if has_resting_mood(op, now)
         and not getattr(op, "mood_is_prediction", False)
         and op.time_stamp <= now
@@ -188,6 +193,13 @@ def retained_task_reservations(
                     slots.add((room, index))
                 if name not in ("", "Current", "Free"):
                     names.add(name)
+        pending = getattr(task, "run_order_confirmation_pending", None)
+        if pending and pending["submitted"]:
+            names.update(
+                name
+                for name in pending["target"]
+                if name not in ("", "Current", "Free")
+            )
         for position, name in getattr(task, "group_shift_expected", {}).items():
             if name != "Current":
                 slots.add(position)
@@ -292,7 +304,12 @@ def dorm_task_reservations(op_data, tasks, excluded=()):
     for task in tasks:
         if task is None or getattr(task, "run_order_staffing_wait", False):
             continue
-        names.update(getattr(task, "emergency_staffing_members", ()))
+        if not (
+            getattr(task, "emergency_staffing", False)
+            and task.retains_execution
+            and not getattr(task, "emergency_recovery_release", False)
+        ):
+            names.update(getattr(task, "emergency_staffing_members", ()))
         names.update(
             name
             for row in getattr(task, "run_order_original_roster", {}).values()

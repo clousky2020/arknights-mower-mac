@@ -16,6 +16,10 @@ _runtime = threading.local()
 _DATA = Path(__file__).parents[1] / "data" / "mood"
 
 
+def _rules_hash():
+    return json.loads((_DATA / "source.json").read_text("utf-8"))["rules_sha256"]
+
+
 def log_mood_calculation(label):
     """按调度批次汇总模型同步与预测耗时，嵌套批次共用外层统计。"""
 
@@ -78,14 +82,27 @@ def _shared_runtime():
 
     if not hasattr(_runtime, "context"):
         source = (_DATA / "runtime.js").read_text("utf-8").encode("utf-8")
+        catalog = (_DATA.parent / "riic" / "operators.json").read_text("utf-8")
+        catalog_bytes = catalog.encode("utf-8")
         manifest = json.loads((_DATA / "source.json").read_text("utf-8"))
-        if hashlib.sha256(source).hexdigest() != manifest["sha256"]:
+        if (
+            hashlib.sha256(source).hexdigest() != manifest["sha256"]
+            or hashlib.sha256(catalog_bytes).hexdigest() != manifest["catalog_sha256"]
+            or hashlib.sha256(source + catalog_bytes).hexdigest()
+            != manifest["rules_sha256"]
+        ):
             raise RuntimeError("心情计算资源校验失败，请重新安装当前版本")
         context = quickjs.Context()
         context.set_memory_limit(128 * 1024 * 1024)
         context.set_max_stack_size(1024 * 1024)
         context.set_time_limit(2)
+        context.set("__mowerOperatorCatalogJson", catalog)
+        context.eval(
+            "globalThis.__mowerOperatorCatalog = JSON.parse(__mowerOperatorCatalogJson);"
+            "delete globalThis.__mowerOperatorCatalogJson;"
+        )
         context.eval(source.decode("utf-8"))
+        context.eval("delete globalThis.__mowerOperatorCatalog;")
         _runtime.context = context
         _runtime.calculate = context.get("mowerMoodRates")
         _runtime.rate_results = OrderedDict()
@@ -142,9 +159,7 @@ def _facility_levels(owner):
 class CalculatedMood:
     def __init__(self):
         self.schema = 1
-        self.rules_hash = json.loads((_DATA / "source.json").read_text("utf-8"))[
-            "sha256"
-        ]
+        self.rules_hash = _rules_hash()
         self.at = None
         self.enabled = False
         self.moods = {}
@@ -172,19 +187,26 @@ class CalculatedMood:
         return projected
 
     def _input_signature(self):
-        return json.dumps(
-            [
-                self.rooms,
-                self.stages,
-                self.single_targets,
-                self.versions,
-                self.automatic_targets,
-            ],
-            sort_keys=True,
+        inputs = (
+            self.rooms,
+            self.stages,
+            self.single_targets,
+            self.versions,
+            self.automatic_targets,
         )
+        cached = getattr(_runtime, "input_signature", None)
+        if cached is not None and inputs == cached[0]:
+            return cached[1]
+        signature = json.dumps(inputs, sort_keys=True)
+        _runtime.input_signature = (copy.deepcopy(inputs), signature)
+        return signature
 
     def _signature(self, source):
-        thresholds = getattr(self, "thresholds", ())
+        inputs = self._input_signature()
+        thresholds = tuple(getattr(self, "thresholds", ()))
+        cached = getattr(_runtime, "mood_bands", None)
+        if cached is not None and cached[0] == thresholds and cached[1] == source:
+            return inputs, cached[2]
         upper = tuple(threshold + 1e-8 for threshold in thresholds)
         bands = []
         for name, value in sorted(source.items()):
@@ -195,7 +217,9 @@ class CalculatedMood:
             elif index and abs(value - thresholds[index - 1]) <= 1e-8:
                 near = index - 1
             bands.append((name, bisect_left(upper, value), near))
-        return self._input_signature(), tuple(bands)
+        bands = tuple(bands)
+        _runtime.mood_bands = (thresholds, source.copy(), bands)
+        return inputs, bands
 
     def _rates(self, moods=None):
         source = self.moods if moods is None else moods
@@ -415,7 +439,7 @@ class CalculatedMood:
         return True
 
     def restore(self):
-        current_hash = json.loads((_DATA / "source.json").read_text("utf-8"))["sha256"]
+        current_hash = _rules_hash()
         if (
             getattr(self, "schema", None) != 1
             or getattr(self, "rules_hash", None) != current_hash

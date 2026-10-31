@@ -22,7 +22,84 @@ import { useMowerStore } from '@/stores/mower'
 const mower_store = useMowerStore()
 const { get_tasks } = mower_store
 const { workshop_settings } = storeToRefs(config_store)
-const task_list = ref([])
+const manual_task_list = ref([])
+const backup_task_list = ref([])
+const selected_backup = computed(() =>
+  isLogPage.value ? null : backup_plans.value[sub_plan.value]
+)
+function task_from_rows(rows) {
+  return Object.fromEntries(rows.map(({ room, operators }) => [room, [...operators]]))
+}
+watch(
+  [sub_plan, () => selected_backup.value?.task],
+  ([selection, task], [previous_selection]) => {
+    if (
+      selection !== previous_selection ||
+      JSON.stringify(task ?? {}) !== JSON.stringify(task_from_rows(backup_task_list.value))
+    ) {
+      backup_task_list.value = Object.entries(task ?? {}).map(([room, operators]) => ({
+        room,
+        operators: [...(operators ?? [])]
+      }))
+    }
+  },
+  { immediate: true, deep: true, flush: 'sync' }
+)
+const task_list = computed({
+  get() {
+    return isLogPage.value ? manual_task_list.value : backup_task_list.value
+  },
+  set(rows) {
+    if (isLogPage.value) {
+      manual_task_list.value = rows
+    } else if (!edit_locked.value && selected_backup.value) {
+      backup_task_list.value = rows
+      selected_backup.value.task = task_from_rows(rows)
+    }
+  }
+})
+const backup_group_task_list = ref([])
+watch(
+  [sub_plan, () => selected_backup.value?.group_tasks],
+  ([selection, tasks], [previous_selection]) => {
+    if (
+      selection !== previous_selection ||
+      JSON.stringify(tasks ?? []) !== JSON.stringify(backup_group_task_list.value)
+    ) {
+      backup_group_task_list.value = (tasks ?? []).map((task) => ({ ...task }))
+    }
+  },
+  { immediate: true, deep: true, flush: 'sync' }
+)
+const group_task_list = computed({
+  get: () => backup_group_task_list.value,
+  set(rows) {
+    if (!isLogPage.value && !edit_locked.value && selected_backup.value) {
+      backup_group_task_list.value = rows.map((task) => ({ ...task }))
+      selected_backup.value.group_tasks = rows.map((task) => ({ ...task }))
+    }
+  }
+})
+const groupTaskOptions = computed(() =>
+  (plan_store.all_groups || []).map((group) => ({ label: group, value: group }))
+)
+const groupActionOptions = [
+  { label: '整组下班', value: 'off' },
+  { label: '整组上班', value: 'on' }
+]
+const groupModeOptions = [
+  { label: '生效时执行一次', value: 'once' },
+  { label: '生效期间保持，允许协调回班', value: 'while_active' },
+  { label: '生效期间强制保持，禁止协调回班', value: 'forced' }
+]
+function new_group_task() {
+  return { group: '', action: 'off', mode: 'once' }
+}
+function update_group_task(index, changes) {
+  group_task_list.value = group_task_list.value.map((row, i) =>
+    i === index ? { ...row, ...changes, ...(changes.action === 'on' ? { mode: 'once' } : {}) } : row
+  )
+}
 const task_time = ref(new Date().getTime())
 const task_type = ref('空任务')
 const duration_minutes = ref(10)
@@ -92,14 +169,8 @@ const roomOptions = [
   { label: '宿舍3', value: 'dormitory_3' },
   { label: '宿舍4', value: 'dormitory_4' }
 ]
-function update_tasks() {
-  if (sub_plan.value != 'main' && !isLogPage.value) {
-    const result = []
-    Object.entries(backup_plans.value[sub_plan.value].task).forEach(([room, operators]) => {
-      result.push({ room, operators })
-    })
-    task_list.value = result
-  }
+function update_task(index, changes) {
+  task_list.value = task_list.value.map((row, i) => (i === index ? { ...row, ...changes } : row))
 }
 
 function new_task() {
@@ -247,26 +318,6 @@ async function saveMasteryTask() {
   }
 }
 
-watch(
-  task_list,
-  () => {
-    const result = {}
-    for (const i of task_list.value) {
-      result[i.room] = i.operators
-    }
-    if (!isLogPage.value && !edit_locked.value && sub_plan.value !== 'main') {
-      backup_plans.value[sub_plan.value].task = result
-    }
-  },
-  { deep: true }
-)
-
-watch(show, (new_value) => {
-  if (new_value) {
-    update_tasks()
-  }
-})
-
 const operators_with_free_current = computed(() => {
   return [
     { value: 'Current', label: 'Current' },
@@ -376,23 +427,67 @@ const level_list = [
       <template v-else>任务</template>
     </template>
     <div v-if="!isLogPage || task_type == '空任务'" class="task-list-scroll">
+      <template v-if="!isLogPage">
+        <n-text>绑组任务</n-text>
+        <n-dynamic-input
+          v-model:value="group_task_list"
+          :on-create="new_group_task"
+          :disabled="edit_locked"
+        >
+          <template #create-button-default>添加绑组任务</template>
+          <template #default="{ value, index }">
+            <div class="task_row group_task_row">
+              <n-select
+                :value="value.group"
+                @update:value="(group) => update_group_task(index, { group })"
+                :options="groupTaskOptions"
+                :disabled="edit_locked"
+                filterable
+                placeholder="选择绑组"
+                style="width: 150px"
+              />
+              <n-select
+                :value="value.action"
+                :options="groupActionOptions"
+                :disabled="edit_locked"
+                @update:value="(action) => update_group_task(index, { action })"
+                style="width: 130px"
+              />
+              <n-select
+                :value="value.mode"
+                @update:value="(mode) => update_group_task(index, { mode })"
+                :options="value.action === 'off' ? groupModeOptions : groupModeOptions.slice(0, 1)"
+                :disabled="edit_locked"
+                style="width: 310px"
+                :consistent-menu-width="false"
+              />
+            </div>
+          </template>
+        </n-dynamic-input>
+        <n-text depth="3" style="display: block; margin: 8px 0">
+          下班任务使用整组替班和恢复床位。允许协调时，其他组可按需召回；强制保持时，其他组须另找替班，否则保留任务等待。副表退出后恢复正常回班条件。上班任务执行一次，仍遵守恢复和任务保护。
+        </n-text>
+        <n-divider>房间任务</n-divider>
+      </template>
       <n-dynamic-input
         v-model:value="task_list"
         :on-create="new_task"
         :disabled="!isLogPage && edit_locked"
       >
         <template #create-button-default>添加任务</template>
-        <template #default="{ value }">
+        <template #default="{ value, index }">
           <div class="task_row">
             <n-select
-              v-model:value="value.room"
+              :value="value.room"
+              @update:value="(room) => update_task(index, { room })"
               :disabled="!isLogPage && edit_locked"
               :options="roomOptions"
               placeholder="选择房间"
               class="dropdown-select task-room-select"
             />
             <n-dynamic-tags
-              v-model:value="value.operators"
+              :value="value.operators"
+              @update:value="(operators) => update_task(index, { operators })"
               :disabled="!isLogPage && edit_locked"
               :max="5"
               size="large"
@@ -428,7 +523,18 @@ const level_list = [
       </n-dynamic-input>
       <n-card style="margin-top: 8px" content-style="padding: 8px" embedded>
         <n-code
-          :code="JSON.stringify(isLogPage ? task_list : backup_plans[sub_plan].task, null, 2)"
+          :code="
+            JSON.stringify(
+              isLogPage
+                ? task_list
+                : {
+                    task: backup_plans[sub_plan].task,
+                    group_tasks: backup_plans[sub_plan].group_tasks || []
+                  },
+              null,
+              2
+            )
+          "
           language="json"
           word-wrap
         />
@@ -553,6 +659,10 @@ const level_list = [
 }
 
 .task_header {
+  flex-wrap: wrap;
+}
+
+.group_task_row {
   flex-wrap: wrap;
 }
 

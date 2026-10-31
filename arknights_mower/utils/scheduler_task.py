@@ -20,6 +20,10 @@ from arknights_mower.utils.furniture_task import (
     FURNITURE_RUN_SECONDS,
 )
 from arknights_mower.utils.log import logger
+from arknights_mower.utils.manufacture_product import (
+    parse_product_task_meta,
+    product_switch_seconds,
+)
 from arknights_mower.utils.news_checker import MaintenanceInfo, NewsChecker
 from arknights_mower.utils.operation_timing import (
     estimate_dorm_minutes,
@@ -129,6 +133,7 @@ def replan_update_tasks(saved):
         TaskTypes.NOT_SPECIFIC,
     }
     protected_flags = (
+        "backup_group_request",
         "strict_mood_limit",
         "initial_fia",
         "run_order_restore_pending",
@@ -369,6 +374,24 @@ def protect_priority_tasks(
     # 保留任务只在临时副本上计算避让时间，派发队列仍使用原任务和原时间。
     originals = {}
     tasks = active
+    # 到期切换共用一次巡检和执行窗口，不能把其中几个站塞到关键任务前。
+    batch = [
+        task
+        for task in tasks
+        if task.type == TaskTypes.SWITCH_PRODUCT and task.time <= now
+    ]
+    product_batch = None
+    if len(batch) > 1:
+        product_batch = copy.copy(min(batch, key=lambda task: task.time))
+        product_batch.pending_product_targets = dict(
+            parse_product_task_meta(task.meta_data) for task in batch
+        )
+        product_batch.product_switch_budget_seconds = max(
+            getattr(task, "product_switch_budget_seconds", 0) for task in batch
+        )
+        product_batch.execution_retained = any(task.retains_execution for task in batch)
+        batch_ids = {id(task) for task in batch}
+        tasks = [task for task in tasks if id(task) not in batch_ids] + [product_batch]
     for index, task in enumerate(tasks):
         if task.retains_execution:
             projected = copy.copy(task)
@@ -399,7 +422,17 @@ def protect_priority_tasks(
         op_data,
     )
     _sort_dispatch_tasks(tasks, now, op_data)
-    dispatch_queue[:] = [originals.get(id(task), task) for task in tasks] + waiting
+    expanded = []
+    for task in tasks:
+        original = originals.get(id(task), task)
+        if original is product_batch:
+            for member in batch:
+                if not member.retains_execution:
+                    member.time = task.time
+            expanded.extend(batch)
+        else:
+            expanded.append(original)
+    dispatch_queue[:] = expanded + waiting
 
 
 def _advance_support_swaps_for_maintenance(
@@ -494,6 +527,8 @@ def _advance_mood_limit_releases(
     tasks, run_order_delay, execution_time, now, op_data=None
 ):
     """上限是离宿截止时间；提前腾出操作窗口，不等阻塞任务结束。"""
+    from arknights_mower.utils.run_order_network import run_order_entry_seconds
+
     releases = [
         task
         for task in tasks
@@ -544,7 +579,10 @@ def _advance_mood_limit_releases(
             if task.type == TaskTypes.RUN_ORDER:
                 # 跑单时间已扣除进站提前量，还需预留确认、收单和归位。
                 minutes = (
-                    max(run_order_delay, config.conf.run_order_delay)
+                    max(
+                        run_order_delay,
+                        run_order_entry_seconds(task, config.conf) / 60,
+                    )
                     + 2 * execution_time
                 )
             elif task.type == TaskTypes.SWAP_SUPPORT:
@@ -579,7 +617,8 @@ def _support_swap_duration(task, execution_time=None, op_data=None):
 
 
 def _advance_swap_before_orders(tasks, swap, now, execution_time, op_data=None):
-    entry_delay = timedelta(minutes=config.conf.run_order_delay)
+    from arknights_mower.utils.run_order_network import run_order_entry_seconds
+
     order_operations = timedelta(
         minutes=2 * (0.75 if execution_time is None else execution_time)
     )
@@ -599,6 +638,7 @@ def _advance_swap_before_orders(tasks, swap, now, execution_time, op_data=None):
         reverse=True,
     )
     for task in orders:
+        entry_delay = timedelta(seconds=run_order_entry_seconds(task, config.conf))
         start = max(now, task.time)
         # 已流逝的提前量不再占用后续时间，过期任务仍预留进驻与归位。
         finish = max(start, task.time + entry_delay) + order_operations
@@ -659,6 +699,14 @@ def blocked_run_order_ids(tasks, op_data=None):
         for name in row
         if name not in ("", "Free", "Current")
     }
+    reserved.update(
+        name
+        for task in restorations
+        if (pending := getattr(task, "run_order_confirmation_pending", None))
+        and pending["submitted"]
+        for name in pending["target"]
+        if name not in ("", "Free", "Current")
+    )
     conflicting_rooms = set(rooms)
     if op_data is not None:
         conflicting_rooms.update(
@@ -947,14 +995,29 @@ def estimate_dorm_task_minutes(task, room, op_data=None, execution_time=0.75):
 
 def estimate_task_duration(task, execution_time=None, op_data=None):
     """Estimate queued work from room occupancy and bounded measurements."""
+    switching = getattr(
+        getattr(config.conf, "product_switching", None), "enable", False
+    )
+    targets = getattr(task, "pending_product_targets", {}) if switching else {}
+    count = len(targets)
+    if switching and task.type == TaskTypes.SWITCH_PRODUCT:
+        count = max(1, count)
+    product_seconds = product_switch_seconds(count)
+    if count:
+        product_seconds = max(
+            product_seconds, getattr(task, "product_switch_budget_seconds", 0)
+        )
+    product_duration = timedelta(seconds=product_seconds)
+    if switching and task.type == TaskTypes.SWITCH_PRODUCT:
+        return product_duration
     if task.type == TaskTypes.FURNITURE:
         return timedelta(seconds=FURNITURE_RUN_SECONDS + FURNITURE_EXIT_SECONDS)
     if task.type in (TaskTypes.FIAMMETTA, TaskTypes.CLUE_PARTY):
         return timedelta(minutes=3)
     if not task.plan:
-        return timedelta(minutes=1)
+        return product_duration + timedelta(minutes=1)
     if execution_time is not None:
-        return timedelta(
+        return product_duration + timedelta(
             minutes=sum(
                 estimate_dorm_task_minutes(task, room, op_data, execution_time)
                 if room.startswith("dormitory_")
@@ -979,7 +1042,7 @@ def estimate_task_duration(task, execution_time=None, op_data=None):
                 )
             )
         seconds += 15 if unchanged else estimate_work_minutes(room) * 60
-    return timedelta(seconds=seconds)
+    return product_duration + timedelta(seconds=seconds)
 
 
 def independent_room_plans(task, op_data):
@@ -1149,13 +1212,15 @@ def _future_dorm_deferrals(task, following, op_data):
 
 def run_order_end_time(task, start, execution_time=None, op_data=None, *, conf=None):
     """沿用跑单关键窗口，包含提前进站后的订单等待和原班恢复。"""
+    from arknights_mower.utils.run_order_network import run_order_entry_seconds
+
     conf = conf or config.conf
     if getattr(task, "run_order_restore_pending", False):
         return start + estimate_task_duration(task, execution_time, op_data)
     if conf.run_order_buffer_time > 0 and not task.adjusted:
         return max(
             start + timedelta(seconds=45),
-            task.time + timedelta(minutes=conf.run_order_delay),
+            task.time + timedelta(seconds=run_order_entry_seconds(task, conf)),
         ) + timedelta(seconds=45)
     return start + timedelta(seconds=90)
 
@@ -1402,10 +1467,14 @@ def adjust_run_order_for_maintenance(
         reverse=True,
     ):
         if daily_reset:
-            entry_delay = timedelta(minutes=config.conf.run_order_delay)
+            from arknights_mower.utils.run_order_network import run_order_entry_seconds
+
             deadline = st - timedelta(minutes=max(config.conf.run_order_delay, 5))
             daily_orders = []
             for task in sorted(orders, key=lambda task: task.time):
+                entry_delay = timedelta(
+                    seconds=run_order_entry_seconds(task, config.conf)
+                )
                 expected_end = task.time + entry_delay
                 if (
                     task.time >= st
@@ -2208,6 +2277,7 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         t
         for t in tasks
         if t.type not in [TaskTypes.SHIFT_ON, TaskTypes.RELEASE_DORM]
+        or getattr(t, "backup_group_request", None)
         or id(t) in locked_ids
     ]
     _, reserved_slots = dorm_task_reservations(
@@ -2373,8 +2443,13 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
                 and not op_data.skip_idle_dorm_release(dorm.name)
             ):
                 free_rooms.append(dorm)
+    from arknights_mower.utils.backup_group_tasks import held_rest_groups
+
+    held = held_rest_groups(op_data)
     new_task = {}
     for group_name, dorms in grouped_dorms.items():
+        if group_name in held:
+            continue
         logger.debug(f"开始计算:{group_name}")
         logger.debug(f"开始计算:{dorms}")
         task_time = datetime.max
@@ -2508,6 +2583,7 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         if (
             not op.is_high()
             or op.name in excluded_names
+            or op.group in held
             or op.multi_group
             and (not op.independent_rest or op_data.resting_binding_groups(op))
             or op.group
@@ -2764,16 +2840,23 @@ def prioritize_new_dorm_recovery(
     *,
     reserved_names=(),
     configuration_changed=False,
+    previous_arrangements=None,
 ):
     """宿舍事件按恢复层级分配单回位及普通位，同级优先保留实际原位。
 
     配置的宿舍顺序表达各类位置的恢复速度偏好；仅心情变化不搬床。
+    执行后传入变化房间的原驻员，以当前实读阵容分床，不重放离宿意图。
     只修改投影计划，保留住客集合、预约和真实恢复标记。
     """
     from arknights_mower.utils.dorm_recovery import single_recovery_bed_cost
     from arknights_mower.utils.dorm_skills import is_single_recovery_manager
 
-    if not plan and not preceding_plan and not configuration_changed:
+    if (
+        not plan
+        and not preceding_plan
+        and not configuration_changed
+        and not previous_arrangements
+    ):
         return plan
     projected = op_data.project_arrangements([preceding_plan or {}, plan])
     beds = [
@@ -2814,7 +2897,13 @@ def prioritize_new_dorm_recovery(
         else ""
         for bed in beds
     }
-    if not configuration_changed and all(actual[b.position] == b.name for b in beds):
+    previous = {
+        bed.position: previous_arrangements[bed.position[0]][bed.position[1]]
+        if previous_arrangements and bed.position[0] in previous_arrangements
+        else actual[bed.position]
+        for bed in beds
+    }
+    if not configuration_changed and all(previous[b.position] == b.name for b in beds):
         return plan
 
     # 保留 alpha 显式高优位/低优位的完整顺序；同房普通床为一个同速组。
@@ -2912,7 +3001,7 @@ def prioritize_new_dorm_recovery(
     for group, quota in zip(groups, quotas):
         fill(group, quota, include_fillers=True)
     if any(
-        allocations[groups[index][0].position] != actual[groups[index][0].position]
+        allocations[groups[index][0].position] != previous[groups[index][0].position]
         for index in targets
     ):
         # 单回归属改变时，同级恢复者重新按缺口分配；满心情垫位保留兼容原位。
@@ -3673,9 +3762,12 @@ class SchedulerTask:
     @property
     def retains_execution(self):
         """失败任务与重新准入的剩余执行均保留原对象、安排和时间。"""
+        pending = getattr(self, "run_order_confirmation_pending", None)
         return bool(
             getattr(self, "execution_failure", None)
             or getattr(self, "execution_retained", False)
+            or pending
+            and pending["submitted"]
         )
 
     def __init__(

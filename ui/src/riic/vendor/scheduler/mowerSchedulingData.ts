@@ -1,4 +1,5 @@
 import {mowerDormCandidateMood} from './mowerSchedulingMood'
+import type {MowerBackupGroupTask} from './mowerBackupGroupTasks'
 import {isTradeRunOrderOperator} from '../domain/shiftRunPolicy'
 import {mowerRestingBindingGroups,mowerSharedReplacements,mowerSameGroupPrimaryReplacement} from './mowerSharedGroups'
 // Decision state for the pinned Mower port. Reservations do not imply physical occupancy.
@@ -11,6 +12,7 @@ export class MowerDormState {
  reset(){this.name='';this.timeMicros=undefined}
 }
 export interface MowerSchedulingDataOptions {
+ backupGroupTasks?:readonly (readonly MowerBackupGroupTask[])[]
  backupExplicitTasks?:readonly MowerTaskPlan[]
  adjustForRunOrders?:boolean
  dormIsolation?:string[][]
@@ -21,7 +23,7 @@ export interface MowerSchedulingDataOptions {
  groupRecoveryFullMembers?:Record<string,string[]>
  groupRecoveryReturnMicros?:Record<string,number>
  groupDorms?:MowerDormState[]
- pendingGroupTransitions?:Record<string,boolean>;groupShiftState?:Record<string,boolean>;groupMoodGapThresholdMinutes?:number
+ pendingGroupTransitions?:Record<string,boolean>;groupShiftState?:Record<string,boolean>;groupMoodGapThresholdMinutes?:number|null
  groupRestInFullOnMoodGap?:boolean;groupMoodGapMaxExtraWaitHours?:number;groupMoodGapExclusions?:string[];mergeIntervalMinutes?:number
  waitingRecoveryNames?:Set<string>
  busyRestingNames?:Set<string>;excludedCandidates?:Set<string>;restingPriorityNames?:string[];freeBlacklist?:string[]
@@ -30,6 +32,7 @@ export interface MowerSchedulingDataOptions {
  reservedProductReplacements?:Set<string>;reservedProductBeds?:Map<string,string>;emergencyDormAgents?:Set<string>
 }
 export class MowerSchedulingData {
+ backupGroupTasks:readonly (readonly MowerBackupGroupTask[])[]
  backupExplicitTasks:readonly MowerTaskPlan[]
  adjustForRunOrders:boolean|undefined
  /** Runtime uses October 3 alpha; frozen September fixtures retain their source contract. */
@@ -52,6 +55,7 @@ export class MowerSchedulingData {
  reservedProductReplacements:Set<string>;reservedProductBeds:Map<string,string>;emergencyDormAgents:Set<string>
  constructor(o:MowerSchedulingDataOptions){
   this.backupExplicitTasks=o.backupExplicitTasks??[]
+  this.backupGroupTasks=o.backupGroupTasks??[]
   this.dormIsolation=(o.dormIsolation??[]).map(group=>[...group])
   this.adjustForRunOrders=o.adjustForRunOrders
   this.alpha=o.alpha??false;this.priorityReplacement=o.priorityReplacement??[];this.freeRoomExclusions=o.freeRoomExclusions??[];this.dormOrder=o.dormOrder??[]
@@ -63,7 +67,7 @@ export class MowerSchedulingData {
   this.groupRecoveryReturnMicros={...o.groupRecoveryReturnMicros}
   this.groupRecoveryFullMembers=Object.fromEntries(Object.entries(o.groupRecoveryFullMembers??{}).map(([group,names])=>[group,[...names]]))
   this.groupDorms=o.groupDorms??Object.values(this.operators).filter(op=>op.room.startsWith('dorm')&&op.group&&(op.multiGroup?op.groupBindings:[{group:op.group,replacement:op.replacement}]).some(binding=>!binding.replacement.includes('Free')&&binding.replacement.some(name=>mowerSameGroupPrimaryReplacement(this,op,name,binding.group)&&!this.operators[name]!.room.startsWith('dorm')))).map(op=>new MowerDormState([op.room,op.index]))
-  this.pendingGroupTransitions={...o.pendingGroupTransitions};this.groupShiftState={...o.groupShiftState};this.groupMoodGapThresholdMinutes=o.groupMoodGapThresholdMinutes??60
+  this.pendingGroupTransitions={...o.pendingGroupTransitions};this.groupShiftState={...o.groupShiftState};this.groupMoodGapThresholdMinutes=o.groupMoodGapThresholdMinutes??(this.powerPlantCount===2?90:60)
   this.groupRestInFullOnMoodGap=o.groupRestInFullOnMoodGap??true
   this.groupMoodGapExclusions=[...(o.groupMoodGapExclusions??[])]
   this.groupMoodGapMaxExtraWaitHours=o.groupMoodGapMaxExtraWaitHours??0;this.mergeIntervalMinutes=o.mergeIntervalMinutes??10

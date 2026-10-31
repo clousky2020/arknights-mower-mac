@@ -172,6 +172,8 @@ class ExtraPart(ConfModel):
     "报错归档磁盘上限（MiB），0 不限制"
     waiting_scene: WaitingSceneConf = Field(default_factory=WaitingSceneConf)
     "等待时间"
+    waiting_scene_network_adaptive: bool = False
+    "等待场景网络自适应"
 
 
 class CopilotScriptConf(ConfModel):
@@ -699,6 +701,8 @@ class RIICPart(ConfModel):
         default_factory=lambda: default_performance_profile().run_order_delay
     )
     "跑单前置延时"
+    run_order_network_adaptive: bool = False
+    "跑单网络自适应"
     resting_threshold: float = Field(default=0.65, ge=0.35, le=1, allow_inf_nan=False)
     "心情阈值"
     group_resting_thresholds: dict[
@@ -759,8 +763,8 @@ class RIICPart(ConfModel):
     "使用共用技能规则计算心情，并预测调控普通基建轮班"
     group_rest_in_full_on_mood_gap: bool = True
     "组内高优先干员预计恢复时间差过大时，等待整组回满"
-    group_mood_gap_threshold_minutes: int = Field(default=60, ge=1, le=1440)
-    "组内预计恢复时间差触发延后回班的阈值（分钟）"
+    group_mood_gap_threshold_minutes: int | None = Field(default=None, ge=1, le=1440)
+    "组内预计恢复时间差阈值（分钟）；未设置时两电90，其余60"
     group_mood_gap_max_extra_wait_hours: float = Field(default=0, ge=0, le=24)
     "组内恢复时间差过大时最多额外等待的小时数；0 表示不限时"
     group_mood_gap_exclusions: list[str] = Field(default_factory=list)
@@ -835,6 +839,8 @@ class RIICPart(ConfModel):
     "协助位跟随排班（专精时协助位不固定，由排班系统管理）"
     enable_mastery: bool = True
     "全自动专精全局开关：OFF 时禁用全部训练室动作/通知/守卫，仅保留仓库材料扫描"
+    save_mastery_screenshots: bool = False
+    "保存专精收取期间的截图"
 
     # 中枢加成（0/5）与换人缓冲时间已迁到路线配置全局设置行（见 mastery-route.json），
     # 不再存 conf

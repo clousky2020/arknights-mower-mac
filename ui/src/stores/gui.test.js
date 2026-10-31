@@ -550,3 +550,380 @@ describe('shared version watermark preference', () => {
     expect(store.watermarkDisabled).toBe(false)
   })
 })
+
+describe('shared base report mode preference', () => {
+  it('defaults to standard and keeps editing disabled before the initial read', async () => {
+    const { store } = createStore()
+    expect(store.baseReportMode).toBe('standard')
+    expect(store.reportModeSaving).toBe(false)
+    expect(store.reportModeError).toBe('')
+    expect(store.reportModeDisabled).toBe(true)
+    expect(await store.setBaseReportMode('stock')).toBe(false)
+    expect(axios.put).not.toHaveBeenCalled()
+  })
+
+  it('loads the saved report mode with the shared initial read and defaults older responses', async () => {
+    axios.get.mockResolvedValueOnce({
+      data: { software_version_display: 'channel', base_report_mode: 'stock' }
+    })
+    const saved = createStore().store
+    expect(await saved.load()).toBe(true)
+    expect(saved.baseReportMode).toBe('stock')
+    expect(saved.softwareVersionDisplay).toBe('channel')
+    expect(saved.reportModeDisabled).toBe(false)
+    expect(saved.reportModeError).toBe('')
+    const older = createStore().store
+    await older.load()
+    expect(older.baseReportMode).toBe('standard')
+    expect(older.reportModeDisabled).toBe(false)
+    expect(axios.put).not.toHaveBeenCalled()
+  })
+
+  it.each(['grid', 'checklist', null, 0, false, ['stock'], { mode: 'stock' }])(
+    'keeps editing disabled after an invalid loaded report mode %j',
+    async (value) => {
+      axios.get.mockResolvedValueOnce({
+        data: { software_version_display: 'channel', base_report_mode: value }
+      })
+      const { store } = createStore()
+      expect(await store.load()).toBe(false)
+      expect(store.baseReportMode).toBe('standard')
+      expect(store.reportModeDisabled).toBe(true)
+      expect(store.reportModeError).toContain('读取失败')
+      expect(store.error).toContain('读取失败')
+      expect(await store.setBaseReportMode('stock')).toBe(false)
+      expect(axios.put).not.toHaveBeenCalled()
+    }
+  )
+
+  it('saves only the report mode, shares it immediately and serializes appearance edits', async () => {
+    const { pinia, store } = createStore()
+    await store.load()
+    const save = deferred()
+    axios.put.mockReturnValueOnce(save.promise)
+    const pending = store.setBaseReportMode('stock')
+    expect(useGuiStore(pinia).baseReportMode).toBe('stock')
+    expect(store.reportModeSaving).toBe(true)
+    expect(store.reportModeDisabled).toBe(true)
+    expect(store.displayDisabled).toBe(true)
+    expect(await store.setBaseReportMode('standard')).toBe(false)
+    expect(await store.setTaskSettingsLayout('waterfall')).toBe(false)
+    expect(await store.setWatermarkVisible(false, '反馈问题时务必说明具体版本')).toBe(false)
+    expect(axios.put).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/\/gui\/appearance$/),
+      { base_report_mode: 'stock' },
+      { timeout: 5000 }
+    )
+    save.resolve({ data: { base_report_mode: 'stock' } })
+    expect(await pending).toBe(true)
+    expect(store.baseReportMode).toBe('stock')
+    expect(store.reportModeSaving).toBe(false)
+    expect(store.displayDisabled).toBe(false)
+    expect(store.reportModeError).toBe('')
+    expect(store.softwareVersionDisplay).toBe('version')
+    expect(store.softwareVersionLanguage).toBe('en')
+    expect(store.taskSettingsLayout).toBe('checklist')
+    expect(store.watermarkVisible).toBe(true)
+    expect(await store.setBaseReportMode('stock')).toBe(true)
+    expect(await store.setBaseReportMode('checklist')).toBe(false)
+    expect(axios.put).toHaveBeenCalledOnce()
+  })
+
+  it.each(['rejected', 'unconfirmed'])(
+    'rolls back a %s report mode save and retries the requested mode',
+    async (failure) => {
+      const { store } = createStore()
+      await store.load()
+      if (failure === 'rejected') axios.put.mockRejectedValueOnce(new Error('offline'))
+      else axios.put.mockResolvedValueOnce({ data: { base_report_mode: 'standard' } })
+      expect(await store.setBaseReportMode('stock')).toBe(false)
+      expect(store.baseReportMode).toBe('standard')
+      expect(store.reportModeSaving).toBe(false)
+      expect(store.reportModeDisabled).toBe(false)
+      expect(store.reportModeError).toContain('已恢复原来的显示')
+      expect(store.error).toBe('')
+      expect(store.layoutError).toBe('')
+      expect(await store.retryReportMode()).toBe(true)
+      expect(store.baseReportMode).toBe('stock')
+      expect(store.reportModeError).toBe('')
+      expect(axios.put.mock.calls.map(([, payload]) => payload)).toEqual([
+        { base_report_mode: 'stock' },
+        { base_report_mode: 'stock' }
+      ])
+    }
+  )
+
+  it('keeps editing disabled after a read failure and retries the initial read', async () => {
+    axios.get.mockRejectedValueOnce(new Error('offline'))
+    const { store } = createStore()
+    expect(await store.load()).toBe(false)
+    expect(store.baseReportMode).toBe('standard')
+    expect(store.reportModeDisabled).toBe(true)
+    expect(store.reportModeError).toContain('读取失败')
+    expect(await store.setBaseReportMode('stock')).toBe(false)
+    expect(axios.put).not.toHaveBeenCalled()
+
+    axios.get.mockResolvedValueOnce({
+      data: { software_version_display: 'version', base_report_mode: 'stock' }
+    })
+    expect(await store.retryReportMode()).toBe(true)
+    expect(store.baseReportMode).toBe('stock')
+    expect(store.reportModeDisabled).toBe(false)
+    expect(store.reportModeError).toBe('')
+    expect(axios.get).toHaveBeenCalledTimes(2)
+  })
+
+  it('avoids writes for invalid values and an unchanged saved mode', async () => {
+    const { store } = createStore()
+    await store.load()
+    expect(await store.setBaseReportMode('standard')).toBe(true)
+    for (const value of ['checklist', 'stock 2', null, undefined, 1]) {
+      expect(await store.setBaseReportMode(value)).toBe(false)
+    }
+    expect(store.baseReportMode).toBe('standard')
+    expect(axios.put).not.toHaveBeenCalled()
+  })
+
+  it('saves the report mode without overwriting other appearance preferences', async () => {
+    const saved = {
+      software_version_display: 'channel',
+      software_version_language: 'zh',
+      task_settings_layout: 'waterfall',
+      watermark_visible: false,
+      base_report_mode: 'standard'
+    }
+    axios.get.mockImplementation(async () => ({ data: { ...saved } }))
+    axios.put.mockImplementation(async (_url, payload) => {
+      Object.assign(saved, payload)
+      return { data: { ...payload } }
+    })
+    const { store } = createStore()
+    await store.load()
+    expect(await store.setBaseReportMode('stock')).toBe(true)
+    expect(axios.put.mock.calls.map(([, payload]) => payload)).toEqual([
+      { base_report_mode: 'stock' }
+    ])
+    expect(saved).toEqual({
+      software_version_display: 'channel',
+      software_version_language: 'zh',
+      task_settings_layout: 'waterfall',
+      watermark_visible: false,
+      base_report_mode: 'stock'
+    })
+  })
+
+  it('keeps the shared report mode when saving another appearance preference', async () => {
+    axios.get.mockResolvedValueOnce({
+      data: { software_version_display: 'version', base_report_mode: 'stock' }
+    })
+    const { store } = createStore()
+    await store.load()
+    expect(await store.setTaskSettingsLayout('waterfall')).toBe(true)
+    expect(store.baseReportMode).toBe('stock')
+    expect(axios.put).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/\/gui\/appearance$/),
+      { task_settings_layout: 'waterfall' },
+      { timeout: 5000 }
+    )
+  })
+
+  it('restores the saved report mode in a new application store after a reload', async () => {
+    const saved = {
+      software_version_display: 'version',
+      software_version_language: 'en',
+      task_settings_layout: 'checklist',
+      watermark_visible: true,
+      base_report_mode: 'standard'
+    }
+    axios.get.mockImplementation(async () => ({ data: { ...saved } }))
+    axios.put.mockImplementation(async (_url, payload) => {
+      Object.assign(saved, payload)
+      return { data: { ...payload } }
+    })
+    const first = createStore().store
+    await first.load()
+    expect(await first.setBaseReportMode('stock')).toBe(true)
+    const reloaded = createStore().store
+    expect(reloaded.baseReportMode).toBe('standard')
+    expect(await reloaded.load()).toBe(true)
+    expect(reloaded.baseReportMode).toBe('stock')
+    expect(reloaded.softwareVersionDisplay).toBe('version')
+    expect(reloaded.softwareVersionLanguage).toBe('en')
+    expect(reloaded.taskSettingsLayout).toBe('checklist')
+    expect(reloaded.watermarkVisible).toBe(true)
+  })
+})
+
+describe('shared Halloween decoration preference', () => {
+  it('defaults to automatic mode and disables writes until the initial read succeeds', async () => {
+    const { store } = createStore()
+    expect(store.halloweenMode).toBe('auto')
+    expect(store.halloweenDisabled).toBe(true)
+    expect(await store.setHalloweenMode('off')).toBe(false)
+    expect(axios.put).not.toHaveBeenCalled()
+    expect(await store.load()).toBe(true)
+    expect(store.halloweenMode).toBe('auto')
+    expect(store.halloweenDisabled).toBe(false)
+    expect(await store.retryHalloweenMode()).toBe(false)
+    expect(axios.put).not.toHaveBeenCalled()
+  })
+
+  it.each(['auto', 'on', 'off'])('restores saved mode %s without writing it back', async (mode) => {
+    axios.get.mockResolvedValueOnce({
+      data: { software_version_display: 'version', halloween_mode: mode }
+    })
+    const { store } = createStore()
+    expect(await store.load()).toBe(true)
+    expect(store.halloweenMode).toBe(mode)
+    expect(store.halloweenError).toBe('')
+    expect(axios.put).not.toHaveBeenCalled()
+  })
+
+  it.each([null, false, 0, 'always', ['off'], { mode: 'off' }])(
+    'rejects invalid loaded mode %j before changing any shared preference',
+    async (value) => {
+      axios.get.mockResolvedValueOnce({
+        data: { software_version_display: 'channel', halloween_mode: value }
+      })
+      const { store } = createStore()
+      expect(await store.load()).toBe(false)
+      expect(store.halloweenMode).toBe('auto')
+      expect(store.softwareVersionDisplay).toBe('version')
+      expect(store.halloweenDisabled).toBe(true)
+      expect(store.halloweenError).toContain('读取失败')
+      expect(await store.setHalloweenMode('on')).toBe(false)
+      expect(axios.put).not.toHaveBeenCalled()
+    }
+  )
+
+  it('retries a failed initial read and restores the saved decoration setting', async () => {
+    axios.get.mockRejectedValueOnce(new Error('offline'))
+    const { store } = createStore()
+    expect(await store.load()).toBe(false)
+    expect(store.halloweenDisabled).toBe(true)
+    expect(store.halloweenError).toContain('读取失败')
+    axios.get.mockResolvedValueOnce({
+      data: { software_version_display: 'version', halloween_mode: 'off' }
+    })
+    expect(await store.retryHalloweenMode()).toBe(true)
+    expect(store.halloweenMode).toBe('off')
+    expect(store.halloweenDisabled).toBe(false)
+    expect(store.halloweenError).toBe('')
+  })
+
+  it('shares an edit immediately and prevents all appearance edits until it finishes', async () => {
+    const { pinia, store } = createStore()
+    await store.load()
+    const save = deferred()
+    axios.put.mockReturnValueOnce(save.promise)
+    const pending = store.setHalloweenMode('off')
+    expect(useGuiStore(pinia).halloweenMode).toBe('off')
+    expect(store.halloweenSaving).toBe(true)
+    expect(store.halloweenDisabled).toBe(true)
+    expect(store.displayDisabled).toBe(true)
+    expect(store.layoutDisabled).toBe(true)
+    expect(store.watermarkDisabled).toBe(true)
+    expect(store.reportModeDisabled).toBe(true)
+    expect(await store.setHalloweenMode('on')).toBe(false)
+    expect(await store.retryHalloweenMode()).toBe(false)
+    expect(await store.setSoftwareVersionDisplay('channel')).toBe(false)
+    expect(await store.setSoftwareVersionLanguage('zh')).toBe(false)
+    expect(await store.setTaskSettingsLayout('waterfall')).toBe(false)
+    expect(await store.setBaseReportMode('stock')).toBe(false)
+    expect(await store.setWatermarkVisible(false, '反馈问题时务必说明具体版本')).toBe(false)
+    expect(axios.put).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/\/gui\/appearance$/),
+      { halloween_mode: 'off' },
+      { timeout: 5000 }
+    )
+    save.resolve({ data: { halloween_mode: 'off' } })
+    expect(await pending).toBe(true)
+    expect(store.halloweenMode).toBe('off')
+    expect(store.halloweenSaving).toBe(false)
+    expect(store.halloweenDisabled).toBe(false)
+    expect(store.halloweenError).toBe('')
+  })
+
+  it('does not save decoration preferences while another appearance edit is pending', async () => {
+    const { store } = createStore()
+    await store.load()
+    const save = deferred()
+    axios.put.mockReturnValueOnce(save.promise)
+    const pending = store.setTaskSettingsLayout('waterfall')
+    expect(store.halloweenDisabled).toBe(true)
+    expect(await store.setHalloweenMode('off')).toBe(false)
+    expect(store.halloweenMode).toBe('auto')
+    expect(axios.put).toHaveBeenCalledOnce()
+    save.resolve({ data: { task_settings_layout: 'waterfall' } })
+    expect(await pending).toBe(true)
+    expect(store.halloweenDisabled).toBe(false)
+  })
+
+  it.each(['request failure', 'unconfirmed response'])(
+    'restores the previous mode after %s and explicitly retries the requested mode',
+    async (failure) => {
+      const { store } = createStore()
+      await store.load()
+      if (failure === 'request failure') axios.put.mockRejectedValueOnce(new Error('offline'))
+      else axios.put.mockResolvedValueOnce({ data: { halloween_mode: 'auto' } })
+      expect(await store.setHalloweenMode('off')).toBe(false)
+      expect(store.halloweenMode).toBe('auto')
+      expect(store.halloweenSaving).toBe(false)
+      expect(store.halloweenError).toContain('已恢复原来的显示')
+      expect(store.error).toBe('')
+      expect(await store.retryHalloweenMode()).toBe(true)
+      expect(store.halloweenMode).toBe('off')
+      expect(store.halloweenError).toBe('')
+      expect(axios.put.mock.calls.map(([, payload]) => payload)).toEqual([
+        { halloween_mode: 'off' },
+        { halloween_mode: 'off' }
+      ])
+    }
+  )
+
+  it('avoids writes for unchanged or invalid decoration settings', async () => {
+    const { store } = createStore()
+    await store.load()
+    expect(await store.setHalloweenMode('auto')).toBe(true)
+    for (const value of ['always', 'AUTO', null, undefined, 1, true])
+      expect(await store.setHalloweenMode(value)).toBe(false)
+    expect(store.halloweenMode).toBe('auto')
+    expect(axios.put).not.toHaveBeenCalled()
+  })
+
+  it('restores the saved mode after reload without overwriting independent appearance settings', async () => {
+    const saved = {
+      software_version_display: 'channel',
+      software_version_language: 'zh',
+      task_settings_layout: 'waterfall',
+      watermark_visible: false,
+      base_report_mode: 'stock',
+      halloween_mode: 'auto'
+    }
+    axios.get.mockImplementation(async () => ({ data: { ...saved } }))
+    axios.put.mockImplementation(async (_url, payload) => {
+      Object.assign(saved, payload)
+      return { data: { ...payload } }
+    })
+    const first = createStore().store
+    await first.load()
+    expect(await first.setHalloweenMode('on')).toBe(true)
+    const reloaded = createStore().store
+    expect(reloaded.halloweenMode).toBe('auto')
+    expect(await reloaded.load()).toBe(true)
+    expect(reloaded.halloweenMode).toBe('on')
+    expect(reloaded.softwareVersionDisplay).toBe('channel')
+    expect(reloaded.softwareVersionLanguage).toBe('zh')
+    expect(reloaded.taskSettingsLayout).toBe('waterfall')
+    expect(reloaded.watermarkVisible).toBe(false)
+    expect(reloaded.baseReportMode).toBe('stock')
+    expect(axios.put).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/\/gui\/appearance$/),
+      { halloween_mode: 'on' },
+      { timeout: 5000 }
+    )
+    expect(await reloaded.setTaskSettingsLayout('checklist')).toBe(true)
+    expect(reloaded.halloweenMode).toBe('on')
+    expect(saved.halloween_mode).toBe('on')
+  })
+})
