@@ -872,6 +872,7 @@ class BaseMixin:
         mood_estimates=None,
         skip_full_mood=False,
         require_full_mood=False,
+        mood_check=None,
     ):
         if not self.low_frame_rate_mode:
             return self._scan_agent_fast(
@@ -885,6 +886,7 @@ class BaseMixin:
                 skip_full_mood,
                 observation=observation,
                 require_full_mood=require_full_mood,
+                mood_check=mood_check,
             )
         # 无目标时仍返回已复核的页面供调用方判断，但不进行点击。
         ret = self.wait_for_agent_page(
@@ -899,6 +901,7 @@ class BaseMixin:
                 skip_full_mood,
                 train=train,
                 require_full=require_full_mood,
+                mood_check=mood_check,
             )
             target = next(
                 ((name, scope) for name, scope in ret if name in eligible), None
@@ -944,6 +947,7 @@ class BaseMixin:
         skip_full_mood=False,
         observation=None,
         require_full_mood=False,
+        mood_check=None,
     ):
         """普通设备沿用单帧批量选人及缩小扫描区域的识别重试。"""
         try:
@@ -979,6 +983,7 @@ class BaseMixin:
                 mood_estimates,
                 skip_full_mood,
                 require_full_mood=require_full_mood,
+                mood_check=mood_check,
             )
         unchanged_held_page = before is not None and self.same_agent_page(
             ret, before, allow_unknown=True
@@ -1000,6 +1005,7 @@ class BaseMixin:
             skip_full_mood,
             train=train,
             require_full=require_full_mood,
+            mood_check=mood_check,
         )
         selected = []
         for name, scope in ret:
@@ -1029,7 +1035,15 @@ class BaseMixin:
         return selected, ret
 
     def observe_agent_moods(
-        self, page, candidates, estimates, skip_full, *, train=False, require_full=False
+        self,
+        page,
+        candidates,
+        estimates,
+        skip_full,
+        *,
+        train=False,
+        require_full=False,
+        mood_check=None,
     ):
         """复用识别帧记录候选预估，不刷新截图或修改干员实读数据。"""
         eligible = set(candidates)
@@ -1060,7 +1074,7 @@ class BaseMixin:
                         f"自动救急候选 {name} {reason}，取消本次选人"
                     )
         if estimates is None:
-            if not require_full:
+            if not require_full and mood_check is None:
                 return eligible
             estimates = {}
         now = datetime.now()
@@ -1068,6 +1082,8 @@ class BaseMixin:
             if name not in eligible:
                 continue
             mood = estimate_agent_mood(self.recog.img, scope)
+            if mood_check is not None:
+                mood_check(name, mood)
             if mood is None:
                 estimates.pop(name, None)
                 if require_full:

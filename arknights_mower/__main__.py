@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from arknights_mower.data import base_room_list
 from arknights_mower.utils import config, path, rapidocr
+from arknights_mower.utils.crash_recovery import is_memory_error
 from arknights_mower.utils.csleep import MowerExit, cancellation_scope, csleep
 from arknights_mower.utils.csv_utils import EmptyDataError, read_csv_rows
 from arknights_mower.utils.datetime import get_server_time
@@ -596,6 +597,8 @@ def _notify_uncertain_input(failure):
 
 
 def _resume_device_dispatch(scheduler=None, failure=None):
+    if is_memory_error(failure):
+        raise failure
     uncertain = isinstance(failure, TouchFailure) and failure.delivery_unknown
     abandon_old_session = uncertain
     if uncertain and scheduler is not None:
@@ -635,7 +638,9 @@ def _resume_device_dispatch(scheduler=None, failure=None):
                 return device
             except MowerExit:
                 raise
-            except Exception:
+            except Exception as exc:
+                if is_memory_error(exc):
+                    raise
                 logger.exception("输入中断后的观察暂未完成，稍后自动重试")
                 csleep(30)
                 device = wait_for_recovery(
@@ -673,6 +678,9 @@ def simulate(saved):
             if config.stop_mower.is_set():
                 raise MowerExit
             base_scheduler = initialize([], connection_retries=connection_retries)
+            if saved and saved.get("_restart_game"):
+                base_scheduler.restart_game()
+                saved["_restart_game"] = False
             base_scheduler._process_recovery_occurred_at = (
                 saved.get("_process_crash_occurred_at") if saved else None
             )
@@ -694,6 +702,13 @@ def simulate(saved):
             base_scheduler._initial_mood_refresh_rooms = set(
                 saved.get("initial_mood_refresh_rooms", ()) if saved else ()
             ) | set(saved.get("initial_mood_probe_layout", {}) if saved else {})
+            startup_mastery_read = False
+            if config.conf.enable_mastery:
+                from arknights_mower.utils.mastery_db import get_reconcile_plans
+
+                startup_mastery_read = bool(get_reconcile_plans())
+                if startup_mastery_read:
+                    base_scheduler._initial_mood_refresh_rooms.add("train")
             if config.conf.test_mood_calculation:
                 # 重启及首次启用都先核实实际驻员，计算快照不能替代启动实读。
                 base_scheduler._initial_mood_refresh_rooms.update(
@@ -709,6 +724,8 @@ def simulate(saved):
         except MowerExit:
             return
         except Exception as e:
+            if is_memory_error(e):
+                raise
             logger.exception(e)
             if config.stop_mower.is_set():
                 return
@@ -904,7 +921,7 @@ def simulate(saved):
                 # 启动的时候按照条件触发副表
                 base_scheduler.backup_plan_solver()
         except Exception as ex:
-            if saved.get("_process_crash_recovery"):
+            if is_memory_error(ex) or saved.get("_process_crash_recovery"):
                 raise
             logger.exception(ex)
     from arknights_mower.solvers.emergency import RESUME_META
@@ -934,6 +951,9 @@ def simulate(saved):
                 {room for room in base_scheduler.op_data.plan if room in base_room_list}
             )
         base_scheduler.tasks.insert(0, SchedulerTask(time=datetime.now()))
+    elif startup_mastery_read:
+        # 训练室实读由基建入口执行，已有远期任务不应推迟首次核对。
+        base_scheduler.tasks.insert(0, SchedulerTask(time=datetime.now()))
     while True:
         try:
             if saved and saved.get("_process_crash_recovery"):
@@ -946,7 +966,7 @@ def simulate(saved):
                 crash_recovery.checkpoint_start(base_scheduler)
             break
         except RECOVERABLE_DEVICE_ERRORS as exc:
-            # 恢复前的房间读取也由原设备会话处理，保留已还原的任务和调度器。
+            # 恢复检查沿用原设备会话，保留已还原的任务和调度器。
             try:
                 _resume_device_dispatch(base_scheduler, exc)
             except MowerExit:
@@ -956,6 +976,7 @@ def simulate(saved):
     base_scheduler._state_restore_complete = True
     if saved:
         base_scheduler._request_run_order_restoration_observations()
+    task_failures = 0
     while True:
         try:
             config.maintenance_recheck.clear()
@@ -1215,6 +1236,7 @@ def simulate(saved):
                             ).total_seconds()
 
                     base_scheduler.rest_until_next_task()
+                    task_failures = 0
                     # A maintenance timer may have ended this sleep. Recheck the
                     # announcement before dispatching another scheduler task.
                     continue
@@ -1225,6 +1247,7 @@ def simulate(saved):
 
             run_long_task_if_dorm_pending(base_scheduler)
             base_scheduler.run()
+            task_failures = 0
         except RECOVERABLE_DEVICE_ERRORS as exc:
             try:
                 _resume_device_dispatch(base_scheduler, exc)
@@ -1234,6 +1257,11 @@ def simulate(saved):
         except MowerExit:
             return
         except (ConnectionError, ConnectionAbortedError, AttributeError) as e:
+            if is_memory_error(e):
+                raise
+            task_failures += 1
+            if task_failures > 1:
+                raise
             logger.exception(
                 "设备连接或页面识别失败：%s",
                 e,
@@ -1249,6 +1277,11 @@ def simulate(saved):
                 return
             continue
         except RuntimeError as e:
+            if is_memory_error(e):
+                raise
+            task_failures += 1
+            if task_failures > 1:
+                raise
             logger.exception(
                 "运行时发生错误，正在尝试恢复设备连接：%s",
                 e,
@@ -1263,6 +1296,11 @@ def simulate(saved):
             except MowerExit:
                 return
         except Exception as e:
+            if is_memory_error(e):
+                raise
+            task_failures += 1
+            if task_failures > 1:
+                raise
             logger.exception(
                 "任务执行失败，正在刷新画面后继续：%s",
                 e,

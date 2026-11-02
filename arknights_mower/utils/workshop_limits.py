@@ -1,6 +1,7 @@
 """Batch budgets and inventory accounting shared by all workshop operators."""
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -31,6 +32,10 @@ class WorkshopBlock:
 
     def as_dict(self):
         return asdict(self)
+
+
+class WorkshopSelectionBlocked(Exception):
+    """当前加工卡片已确认不满足加工条件，取消选人。"""
 
 
 def _recipe_stock(name, inventory):
@@ -270,15 +275,32 @@ def workshop_material_block_reason(
 
 
 def workshop_candidate_mood(op_data, operator):
-    """加工准入优先使用数值心情，未知时接受有效的满心情卡牌预估。"""
+    """加工准入复用有效卡片下界，较新卡片只能降低已有心情预算。"""
     op = op_data.operators.get(operator)
-    mood = (
-        op.current_mood() if hasattr(op, "current_mood") else getattr(op, "mood", None)
-    )
-    if mood is not None and mood >= 0:
-        return mood
+    if getattr(op_data, "mood_calculation_enabled", False):
+        mood = op_data.calculated_mood(operator)
+        observed = getattr(getattr(op_data, "mood_model", None), "observed", {}).get(
+            operator
+        )
+        if mood is None or mood < 0:
+            return None
+    else:
+        mood = (
+            op.current_mood()
+            if hasattr(op, "current_mood")
+            else getattr(op, "mood", None)
+        )
+        observed = getattr(op, "time_stamp", None)
     estimate = card_mood_estimate(op_data, operator)
-    return 24 if estimate == 24 else None
+    if estimate is not None:
+        estimate = math.floor(estimate)
+    if mood is not None and mood >= 0:
+        if estimate is not None and (
+            observed is None or op_data.dorm_mood_estimates[operator][1] > observed
+        ):
+            return min(mood, estimate)
+        return mood
+    return estimate
 
 
 def workshop_operator_block_reason(
@@ -319,7 +341,7 @@ def workshop_operator_block_reason(
     if mood is None or mood < 0:
         return WorkshopBlock(
             "mood_unknown",
-            "缺少可用心情读数或满心情卡牌预估，无法确认加工门槛",
+            "缺少可用心情读数或卡牌预估，无法确认加工门槛",
             operator,
         )
     if mood <= minimum_mood:

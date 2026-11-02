@@ -2,9 +2,39 @@ import {describe,expect,it} from 'vitest'
 import {advanceRoster,createRosterRuntime,nextRosterActionHours,settleRoster,type RuntimeConfig,type RuntimeState} from './rosterRuntime'
 import {getMowerSourceRuntime,settleMowerSource} from './mowerSourceRuntime'
 import {MowerDormState} from './mowerSchedulingData'
+import {MowerOperatorState} from './mowerOperatorState'
 import {mowerUrgentRecallBlocked} from './mowerUrgentRecovery'
 import {MowerTask,MOWER_TASK_TYPES as T,toMowerMicros} from './mowerTaskQueue'
 import {nextMowerMoodPlanningWake} from './mowerPlanningWake'
+import {planMowerAlphaMetadata} from './mowerAlphaMetadata'
+
+function sameGroupRecallFixture(sameGroup=true,ordinary=false){
+ const rows:NonNullable<RuntimeConfig['mowerSourcePlan']>={
+  room_1_1:[{agent:'A',group:'a',replacement:['X']}],
+  room_1_2:[{agent:'B',group:'b',replacement:['X']}],
+  room_1_3:[{agent:'C',group:sameGroup?'b':'c',replacement:['D']}],
+  room_2_1:[{agent:'D',group:'b',replacement:['W']}],
+  dormitory_1:['K1','K2','Free','Free','Free'].map(agent=>({agent,group:'',replacement:[]})),
+ }
+ const config:RuntimeConfig={mowerAlpha:true,mowerRunOrderEnabled:false,mowerTaskScheduling:{adjustForRunOrders:false},mowerSourcePlan:rows,
+  positions:Object.entries(rows).flatMap(([room,row])=>row.flatMap((slot,index)=>slot.agent==='Free'?[]:[{id:room+'_'+index,roomId:room,primary:slot.agent,candidates:slot.replacement,group:slot.group,permanent:room.startsWith('dorm'),dormitory:room.startsWith('dorm')}])),
+  beds:[2,3,4].map(index=>({id:'dormitory_1_'+index,roomId:'dormitory_1',vip:index===2})),initialMorale:{A:ordinary?3:0,B:20,C:20,D:20,X:24,W:24},idleOperators:['Idle1','Idle2','Idle3'],
+  mowerPolicy:{restingThreshold:.65,powerPlantCount:2,opeRestingPriority:[]},mowerSourceRules:{workaholic:[],exhaustRequire:ordinary?[]:['A'],restInFull:['A'],lowPriority:[],refreshDrained:[],lingMode:0},mowerRunLoopClock:{minimumClockStepMicros:1,notificationSleepMicros:1_000_000}}
+ const state=createRosterRuntime(config),source=getMowerSourceRuntime(state),data=source.data
+ source.initial=false;source.firstInit=false
+ state.occupants={room_1_1_0:'A',room_1_2_0:'X',room_1_3_0:'D',room_2_1_0:'W',dormitory_1_0:'K1',dormitory_1_1:'K2'}
+ state.bedOccupants={dormitory_1_2:'B',dormitory_1_3:'C'}
+ for(const op of Object.values(data.operators)){
+  const entry=Object.entries({...state.occupants,...state.bedOccupants}).find(([,name])=>name===op.name),position=entry?.[0],split=position?.lastIndexOf('_')??-1
+  Object.assign(op,{currentRoom:position?.slice(0,split)??'',currentIndex:position?Number(position.slice(split+1)):-1,mood:state.morale[op.name]??24,timeStampMicros:0,depletionRate:position?.startsWith('dorm')?0:1})
+ }
+ data.dorms=[new MowerDormState(['dormitory_1',2],'B',toMowerMicros(1)),new MowerDormState(['dormitory_1',3],'C',toMowerMicros(1)),new MowerDormState(['dormitory_1',4])]
+ data.groupShiftState={a:false,b:true,...(!sameGroup?{c:true}:{})}
+ const task=new MowerTask({time:0,type:T.EXHAUST_OFF,metadata:'A'})
+ task.ordinaryCoordination=ordinary;task.coordinationRequestNames=ordinary?['A']:[]
+ source.queue.tasks=[task]
+ return {state,source,task}
+}
 
 const rates={workRate:()=>1,recoveryRate:(name:string)=>name==='A'?1:4,forecastRates:(state:RuntimeState)=>({work:Object.fromEntries(Object.keys(state.morale).map(name=>[name,1])),recovery:Object.fromEntries(Object.keys(state.morale).map(name=>[name,name==='A'?1:4]))})}
 function fixture(alternates=['Y'],third?:'chain'|'occupied'|'working'){
@@ -28,16 +58,40 @@ function fixture(alternates=['Y'],third?:'chain'|'occupied'|'working'){
  source.queue.tasks=[new MowerTask({type:T.EXHAUST_OFF,metadata:'B'}),new MowerTask({time:20,type:T.SHIFT_ON,plan:{room_1_1:['A']}})]
  return {state,source}
 }
-function dispatchUntil(state:RuntimeState,done:()=>boolean,maxSteps=50){
+function dispatchUntil(state:RuntimeState,done:()=>boolean,maxSteps=50,activeRates=rates){
  for(let n=0;n<maxSteps&&!done();n++){
-  settleRoster(state,rates)
-  if(!done())advanceRoster(state,Math.max(nextRosterActionHours(state,rates),1/3_600_000_000),rates)
+  settleRoster(state,activeRates)
+  if(!done())advanceRoster(state,Math.max(nextRosterActionHours(state,activeRates),1/3_600_000_000),activeRates)
  }
  expect(done(),JSON.stringify({time:state.time,occupants:state.occupants,beds:state.bedOccupants,tasks:getMowerSourceRuntime(state).queue.tasks.map(task=>({type:task.type.key,plan:task.plan,time:task.timeMicros,failure:task.executionFailure?.reason})),diagnostics:state.diagnostics})).toBe(true)
  expect(state.diagnostics.filter(d=>/exception/.test(d.code))).toEqual([])
 }
 
 describe('replacement coordination through source runtime',()=>{
+ it.each([false,true].flatMap(restInFull=>[2.05,4.99,5,5.01,12].map(mood=>({restInFull,mood}))))('restores preferred covers at the rescue line unless full recovery is required: $mood, full=$restInFull',({mood,restInFull})=>{
+  const {state,source}=fixture(['Y']),data=source.data
+  const target=restInFull?12:5
+  Object.assign(data.policy,{restingThreshold:.6,rescueThreshold:.5})
+  state.occupants.room_1_1_0='Y';state.bedOccupants.dormitory_1_3='X'
+  Object.assign(data.operators.Y!,{currentRoom:'room_1_1',currentIndex:0,mood:12,timeStampMicros:0})
+  Object.assign(data.operators.X!,{currentRoom:'dormitory_1',currentIndex:3,mood,lowerLimit:2,upperLimit:12,restInFull,timeStampMicros:0})
+  state.morale.X=mood
+  data.dorms[1]=new MowerDormState(['dormitory_1',3],'X',toMowerMicros(12-mood))
+  source.queue.tasks=[]
+  for(let attempt=0;attempt<3;attempt++){
+   planMowerAlphaMetadata(data,source.queue,[])
+   const restores=source.queue.tasks.filter(task=>task.preferredReplacementRestore)
+   expect(restores).toHaveLength(mood<target?0:1)
+   if(mood>=target)expect(restores[0]!.plan).toEqual({room_1_1:['X']})
+  }
+  expect(data.currentOperator('room_1_1',0)?.name).toBe('Y')
+  expect(data.operators.X!.currentRoom).toBe('dormitory_1')
+  if(mood<target){
+   data.operators.X!.mood=target;state.morale.X=target
+   planMowerAlphaMetadata(data,source.queue,[])
+   expect(source.queue.tasks.find(task=>task.preferredReplacementRestore)?.plan).toEqual({room_1_1:['X']})
+  }
+ })
  it.each([false,true].flatMap(predictiveMoodControl=>['patrol','planning'].map(recheck=>({predictiveMoodControl,recheck}))))('requires full-recovery endurance despite $recheck with saved mood mode=$predictiveMoodControl',({predictiveMoodControl,recheck})=>{
   const {state,source}=fixture([],recheck==='planning'?'working':undefined)
   state.config.mowerPolicy!.predictiveMoodControl=predictiveMoodControl
@@ -78,6 +132,22 @@ describe('replacement coordination through source runtime',()=>{
    expect(state.occupants.room_1_1_0).toBe('X')
    expect(Object.values(state.bedOccupants)).toContain('A')
   }
+ })
+ it.each([false,true])('requires observed or explicitly simulated mood for an unread training occupant: %s',known=>{
+  const {state,source}=fixture([])
+  state.config.mowerSourceRules!.restInFull=['B'];source.data.operators.A!.restInFull=false
+  source.queue.tasks[0]!.ordinaryCoordination=true
+  source.data.operators.B!.exhaustRequire=false;state.config.mowerSourceRules!.exhaustRequire=[]
+  state.morale.A=20;Object.assign(source.data.operators.A!,{mood:20,depletionRate:1})
+  source.data.getDormByName('A')![1].timeMicros=toMowerMicros(4)
+  state.config.positions.push({id:'train_0',roomId:'train',primary:'K',candidates:[]})
+  state.occupants.train_0='K';state.morale.K=24
+  source.data.plan.train=['K'];source.data.operators.K=new MowerOperatorState({name:'K',room:'train',index:0,currentRoom:'train',currentIndex:0,mood:24})
+  const activeRates={...rates,...(known?{forecastMoods:(physical:RuntimeState)=>({...physical.morale})}:{})}
+  settleMowerSource(state,activeRates)
+  expect(source.queue.tasks.some(task=>task.exhaustSupport)).toBe(known)
+  expect(source.data.operators.K!.timeStampMicros).toBeUndefined()
+  if(known)dispatchUntil(state,()=>state.occupants.room_1_1_0==='A'&&state.occupants.room_1_2_0==='X'&&Object.values(state.bedOccupants).includes('B'),50,activeRates)
  })
  it('rechecks a safe recall after a projected backup makes its work endurance insufficient',()=>{
   const {state,source}=fixture([])
@@ -121,6 +191,7 @@ describe('replacement coordination through source runtime',()=>{
  })
  it('keeps the released preferred cover available for a third waiting group before restoring it',()=>{
   const {state,source}=fixture(['Y'],'chain')
+  state.config.freeBlacklist=['X'];source.data.freeBlacklist=['X']
   state.occupants.room_1_3_0='C';delete state.bedOccupants.dormitory_1_3
   Object.assign(source.data.operators.C!,{currentRoom:'room_1_3',currentIndex:0,mood:24,replacement:['X']});state.morale.C=24
   Object.assign(source.data.operators.Y!,{currentRoom:'',currentIndex:-1});source.data.dorms[1]!.reset()
@@ -204,6 +275,7 @@ describe('replacement coordination through source runtime',()=>{
  })
  it('revalidates a queued restoration when a backup changes candidate order before dispatch',()=>{
   const {state,source}=fixture()
+  state.config.freeBlacklist=['X'];source.data.freeBlacklist=['X']
   dispatchUntil(state,()=>state.occupants.room_1_1_0==='Y'&&state.occupants.room_1_2_0==='X'&&Object.values(state.bedOccupants).includes('B'))
   dispatchUntil(state,()=>state.occupants.room_1_2_0==='B',100)
   const queued=source.queue.tasks.find(task=>task.exhaustSupport&&task.plan.room_1_1?.[0]==='X')
@@ -217,6 +289,8 @@ describe('replacement coordination through source runtime',()=>{
  })
  it.each([false,true])('restores according to the effective replacement order after B returns (backup changed=%s)',changed=>{
   const {state,source}=fixture()
+  // Keep the released cover idle; dormitory recovery admission is covered separately.
+  state.config.freeBlacklist=['X'];source.data.freeBlacklist=['X']
   settleMowerSource(state,rates)
   expect(source.queue.tasks.find(task=>task.exhaustSupport)?.plan).toEqual({room_1_1:['Y']})
   dispatchUntil(state,()=>state.occupants.room_1_1_0==='Y'&&state.occupants.room_1_2_0==='X'&&Object.values(state.bedOccupants).includes('B'))
@@ -236,5 +310,55 @@ describe('replacement coordination through source runtime',()=>{
   expect(source.data.getDormByName('A')![1].timeMicros).toBe(aDeadline)
   expect(state.occupants.room_1_2_0).toBe('B')
   expect(Object.values(state.occupants)).not.toContain(changed?'X':'Y')
+ })
+})
+
+describe('recall completes same-group working-primary handoffs',()=>{
+ it.each([false,true])('returns the cover-owning group with ordinary recall=%s before moving its working primary',ordinary=>{
+  const {state,source,task}=sameGroupRecallFixture(true,ordinary)
+  const activeRates={...rates,workRate:()=>.1,recoveryRate:()=>4,forecastRates:(projected:RuntimeState)=>({work:Object.fromEntries(Object.keys(projected.morale).map(name=>[name,.1])),recovery:Object.fromEntries(Object.keys(projected.morale).map(name=>[name,4]))})}
+  settleMowerSource(state,activeRates)
+  expect(source.queue.tasks.some(pending=>pending.exhaustSupport)).toBe(true)
+  dispatchUntil(state,()=>state.occupants.room_1_1_0==='X'&&state.occupants.room_1_2_0==='B'&&state.occupants.room_1_3_0==='C'&&state.occupants.room_2_1_0==='D'&&Object.values(state.bedOccupants).includes('A'),50,activeRates)
+  expect(task.timeMicros).toBe(toMowerMicros(0))
+  expect(state.occupants.room_1_3_0).toBe('C')
+  expect(state.occupants.room_2_1_0).toBe('D')
+ })
+ it('retains the request when the working primary is still covering a different group',()=>{
+  const {state,source,task}=sameGroupRecallFixture(false)
+  for(let attempt=0;attempt<3;attempt++)settleMowerSource(state,rates)
+  expect(source.queue.tasks.some(pending=>pending.exhaustSupport)).toBe(false)
+  expect(source.queue.tasks).toContain(task)
+  expect(task.executionFailure).toBeDefined()
+  expect(task.timeMicros).toBe(toMowerMicros(0))
+  expect(state.occupants.room_1_3_0).toBe('D')
+  expect(state.occupants.room_1_1_0).toBe('A')
+ })
+})
+
+describe('resumed supported departures keep their original recovery ownership',()=>{
+ it('coordinates a new cover dependency for the original request without excluding its own released cover',()=>{
+  const {state,source,task}=sameGroupRecallFixture(),data=source.data
+  const primary=data.operators.B!,shared=data.operators.D!
+  Object.assign(primary,{group:'a',replacement:['D'],currentRoom:'room_1_2',currentIndex:0,mood:8,depletionRate:1})
+  state.morale.B=8;state.occupants.room_1_2_0='B';delete state.bedOccupants.dormitory_1_2
+  Object.assign(data.operators.X!,{currentRoom:'',currentIndex:-1})
+  shared.groupBindings=[{group:'b',replacement:['W']},{group:'a',replacement:['W']}]
+  Object.assign(state.config.mowerSourcePlan!.room_1_2![0]!,{group:'a',replacement:['D']})
+  state.config.mowerSourcePlan!.room_2_1![0]!.groupBindings=shared.groupBindings
+  Object.assign(state.config.positions.find(p=>p.primary==='B')!,{group:'a',candidates:['D']})
+  data.dorms[0]!.reset()
+  task.type=T.SHIFT_OFF;task.metadata='';task.executionRetained=true
+  task.plan={room_1_1:['X'],room_1_2:['D'],room_2_1:['W'],dormitory_1:['Current','Current','A','Current','B']}
+  task.urgentRecoveryRequestNames=['A','B'];task.urgentRecoverySupportNames=['Idle1'];task.urgentRecoveryReservedNames=['X']
+  settleMowerSource(state,rates)
+  const support=source.queue.tasks.find(pending=>pending.exhaustSupport)
+  expect(support).toBeDefined()
+  expect(source.queue.tasks).toContain(task);expect(task.executionFailure).toBeDefined()
+  for(let attempt=0;attempt<3;attempt++)settleMowerSource(state,rates)
+  expect(source.queue.tasks.filter(pending=>pending.exhaustSupport)).toEqual([support])
+  dispatchUntil(state,()=>state.occupants.room_1_1_0==='X'&&state.occupants.room_1_2_0==='D'&&state.occupants.room_1_3_0==='C'&&Object.values(state.bedOccupants).includes('A')&&Object.values(state.bedOccupants).includes('B'))
+  expect(task.timeMicros).toBe(0)
+  expect(source.data.urgentRecoverySupporters.A).toContain('C')
  })
 })
