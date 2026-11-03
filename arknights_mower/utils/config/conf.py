@@ -234,6 +234,9 @@ class LongTaskPart(ConfModel):
         blackflow_strategy: Literal[
             "", "burn", "burn_with_investment", "ending1", "ending2", "ending3"
         ] = ""
+        blackflow_fast_flight: bool = False
+        blackflow_start_run_fast_flight: bool = False
+        blackflow_start_run_id: str = Field(default="", max_length=128)
         blackflow_start_animals: list[
             Literal[
                 "swaddled_cat",
@@ -827,6 +830,10 @@ class RIICPart(ConfModel):
     "加工站一键设置的副产品概率加成下限（百分比）"
     workshop_protect_t2_device_rock: bool = False
     "禁止加工消耗装置、固源岩（仅 T2），材料预算也排除对应合成配方"
+    workshop_t1_reserve: int = Field(default=100, ge=0, le=999999)
+    "加工时保留的 T1 精英材料数量"
+    workshop_t2_reserve: int = Field(default=100, ge=0, le=999999)
+    "加工时保留的 T2 精英材料数量"
     t5_operators: list[str] = ["年"]
     "自动专精 T5 加工干员"
     book_operators: list[str] = ["司霆惊蛰"]

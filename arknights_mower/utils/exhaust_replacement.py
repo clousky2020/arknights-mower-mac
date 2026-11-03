@@ -58,6 +58,7 @@ def plan_exhaust_support(
     urgent=False,
     recall_blocked=False,
     recall_viability=None,
+    excluded_names=(),
 ):
     """先保留既有换替班方案，再联合召回实际阻塞的休息组。"""
     pending, visited = deque([()]), {()}
@@ -76,6 +77,7 @@ def plan_exhaust_support(
             recall_viability=recall_viability,
             seeds=seeds,
             dependency=dependencies.add,
+            excluded_names=excluded_names,
         )
         if result is not None:
             return result
@@ -105,6 +107,7 @@ def _plan_exhaust_support_attempt(
     recall_viability=None,
     seeds=(),
     dependency=lambda name: None,
+    excluded_names=(),
 ):
     """返回能让用尽组取得替班和床位的前置安排；失败不改变真实状态。"""
     from arknights_mower.utils.backup_group_tasks import forced_group_cover_reservations
@@ -129,12 +132,7 @@ def _plan_exhaust_support_attempt(
     selected = set()
     data = op_data.project_arrangements([plan])
 
-    request_groups = {
-        op_data.operators[name].group
-        for name in candidates
-        if op_data.operators[name].group
-        and op_data.is_group_shift_anchor(op_data.operators[name])
-    }
+    request_groups = op_data.shift_request_groups(candidates)
     transitions = dict.fromkeys(request_groups, True)
 
     def covers(state, worker):
@@ -161,7 +159,7 @@ def _plan_exhaust_support_attempt(
                 (
                     name
                     for name in state.shift_group_members(group)
-                    if state.is_group_shift_anchor(state.operators[name])
+                    if state.is_group_shift_anchor(state.operators[name], group)
                     and state.operators[name].is_resting()
                 ),
                 None,
@@ -174,7 +172,7 @@ def _plan_exhaust_support_attempt(
     def shared_dependencies(state, trial):
         changes = state.arrangement_group_transitions(trial)
         for worker in state.operators.values():
-            if worker.multi_group:
+            if worker.multi_group and worker.name not in excluded_names:
                 groups = state.resting_binding_groups(worker, changes)
                 if not state.shared_replacements(worker, groups):
                     for group in groups:
@@ -297,8 +295,13 @@ def _plan_exhaust_support_attempt(
             for name in names
             for op in [state.operators[name]]
             for member in (state.shift_group_members(op.group) if op.group else [name])
-            if not state.operators[member].multi_group
-            or not state.resting_binding_groups(state.operators[member], transitions)
+            if member not in excluded_names
+            and (
+                not state.operators[member].multi_group
+                or not state.resting_binding_groups(
+                    state.operators[member], transitions
+                )
+            )
         }
         required_anchors = {
             member
@@ -344,7 +347,11 @@ def _plan_exhaust_support_attempt(
                     worker.room, ["Current"] * len(state.plan[worker.room])
                 )[worker.index] = member
         if not state.normalize_shared_arrangement(
-            trial, transitions, reserved_replacements=protected
+            trial,
+            transitions,
+            reserved_replacements=protected,
+            excluded_names=excluded_names,
+            excluded_replacements=protected,
         ):
             shared_dependencies(state, trial)
             return None
@@ -369,7 +376,10 @@ def _plan_exhaust_support_attempt(
         simulation = state.project_arrangements([])
         rebalance_closing_dorm_slots(simulation, trial, members)
         if not state.normalize_shared_arrangement(
-            trial, reserved_replacements=protected
+            trial,
+            reserved_replacements=protected,
+            excluded_names=excluded_names,
+            excluded_replacements=protected,
         ):
             shared_dependencies(state, trial)
             return None

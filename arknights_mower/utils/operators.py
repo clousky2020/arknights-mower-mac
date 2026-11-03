@@ -405,6 +405,7 @@ class Operators:
         self.current_room_changed_callback = None
         self.party_time = None
         self.facility_states = {}
+        self.training_scheduling_protected = False
         self.room_observations = {}
         self.reserved_product_beds = {}
         self.reserved_product_replacements = set()
@@ -432,6 +433,7 @@ class Operators:
                 "facility_product_type_count",
                 "facility_has_mastery_plan",
                 "facility_is_training",
+                "facility_is_protected",
                 "major_maintenance_remaining_hours",
                 "group_min_mood",
                 "group_max_mood",
@@ -617,6 +619,40 @@ class Operators:
                     ),
                     planned_names=planned_names,
                 )
+        for op in self.operators.values():
+            if not op.multi_group or op.room.startswith("dorm"):
+                continue
+            resting = [
+                binding["group"]
+                for binding in op.group_bindings
+                if not binding["group"]
+                or not any(
+                    owner.is_high()
+                    and not owner.room.startswith("dorm")
+                    and (
+                        any(
+                            item["group"] == binding["group"]
+                            for item in owner.group_bindings
+                        )
+                        if owner.multi_group
+                        else owner.group == binding["group"]
+                    )
+                    and self.is_same_group_primary_replacement(
+                        owner, op.name, binding["group"]
+                    )
+                    for owner in self.operators.values()
+                )
+            ]
+            if not resting and not op.workaholic:
+                return f"{op.name}的多绑组至少需要一个正常下班组（可使用空绑组）"
+            op.shift_group = resting[0] if len(resting) == 1 else None
+            if op.shift_group:
+                self.select_group_binding(op.name, op.shift_group)
+                if op.exhaust_require:
+                    self.exhaust_agent.add(op.name)
+                    self.exhaust_group.add(op.group)
+                if op.rest_in_full:
+                    self.rest_in_full_group.add(op.group)
         binding_members = {}
         for op in self.operators.values():
             groups = (
@@ -805,11 +841,12 @@ class Operators:
             )
             # 全零心情工作组不触发普通轮休，不要求决定上下班的主班。
             if (working or not working_members) and not any(
-                self.is_group_shift_anchor(self.operators[name]) for name in members
+                self.is_group_shift_anchor(self.operators[name], key)
+                for name in members
             ):
                 return (
                     f"{key} 缺少决定上下班的工作主班：至少需要一名非宿舍、"
-                    "非零心情工作、非多绑组且非候补的主班"
+                    "非零心情工作、非候补且只有一个正常下班组的主班"
                 )
             mandatory = tuple(
                 name for name in working if not self._can_standby(self.operators[name])
@@ -1347,11 +1384,34 @@ class Operators:
             )
         )
 
+    def shift_request_groups(self, names):
+        """工作换位成员跟随本次请求，不额外发起自己的正常下班。"""
+        members = [self.operators[name] for name in names]
+        return list(
+            dict.fromkeys(
+                op.group
+                for op in members
+                if op.group
+                and self.is_group_shift_anchor(op)
+                and not (
+                    op.multi_group
+                    and any(
+                        other.group != op.group
+                        and self.is_group_shift_anchor(other)
+                        and self.is_same_group_primary_replacement(other, op.name)
+                        for other in members
+                    )
+                )
+            )
+        )
+
     def select_group_binding(self, name, group):
         """Select a validated binding without changing the persisted Scheduling Plan."""
         op = self.operators[name]
         if op.independent_rest:
             group = ""
+        elif op.shift_group:
+            group = op.shift_group
         if not op.multi_group or not any(
             binding["group"] == group for binding in op.group_bindings
         ):
@@ -1377,7 +1437,13 @@ class Operators:
                 op = self.operators.get(slots[index].agent)
                 if op is None or not op.group or not self.is_group_shift_anchor(op):
                     continue
+                if op.multi_group and self.working_replacement_assignments(
+                    [op.name], plan
+                ):
+                    continue
                 if name == op.name:
+                    if op.multi_group and not self.group_is_resting(op.group):
+                        continue
                     transitions[op.group] = False
                 elif name in op.replacement:
                     transitions.setdefault(op.group, True)
@@ -1510,11 +1576,15 @@ class Operators:
 
     def working_replacement_blockers(self, names, plan=None):
         """共享成员保留工作替班岗位；实际离岗仍须完成交接。"""
+        names = list(names)
+        request_groups = set(self.shift_request_groups(names))
         plan = plan or {}
         return {
             self.operators[owner].group
             for owner, name in self.working_replacement_assignments(names, plan).items()
             if not self.operators[name].multi_group
+            or self.is_group_shift_anchor(self.operators[name])
+            and self.operators[name].group in request_groups
             or any(
                 target == name
                 and (room, index)
@@ -1532,6 +1602,7 @@ class Operators:
         reserved_replacements=None,
         explicit_slots=(),
         excluded_names=(),
+        excluded_replacements=None,
     ):
         """Keep shared covers until all dependent groups return; reject conflicts.
 
@@ -1540,6 +1611,9 @@ class Operators:
         from arknights_mower.utils.exhaust_replacement import match_replacements
 
         excluded_names = set(excluded_names)
+        excluded_replacements = set(
+            excluded_names if excluded_replacements is None else excluded_replacements
+        )
         transitions = (
             self.arrangement_group_transitions(plan)
             if transitions is None
@@ -1561,7 +1635,7 @@ class Operators:
             and op.name not in excluded_names
             and not (
                 (actual := self.get_current_operator(op.room, op.index)) is not None
-                and actual.name in excluded_names
+                and actual.name in excluded_replacements
             )
             and (op.room, op.index) not in explicit_slots
             and (
@@ -1591,7 +1665,7 @@ class Operators:
                 if reserved_replacements is None
                 else reserved_replacements
             )
-            | excluded_names
+            | excluded_replacements
         )
         for op in followers:
             target = plan.get(op.room, [])[op.index : op.index + 1]
@@ -1762,9 +1836,14 @@ class Operators:
         )
 
     def is_order_collection_room(self, room: str) -> bool:
-        """实际进驻精零孑的贸易站按订单完成时间收单。"""
+        """实际进驻精零孑的卖玉贸易站按订单完成时间收单。"""
         jaye = self.operators.get("孑")
-        if jaye is None or jaye.current_room != room or not room.startswith("room"):
+        if (
+            jaye is None
+            or jaye.current_room != room
+            or not room.startswith("room")
+            or not self.is_orundum_trade_room(room)
+        ):
             return False
         state = self.facility_states.get(room, {})
         if state.get("facility") not in (None, "trade"):
@@ -1840,6 +1919,11 @@ class Operators:
 
         plan = get_active_plan()
         return plan is not None and plan.get("status") == "training"
+
+    def facility_is_protected(self, room: str) -> bool:
+        """返回调度器在副表求值前同步的训练室保护状态。"""
+        self._validate_training_room(room)
+        return getattr(self, "training_scheduling_protected", False) is True
 
     def facility_product_count(self, product: str) -> int:
         """返回当前生产指定产物或订单类型的设施数量。"""
@@ -2322,7 +2406,11 @@ class Operators:
         # 需要用尽心情干员逻辑
         if (
             operator.exhaust_require
-            and (not operator.multi_group or operator.independent_rest)
+            and (
+                not operator.multi_group
+                or operator.independent_rest
+                or operator.shift_group
+            )
             and not (operator.group and operator.room.startswith("dorm"))
         ):
             self.exhaust_agent.add(operator.name)
@@ -2364,11 +2452,12 @@ class Operators:
             and not self.config.is_rest_in_full(op.name)
         )
 
-    def is_group_shift_anchor(self, op):
-        """只有普通固定工作主班参与绑组上下班，候补不参与。"""
+    def is_group_shift_anchor(self, op, group=None):
+        """只有一个正常下班组的固定工作主班参与该组上下班。"""
         return (
             op.is_high()
-            and not op.multi_group
+            and (not op.multi_group or bool(op.shift_group))
+            and (group is None or op.group == group)
             and not op.workaholic
             and not op.room.startswith("dorm")
             and not self._can_standby(op)
@@ -2394,7 +2483,10 @@ class Operators:
             self.operators[name]
             for name in self.shift_group_members(group)
             if not self.operators[name].room.startswith("dorm")
-            and not self.operators[name].multi_group
+            and (
+                not self.operators[name].multi_group
+                or self.operators[name].shift_group == group
+            )
         ]
         return bool(workers) and all(op.workaholic for op in workers)
 
@@ -2403,7 +2495,7 @@ class Operators:
         if override is not None:
             return override
         thresholds = getattr(self.config, "group_resting_thresholds", {})
-        if op.group and not op.multi_group:
+        if op.group and (not op.multi_group or getattr(op, "shift_group", None)):
             return thresholds.get(op.group, self.config.resting_threshold)
         return self.config.resting_threshold
 
@@ -2462,10 +2554,14 @@ class Operators:
 
     def is_same_group_primary_replacement(self, operator, name, group=None):
         """同一非空组内，不同主班可按对应绑组的配置互填替班。"""
-        if group is None and operator.independent_rest:
+        if (
+            group is None
+            and operator.multi_group
+            and (bindings := self.resting_binding_groups(operator))
+        ):
             return any(
                 self.is_same_group_primary_replacement(operator, name, binding)
-                for binding in self.resting_binding_groups(operator)
+                for binding in bindings
             )
         cover = self.operators.get(name)
         group = operator.group if group is None else group
@@ -2831,7 +2927,7 @@ class Operators:
             if (
                 not v.is_resting()
                 and not (v.group and v.room.startswith("dorm"))
-                and not v.multi_group
+                and (not v.multi_group or v.shift_group)
                 and v.operator_type != "low"
                 and not v.workaholic
                 and (not v.group or self.is_group_shift_anchor(v))
@@ -3581,6 +3677,7 @@ class Operator:
         self.index = index
         self.group = group
         self.replacement = replacement
+        self.shift_group = None
         self.group_bindings = copy.deepcopy(group_bindings or [])
         if self.independent_rest:
             self.group = ""

@@ -41,6 +41,8 @@ _DB_TABLE_STMTS = (
     "id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS maa_copilot_progress ("
     "id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS maa_blackflow_progress ("
+    "id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS trading_history ("
     "time INTEGER PRIMARY KEY,"
     "server_date TEXT,"
@@ -403,6 +405,23 @@ def load_maa_copilot_progress():
             "SELECT payload FROM maa_copilot_progress WHERE id = 1"
         ).fetchone()
     return json.loads(row[0]) if row else {}
+
+
+def load_maa_blackflow_progress():
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT payload FROM maa_blackflow_progress WHERE id = 1"
+        ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def save_maa_blackflow_progress(progress):
+    with _conn() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO maa_blackflow_progress VALUES (1, ?)",
+            (json.dumps(progress),),
+        )
+        connection.commit()
 
 
 def save_maa_copilot_progress(progress):
@@ -1276,6 +1295,49 @@ def save_inventory_counts(
         ):
             workshop_inventory_changed.set()
         return effective
+
+
+def restore_cached_inventory_counts(snapshots):
+    """Seed missing baselines without rebasing current stock or renewing observations."""
+    restored = {}
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if battle_inventory_active.is_set():
+            return restored
+        current = dict(conn.execute("SELECT item_name, count FROM inventory"))
+        protected = dict(
+            conn.execute(
+                "SELECT item_name, observed_at FROM workshop_inventory_updates"
+            )
+        )
+        for timestamp, counts in sorted(
+            snapshots, key=lambda entry: entry[0], reverse=True
+        ):
+            for name, count in counts.items():
+                if (
+                    name in current
+                    or name in restored
+                    or timestamp <= protected.get(name, 0)
+                ):
+                    continue
+                conn.execute(
+                    "INSERT INTO inventory (item_name, count) VALUES (?, ?)",
+                    (name, count),
+                )
+                conn.execute(
+                    "INSERT INTO workshop_inventory_updates (item_name, observed_at) VALUES (?, ?) "
+                    "ON CONFLICT(item_name) DO UPDATE SET observed_at = excluded.observed_at",
+                    (name, timestamp),
+                )
+                conn.execute(
+                    "DELETE FROM workshop_inventory_pending WHERE item_name = ?",
+                    (name,),
+                )
+                restored[name] = count
+        conn.commit()
+    if restored:
+        workshop_inventory_changed.set()
+    return restored
 
 
 def get_inventory_counts(item_names: list[str] | None = None):

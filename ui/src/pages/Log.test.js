@@ -765,8 +765,67 @@ describe('log page', () => {
     await nextTick()
 
     expect(databaseModal.props.show).toBe(true)
-    expect(state.client.get).toHaveBeenCalledExactlyOnceWith('/db-admin/stats')
+    expect(state.client.get).toHaveBeenCalledWith('/db-admin/stats')
+    expect(state.client.get).toHaveBeenCalledWith('/db-admin/maintenance')
     expect(find((target) => target.props.label === '新增任务说明').parent).toBe(addTask.parent)
+  })
+
+  it('refreshes database size after compaction and saves the selected backup limit', async () => {
+    const page = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
+    const info = {
+      database_bytes: 200 * 1024 * 1024,
+      reclaimable_bytes: 199 * 1024 * 1024,
+      backup_limit_mib: 16,
+      max_backup_limit_mib: 1024,
+      busy: false
+    }
+    state.client.get.mockImplementation(async (url) => ({
+      data: url.endsWith('/maintenance') ? info : { log: 10 }
+    }))
+    await page.db_load_stats()
+    expect(page.db_limit.value).toBe(16)
+    state.client.post.mockResolvedValueOnce({
+      data: {
+        ...info,
+        database_bytes: 1024 * 1024,
+        reclaimable_bytes: 0,
+        before_bytes: 200 * 1024 * 1024,
+        after_bytes: 1024 * 1024
+      }
+    })
+    await page.db_maintain('compact')
+    expect(state.client.post).toHaveBeenCalledExactlyOnceWith(
+      '/db-admin/compact',
+      {},
+      {
+        headers: { 'X-Mower-Settings': '1' }
+      }
+    )
+    expect(page.db_maintenance.value.database_bytes).toBe(1024 * 1024)
+    expect(page.db_result.value).toContain('200.00 MiB → 1.00 MiB')
+    page.db_limit.value = 256
+    state.client.put.mockResolvedValueOnce({ data: { ...info, backup_limit_mib: 256 } })
+    await page.db_maintain('limit')
+    expect(state.client.put).toHaveBeenCalledExactlyOnceWith(
+      '/db-admin/backup-limit',
+      { backup_limit_mib: 256 },
+      { headers: { 'X-Mower-Settings': '1' } }
+    )
+    expect(page.db_result.value).toContain('256 MiB')
+    expect(page.db_busy.value).toBe(false)
+  })
+
+  it('shows a maintenance failure and permits an explicit retry without changing the saved limit', async () => {
+    const page = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
+    page.db_maintenance.value = { backup_limit_mib: 16 }
+    page.db_limit.value = 64
+    state.client.put.mockRejectedValueOnce({ response: { data: { message: '请先停止 Mower' } } })
+    await page.db_maintain('limit')
+    expect(page.db_error.value).toBe('请先停止 Mower')
+    expect(page.db_maintenance.value.backup_limit_mib).toBe(16)
+    expect(page.db_limit.value).toBe(64)
+    expect(page.db_busy.value).toBe(false)
+    expect(page.db_result.value).toBe('')
   })
 
   it('opens mobile controls from More, changes display options and closes More before database management', async () => {
@@ -808,7 +867,8 @@ describe('log page', () => {
     expect(page.show_db_admin).toBe(true)
     expect(trigger.props['aria-expanded']).toBe(false)
     expect(all().some((target) => target.props.role === 'dialog')).toBe(false)
-    expect(state.client.get).toHaveBeenCalledExactlyOnceWith('/db-admin/stats')
+    expect(state.client.get).toHaveBeenCalledWith('/db-admin/stats')
+    expect(state.client.get).toHaveBeenCalledWith('/db-admin/maintenance')
     expect(state.client.post).not.toHaveBeenCalled()
   })
 
@@ -931,6 +991,7 @@ describe('log page', () => {
 
     component.process_control.value = {
       canRunProcessAction: true,
+      canApplySchedule: true,
       applySchedule,
       restartResume
     }
@@ -956,6 +1017,26 @@ describe('log page', () => {
 
     component.select_stop_action('maa')
     expect(state.client.get).toHaveBeenCalledWith('/stop-maa')
+  })
+
+  it('allows applying a plan when desktop process control is unavailable', async () => {
+    state.mower.refs.running.value = true
+    const component = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
+    const applySchedule = vi.fn()
+    component.process_control.value = {
+      canApplySchedule: true,
+      canRunProcessAction: false,
+      applySchedule
+    }
+    await nextTick()
+    expect(
+      component.stop_options.value.find((option) => option.key === 'apply_schedule').disabled
+    ).toBe(false)
+    expect(
+      component.stop_options.value.find((option) => option.key === 'restart_resume').disabled
+    ).toBe(true)
+    component.select_stop_action('apply_schedule')
+    expect(applySchedule).toHaveBeenCalledOnce()
   })
 
   it('mounts the task form on first opening and retains it after closing', async () => {
