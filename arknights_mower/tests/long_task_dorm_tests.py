@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from arknights_mower.utils.config.conf import Conf
+from arknights_mower.utils.operators import Operators
+from arknights_mower.utils.plan import Plan, PlanConfig
 from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
@@ -40,7 +42,9 @@ def scheduler(monkeypatch):
     monkeypatch.setattr(manual_tasks.config, "conf", Conf(maa_rg_enable=True))
     solver = object.__new__(base_schedule.BaseSchedulerSolver)
     solver.task = None
-    solver.op_data = None
+    solver.op_data = Operators(
+        {"default_plan": Plan({}, PlanConfig("", "", "")), "backup_plans": []}
+    )
     release = SchedulerTask(now, task_type=TaskTypes.RELEASE_DORM)
     fill = SchedulerTask(now + timedelta(minutes=1), task_type=TaskTypes.FILL_DORM)
     order = SchedulerTask(now + timedelta(hours=1), task_type=TaskTypes.RUN_ORDER)
@@ -136,16 +140,18 @@ def maa_solver(scheduler, monkeypatch):
     solver.device = MagicMock()
     solver.last_execution = {"maa": None}
     solver.recog = MagicMock()
+    solver.scene = MagicMock(return_value=base_schedule.Scene.TERMINAL_MAIN)
     solver.MAA = MagicMock()
     solver.MAA.running.side_effect = [True, True]
     maa = solver.MAA
     solver.initialize_maa = MagicMock(side_effect=lambda: setattr(solver, "MAA", maa))
     for name in (
         "back_to_index",
+        "scene_graph_navigation",
         "release_maa",
         "report_maa_progress",
         "maa_stop",
-        "restore_maa_theme",
+        "append_maa_theme_task",
         "rest_until_next_task",
     ):
         setattr(solver, name, MagicMock())

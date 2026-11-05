@@ -641,6 +641,7 @@ def _rg_conf(
         maa_rg_sleep_min="12:00",
         maa_rg_sleep_max="12:00",
         maa_rg_theme=theme,
+        maa_restore_theme_enable=False,
         rogue=SimpleNamespace(
             squad=squad,
             roles="",
@@ -701,6 +702,10 @@ class MaaRoguelikeTests(unittest.TestCase):
             patch.object(record, "battle_inventory_active", active),
             patch.object(base_schedule.config, "conf", _rg_conf()),
             patch.object(solver, "back_to_index"),
+            patch.object(solver, "scene_graph_navigation"),
+            patch.object(
+                solver, "scene", return_value=base_schedule.Scene.TERMINAL_MAIN
+            ),
             patch.object(solver, "initialize_maa", side_effect=initialize),
             patch.object(solver, "append_maa_task"),
             patch.object(
@@ -711,6 +716,7 @@ class MaaRoguelikeTests(unittest.TestCase):
             patch.object(base_schedule, "save_exception"),
         ):
             solver.maa_plan_solver()
+        maa.start.assert_called_once_with()
         idle.assert_called_once()
         self.assertFalse(active.is_set())
 
@@ -731,6 +737,10 @@ class MaaRoguelikeTests(unittest.TestCase):
         with (
             patch.object(base_schedule.config, "conf", _rg_conf(**overrides)),
             patch.object(solver, "back_to_index"),
+            patch.object(solver, "scene_graph_navigation"),
+            patch.object(
+                solver, "scene", return_value=base_schedule.Scene.TERMINAL_MAIN
+            ),
             patch.object(solver, "initialize_maa", side_effect=_init_maa),
             patch.object(solver, "append_maa_task"),
             patch.object(solver, "rest_until_next_task"),

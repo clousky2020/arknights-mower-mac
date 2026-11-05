@@ -29,14 +29,18 @@ def dispatch(monkeypatch, tmp_path):
     solver.tasks = [SchedulerTask(time=datetime.now() + timedelta(days=1))]
     for method in (
         "back_to_index",
+        "scene_graph_navigation",
         "initialize_maa",
         "release_maa",
         "rest_until_next_task",
         "to_reclamation",
-        "restore_maa_theme",
+        "append_maa_theme_task",
     ):
         monkeypatch.setattr(solver, method, MagicMock())
     monkeypatch.setattr(solver, "to_sss", MagicMock(return_value=False))
+    monkeypatch.setattr(
+        solver, "scene", MagicMock(return_value=base_schedule.Scene.TERMINAL_MAIN)
+    )
     monkeypatch.setattr(base_schedule, "send_message", MagicMock())
 
     def run(kind="rogue", **kwargs):

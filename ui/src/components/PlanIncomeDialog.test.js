@@ -3,6 +3,7 @@ import { effectScope, reactive, nextTick } from 'vue'
 import Dialog from './PlanIncomeDialog.vue'
 import { loadIncomeArchive, saveIncomeArchive } from '@/riic/incomeArchive'
 import { renderIncomeImage, downloadIncomeImage } from '@/riic/incomeImage'
+import { INCOME_PREFERENCES_KEY } from '@/riic/incomePreferences'
 vi.mock('@/riic/incomeArchive', () => ({
   loadIncomeArchive: vi.fn(async () => null),
   saveIncomeArchive: vi.fn(async () => {})
@@ -39,6 +40,12 @@ const cache = () => ({
 let page, scope, workers, props
 beforeEach(async () => {
   vi.clearAllMocks()
+  const saved = new Map()
+  vi.stubGlobal('localStorage', {
+    getItem: vi.fn((key) => saved.get(key) ?? null),
+    setItem: vi.fn((key, value) => saved.set(key, value)),
+    removeItem: vi.fn((key) => saved.delete(key))
+  })
   loadIncomeArchive.mockResolvedValue(null)
   saveIncomeArchive.mockResolvedValue(undefined)
   io.client = {
@@ -81,6 +88,219 @@ afterEach(() => {
   scope.stop()
   vi.unstubAllGlobals()
 })
+function reopenDialog() {
+  io.cleanup()
+  scope.stop()
+  scope = effectScope()
+  page = scope.run(() => Dialog.setup(props, { expose: vi.fn(), emit: vi.fn() }))
+}
+it('remembers edited parameters across dialog recreation before any calculation', () => {
+  Object.assign(page.settings, {
+    warmupDays: 1,
+    sampleDays: 7,
+    seed: 99,
+    droneRoom: '',
+    operatorMode: 'custom',
+    operatorText: '阿米娅,2,80',
+    inventorySource: 'manual',
+    allowGoldDebt: false,
+    jayeElite0: true,
+    weightMode: 'custom'
+  })
+  page.settings.initialInventory.gold = 123
+  page.settings.productionWeights.exp = 2
+  reopenDialog()
+  expect(page.settings).toMatchObject({
+    warmupDays: 1,
+    sampleDays: 7,
+    seed: 99,
+    droneRoom: '',
+    operatorMode: 'custom',
+    operatorText: '阿米娅,2,80',
+    inventorySource: 'manual',
+    initialInventory: { gold: 123 },
+    productionWeights: { exp: 2 },
+    allowGoldDebt: false,
+    jayeElite0: true,
+    weightMode: 'custom'
+  })
+  expect(io.client.put).not.toHaveBeenCalled()
+  expect(io.client.post).not.toHaveBeenCalled()
+  expect(workers).toHaveLength(0)
+})
+it('preserves edited cached quantities while reading fresh untouched resources', async () => {
+  await page.readCache()
+  page.settings.cachedInventory.gold = 222
+  reopenDialog()
+  const fresh = cache()
+  fresh.inventory.gold = 20
+  fresh.inventory.lmd = 99
+  io.client.get.mockResolvedValueOnce({ data: fresh })
+  await page.readCache({ preserveOverrides: true })
+  expect(page.settings.cachedInventory).toMatchObject({ gold: 222, lmd: 99 })
+  await page.readCache()
+  expect(page.settings.cachedInventory.gold).toBe(10)
+  reopenDialog()
+  await page.readCache({ preserveOverrides: true })
+  expect(page.settings.cachedInventory.gold).toBe(10)
+})
+it('keeps an inventory override when a fresh cache temporarily matches the edited value', async () => {
+  await page.readCache()
+  page.settings.cachedInventory.gold = 222
+  reopenDialog()
+  const matching = cache()
+  matching.inventory.gold = 222
+  io.client.get.mockResolvedValueOnce({ data: matching })
+  await page.readCache({ preserveOverrides: true })
+  await page.readWeights()
+  reopenDialog()
+  await page.readCache({ preserveOverrides: true })
+  expect(page.settings.cachedInventory.gold).toBe(222)
+})
+it('restores defaults without changing shared settings or the retained result', async () => {
+  await page.readCache()
+  await page.readWeights()
+  const result = { success: true, marker: 'existing result' }
+  page.state.result = result
+  page.settings.sampleDays = 5
+  page.settings.cachedInventory.gold = 777
+  page.settings.weightMode = 'custom'
+  page.settings.productionWeights.exp = 5
+  page.resetSettings()
+  expect(page.settings).toMatchObject({
+    warmupDays: 3,
+    sampleDays: 28,
+    seed: 42,
+    droneRoom: 'room_1_1',
+    operatorMode: 'cache',
+    inventorySource: 'cache',
+    weightMode: 'mower',
+    cachedInventory: { gold: 10 },
+    productionWeights: { exp: 1 },
+    mowerAlgorithm: 2
+  })
+  expect(page.settings.mowerWeights.exp).toBe(0.9568)
+  expect(page.state.result).toEqual(result)
+  expect(localStorage.getItem(INCOME_PREFERENCES_KEY)).toBeNull()
+  expect(io.client.put).not.toHaveBeenCalled()
+  reopenDialog()
+  expect(page.settings.sampleDays).toBe(28)
+})
+it('retains reset defaults after a pending initial cache read', async () => {
+  await page.readCache()
+  page.settings.cachedInventory.gold = 777
+  reopenDialog()
+  let resolve
+  io.client.get.mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done
+    })
+  )
+  const loading = page.readCache({ preserveOverrides: true })
+  page.resetSettings()
+  resolve({ data: cache() })
+  await loading
+  expect(page.settings.cachedInventory.gold).toBe(10)
+})
+it('keeps active parameters when browser storage rejects writes', () => {
+  localStorage.setItem.mockImplementation(() => {
+    throw new Error('quota')
+  })
+  page.settings.sampleDays = 7
+  expect(page.settings.sampleDays).toBe(7)
+  expect(page.preferencesError.value).toContain('未能保存')
+  vi.restoreAllMocks()
+})
+it('does not reset a calculation while it is running', () => {
+  page.settings.sampleDays = 7
+  page.state.running = true
+  page.resetSettings()
+  expect(page.settings.sampleDays).toBe(7)
+})
+it('falls back to the captured default when the remembered drone room is absent', () => {
+  localStorage.setItem(
+    INCOME_PREFERENCES_KEY,
+    JSON.stringify({ version: 1, settings: { droneRoom: 'room_3_3', sampleDays: 7 } })
+  )
+  reopenDialog()
+  expect(page.settings.droneRoom).toBe('room_1_1')
+  expect(page.settings.sampleDays).toBe(7)
+})
+it.each([
+  ['cache first', false, undefined, 'room_1_1'],
+  ['snapshot first', true, undefined, 'room_1_1'],
+  ['cache first with explicit disable', false, '', ''],
+  ['snapshot first with explicit disable', true, '', '']
+])(
+  'preserves the drone choice when loading %s',
+  async (_, snapshotFirst, savedTarget, expected) => {
+    const snapshot = props.snapshot
+    props.snapshot = null
+    if (savedTarget !== undefined)
+      localStorage.setItem(
+        INCOME_PREFERENCES_KEY,
+        JSON.stringify({ version: 1, settings: { droneRoom: savedTarget } })
+      )
+    reopenDialog()
+    let resolveCache
+    io.client.get.mockReturnValueOnce(new Promise((resolve) => (resolveCache = resolve)))
+    const loading = page.readCache({ preserveOverrides: true })
+    if (snapshotFirst) {
+      props.snapshot = snapshot
+      await nextTick()
+    }
+    resolveCache({ data: cache() })
+    await loading
+    await page.readWeights()
+    const pending = JSON.parse(localStorage.getItem(INCOME_PREFERENCES_KEY)).settings
+    if (!snapshotFirst && savedTarget === undefined) expect(pending).not.toHaveProperty('droneRoom')
+    else expect(pending.droneRoom).toBe(expected)
+    if (!snapshotFirst) {
+      props.snapshot = snapshot
+      await nextTick()
+    }
+    expect(page.settings.droneRoom).toBe(expected)
+    await page.restoreResult()
+    await page.start()
+    expect(workers[0].postMessage.mock.calls[0][0].settings.droneRoom).toBe(expected)
+    page.session.cancel()
+    props.snapshot = null
+    reopenDialog()
+    await page.readCache({ preserveOverrides: true })
+    props.snapshot = snapshot
+    await nextTick()
+    expect(page.settings.droneRoom).toBe(expected)
+  }
+)
+it('does not remember an uninitialized drone target when other parameters change', async () => {
+  const snapshot = props.snapshot
+  props.snapshot = null
+  reopenDialog()
+  page.settings.sampleDays = 7
+  expect(JSON.parse(localStorage.getItem(INCOME_PREFERENCES_KEY)).settings).not.toHaveProperty(
+    'droneRoom'
+  )
+  reopenDialog()
+  props.snapshot = snapshot
+  await nextTick()
+  expect(page.settings.sampleDays).toBe(7)
+  expect(page.settings.droneRoom).toBe('room_1_1')
+})
+it('does not save the empty target while the snapshot watcher is still queued', async () => {
+  const snapshot = props.snapshot
+  props.snapshot = null
+  reopenDialog()
+  await nextTick()
+  let resolveCache
+  io.client.get.mockReturnValueOnce(new Promise((resolve) => (resolveCache = resolve)))
+  const loading = page.readCache({ preserveOverrides: true })
+  resolveCache({ data: cache() })
+  props.snapshot = snapshot
+  await loading
+  await nextTick()
+  expect(page.settings.droneRoom).toBe('room_1_1')
+  expect(JSON.parse(localStorage.getItem(INCOME_PREFERENCES_KEY)).settings.droneRoom).not.toBe('')
+})
 it('reads cached ownership and stock without writing configuration', async () => {
   await page.readCache()
   await page.readWeights()
@@ -104,10 +324,10 @@ it('retains the settings request failure as the cause of the displayed error', a
   io.client.get.mockRejectedValueOnce(failure)
 
   await expect(page.readWeights()).rejects.toMatchObject({
-    message: 'Mower 收益设置读取失败，可重试或选择本次自定义',
+    message: 'Mower 收益设置读取失败，可重试或选择自定义权重',
     cause: failure
   })
-  expect(page.weightsError.value).toBe('Mower 收益设置读取失败，可重试或选择本次自定义')
+  expect(page.weightsError.value).toBe('Mower 收益设置读取失败，可重试或选择自定义权重')
   expect(page.weightsBusy.value).toBe(false)
   expect(workers).toHaveLength(0)
 })
@@ -239,8 +459,10 @@ it('restores the last result with its original plan image after reopening with a
   loadIncomeArchive.mockResolvedValue(saved)
   scope = effectScope()
   page = scope.run(() => Dialog.setup(props, { expose: vi.fn(), emit: vi.fn() }))
+  page.settings.sampleDays = 7
   await page.restoreResult()
   await page.exportImage()
+  expect(page.settings.sampleDays).toBe(7)
   expect(page.activeTab.value).toBe('results')
   expect(renderIncomeImage.mock.calls.at(-1)).toEqual([
     saved.snapshot.image,

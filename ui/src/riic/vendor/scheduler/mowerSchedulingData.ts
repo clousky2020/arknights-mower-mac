@@ -4,7 +4,7 @@ import {isTradeRunOrderOperator} from '../domain/shiftRunPolicy'
 import {mowerRestingBindingGroups,mowerSharedReplacements,mowerSameGroupPrimaryReplacement} from './mowerSharedGroups'
 // Decision state for the pinned Mower port. Reservations do not imply physical occupancy.
 // Source: c6bdbb292fe7fcd84c6dfb66154a12a1a9bc5b88 (MIT, Copyright 2021 Nano).
-import {MowerOperatorState,hasRestingMood,restingMood,type MowerMoodPolicy} from './mowerOperatorState'
+import {MowerOperatorState,hasRestingMood,restingMood,type MowerCalculatedMoodSnapshot,type MowerMoodPolicy} from './mowerOperatorState'
 import {type MowerTaskPlan,toMowerMicros} from './mowerTaskQueue'
 export interface MowerDateTimeValue {timeMicros:number}
 export class MowerDormState {
@@ -12,11 +12,13 @@ export class MowerDormState {
  reset(){this.name='';this.timeMicros=undefined}
 }
 export interface MowerSchedulingDataOptions {
+ calculatedMoodSnapshot?:MowerCalculatedMoodSnapshot
+ calculatedMoodObservations?:Readonly<Record<string,number>>
  backupGroupTasks?:readonly (readonly MowerBackupGroupTask[])[]
  backupExplicitTasks?:readonly MowerTaskPlan[]
  adjustForRunOrders?:boolean
  dormIsolation?:string[][]
- alpha?:boolean;priorityReplacement?:string[];freeRoomExclusions?:string[];dormOrder?:string[];standbyNames?:string[]
+ alpha?:boolean;priorityReplacement?:string[];freeRoomExclusions?:string[];dormOrder?:string[];standbyNames?:string[];lowPriorityNames?:string[]
  plan:Record<string,string[]>;operators:Record<string,MowerOperatorState>;dorms:MowerDormState[];nowMicros:number;partyTime?:MowerDateTimeValue|boolean|null;runOrderRooms?:Record<string,Record<string,never>>
  policy?:Partial<MowerMoodPolicy>;freeRoom?:boolean;powerPlantCount?:number;planConditions?:boolean[];backupGroup?:string
  urgentRecoverySupporters?:Record<string,string[]>
@@ -32,13 +34,15 @@ export interface MowerSchedulingDataOptions {
  reservedProductReplacements?:Set<string>;reservedProductBeds?:Map<string,string>;emergencyDormAgents?:Set<string>
 }
 export class MowerSchedulingData {
+ calculatedMoodSnapshot:MowerCalculatedMoodSnapshot|undefined
+ calculatedMoodObservations:Record<string,number>
  backupGroupTasks:readonly (readonly MowerBackupGroupTask[])[]
  backupExplicitTasks:readonly MowerTaskPlan[]
  adjustForRunOrders:boolean|undefined
  /** Runtime uses October 3 alpha; frozen September fixtures retain their source contract. */
  dormIsolation:string[][]
  alpha:boolean;priorityReplacement:string[];freeRoomExclusions:string[];dormOrder:string[]
- standbyNames:string[]
+ standbyNames:string[];lowPriorityNames:string[]
  plan:Record<string,string[]>;operators:Record<string,MowerOperatorState>;dorms:MowerDormState[];nowMicros:number;partyTime?:MowerDateTimeValue|boolean|null;runOrderRooms:Record<string,Record<string,never>>
  recoveryOrderVersion=0
  policy:MowerMoodPolicy;freeRoom:boolean;powerPlantCount:number;planConditions:boolean[];backupGroup:string
@@ -54,12 +58,14 @@ export class MowerSchedulingData {
  unregisteredIdleNames:string[];dormMoodEstimates:Map<string,[number,number]>;idleDormSearchExhausted:boolean;idleDormSearchStoppedAtMicros:number|undefined
  reservedProductReplacements:Set<string>;reservedProductBeds:Map<string,string>;emergencyDormAgents:Set<string>
  constructor(o:MowerSchedulingDataOptions){
+  this.calculatedMoodObservations={...o.calculatedMoodObservations}
+  this.calculatedMoodSnapshot=o.calculatedMoodSnapshot?Object.freeze({timeMicros:o.calculatedMoodSnapshot.timeMicros,values:Object.freeze({...o.calculatedMoodSnapshot.values})}):undefined
   this.backupExplicitTasks=o.backupExplicitTasks??[]
   this.backupGroupTasks=o.backupGroupTasks??[]
   this.dormIsolation=(o.dormIsolation??[]).map(group=>[...group])
   this.adjustForRunOrders=o.adjustForRunOrders
   this.alpha=o.alpha??false;this.priorityReplacement=o.priorityReplacement??[];this.freeRoomExclusions=o.freeRoomExclusions??[];this.dormOrder=o.dormOrder??[]
-  this.standbyNames=o.standbyNames??[];Object.values(o.operators).forEach(op=>{op.alpha=this.alpha})
+  this.standbyNames=o.standbyNames??[];this.lowPriorityNames=[...(o.lowPriorityNames??[])];Object.values(o.operators).forEach(op=>{op.alpha=this.alpha})
   this.plan=o.plan;this.operators=o.operators;this.dorms=o.dorms;this.nowMicros=o.nowMicros;this.partyTime=o.partyTime;this.runOrderRooms=o.runOrderRooms??{}
   if(this.alpha)for(const op of Object.values(this.operators)){
    op.shiftGroup=undefined
@@ -70,6 +76,8 @@ export class MowerSchedulingData {
    if(resting.length===1){op.shiftGroup=resting[0]!.group;if(op.shiftGroup){op.group=op.shiftGroup;op.replacement=[...op.replacementsForGroup(op.group)]}}
   }
   this.policy={restingThreshold:.65,rescueThreshold:.75,experimentalDormLogic:false,...o.policy,alpha:this.alpha,groupRestingThresholds:{...o.policy?.groupRestingThresholds}}
+  if(!this.policy.predictiveMoodControl)this.calculatedMoodSnapshot=undefined
+  for(const op of Object.values(this.operators))op.calculatedMoodSnapshot=this.calculatedMoodSnapshot
   this.freeRoom=o.freeRoom??false;this.powerPlantCount=o.powerPlantCount??2;this.planConditions=o.planConditions??[];this.backupGroup=o.backupGroup??'default'
   this.urgentRecoverySupporters=Object.fromEntries(Object.entries(o.urgentRecoverySupporters??{}).map(([name,supporters])=>[name,[...supporters]]))
   this.groupRecoveryReturnMicros={...o.groupRecoveryReturnMicros}

@@ -177,6 +177,7 @@ export const useConfigStore = defineStore('config', () => {
   const recruit_enable = ref(true)
   const recruitment_permit = ref(30)
   const recruit_robot = ref(true)
+  const recruit_auto_robot = ref(false)
   const recruit_auto_only5 = ref(true)
   const run_order_grandet_mode = ref({})
   const product_switching = ref({})
@@ -212,6 +213,7 @@ export const useConfigStore = defineStore('config', () => {
   const group_mood_gap_exclusions = ref([])
   const fia_fool = ref(true)
   const assistant_follows_schedule = ref(false)
+  const mastery_consecutive_skills = ref(false)
   const enable_mastery = ref(true)
   const save_mastery_screenshots = ref(false)
   const sign_in = ref({ enable: true })
@@ -656,6 +658,7 @@ export const useConfigStore = defineStore('config', () => {
       recruit_enable.value = response.data.recruit_enable
       recruitment_permit.value = response.data.recruitment_permit
       recruit_robot.value = response.data.recruit_robot
+      recruit_auto_robot.value = response.data.recruit_auto_robot ?? false
       recruit_auto_only5.value = response.data.recruit_auto_only5
       run_order_grandet_mode.value = {
         enable: false,
@@ -702,6 +705,7 @@ export const useConfigStore = defineStore('config', () => {
       group_mood_gap_exclusions.value = [...(response.data.group_mood_gap_exclusions ?? [])]
       fia_fool.value = response.data.fia_fool
       assistant_follows_schedule.value = response.data.assistant_follows_schedule
+      mastery_consecutive_skills.value = response.data.mastery_consecutive_skills ?? false
       enable_mastery.value = response.data.enable_mastery ?? true
       save_mastery_screenshots.value = response.data.save_mastery_screenshots ?? false
       right_side_room_order.value =
@@ -866,6 +870,7 @@ export const useConfigStore = defineStore('config', () => {
       recruit_enable: recruit_enable.value,
       recruitment_permit: recruitment_permit.value,
       recruit_robot: recruit_robot.value,
+      recruit_auto_robot: recruit_auto_robot.value,
       recruit_auto_only5: recruit_auto_only5.value,
       run_order_grandet_mode: run_order_grandet_mode.value,
       product_switching: product_switching.value,
@@ -901,6 +906,7 @@ export const useConfigStore = defineStore('config', () => {
       group_mood_gap_exclusions: [...group_mood_gap_exclusions.value],
       fia_fool: fia_fool.value,
       assistant_follows_schedule: assistant_follows_schedule.value,
+      mastery_consecutive_skills: mastery_consecutive_skills.value,
       enable_mastery: enable_mastery.value,
       save_mastery_screenshots: save_mastery_screenshots.value,
       sign_in: sign_in.value,
@@ -1237,6 +1243,7 @@ export const useConfigStore = defineStore('config', () => {
     recruit_enable,
     recruitment_permit,
     recruit_robot,
+    recruit_auto_robot,
     recruit_auto_only5,
     skland_enable,
     ai_type,
@@ -1280,6 +1287,7 @@ export const useConfigStore = defineStore('config', () => {
     group_mood_gap_exclusions,
     fia_fool,
     assistant_follows_schedule,
+    mastery_consecutive_skills,
     enable_mastery,
     save_mastery_screenshots,
     sign_in,

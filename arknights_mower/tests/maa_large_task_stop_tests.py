@@ -29,14 +29,16 @@ def test_mower_stop_cancels_large_task_closes_game_and_releases_without_wait(
     solver.MAA = MagicMock()
     solver.device = MagicMock()
     solver.recog = MagicMock()
+    solver.scene = MagicMock(return_value=base_schedule.Scene.TERMINAL_MAIN)
     solver.tasks = [SchedulerTask(time=datetime.now() + timedelta(hours=2))]
     solver.last_execution = {"maa": None}
     for method in (
         "back_to_index",
+        "scene_graph_navigation",
         "initialize_maa",
         "release_maa",
         "maa_stop",
-        "restore_maa_theme",
+        "append_maa_theme_task",
         "rest_until_next_task",
         "sleep",
         "to_reclamation",
@@ -72,7 +74,7 @@ def test_mower_stop_cancels_large_task_closes_game_and_releases_without_wait(
         solver.maa_plan_solver([])
     assert order.mock_calls[1:4] == [call.stop(), call.close_game(), call.release()]
     solver.sleep.assert_not_called()
-    solver.restore_maa_theme.assert_not_called()
+    solver.append_maa_theme_task.assert_not_called()
     solver.rest_until_next_task.assert_not_called()
     solver.device.check_current_focus.assert_not_called()
     assert len(solver.tasks) == 1

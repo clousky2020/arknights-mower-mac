@@ -6,6 +6,8 @@ import {compileRosterSchedule} from './compileRosterSchedule'
 import {compiledScheduleToRuntimeConfig} from './scheduleAdapter'
 import {createRosterRuntime} from './rosterRuntime'
 import {createBackupPlanController} from './backupPlans'
+import {alphaRestingTier} from './mowerAlphaDorm'
+import {projectMowerArrangements} from './mowerObservations'
 
 const fields = ['rest_in_full', 'exhaust_require', 'workaholic', 'resting_priority', 'resting_priority_replacement', 'free_room_exclusions', 'resting_standby', 'free_blacklist', 'refresh_trading', 'refresh_drained', 'ope_resting_priority'] as const
 function setup(conf: Record<string, unknown>, backups: Record<string, unknown>[]) {
@@ -22,6 +24,22 @@ function setup(conf: Record<string, unknown>, backups: Record<string, unknown>[]
 }
 
 describe('Mower alpha backup config layering', () => {
+  it('applies and removes low-priority replacement protection through runtime rebuilding', () => {
+    const {state, activate} = setup({}, [{resting_priority: '香草'}])
+    const name = id('香草'), source = getMowerSourceRuntime(state)
+    source.data.operators[name]!.mood = 10; source.data.operators[name]!.timeStampMicros = 0
+    expect(alphaRestingTier(source.data, name)).toBe(5)
+    activate([true])
+    const active = getMowerSourceRuntime(state).data
+    expect(alphaRestingTier(active, name)).toBe(2)
+    expect(active.operators[name]!.isHigh()).toBe(false)
+    const projected = projectMowerArrangements(active, [])
+    expect(alphaRestingTier(projected, name)).toBe(2)
+    projected.lowPriorityNames.length = 0
+    expect(alphaRestingTier(active, name)).toBe(2)
+    activate([false])
+    expect(alphaRestingTier(getMowerSourceRuntime(state).data, name)).toBe(5)
+  })
   it.each(fields)('adds then removes %s entries, permits later re-addition and restores earlier layers', field => {
     const {base, state, controller, activate} = setup({[field]: ['芬']}, [
       {[field]: '香草,芬', removed_operators: {[field]: '芬,香草'}},
@@ -159,6 +177,34 @@ describe('Mower alpha backup config layering', () => {
     Object.assign(previous.operators[id('砾')]!, {currentRoom: 'room_1_1', currentIndex: 1, timeStampMicros: 0})
     const next = state.mowerShiftModel!.swap(previous, [true])
     expect(state.mowerShiftModel!.transition(previous, next, [false], [true]).room_1_1).toEqual([id('砾'), id('芬')])
+  })
+
+  it.each(['room_1_2', 'room_3_1'] as const)('preserves same-facility recovery when relocating to %s', destination => {
+    const workspace = createDefaultWorkspace()
+    const slot = (name: string, group: string, cover: string) => ({occupant: {kind: 'operator' as const, operatorId: id(name)}, groupId: group, replacements: [id(cover)]})
+    workspace.mainPlan.facilities.room_1_1.slots = [slot('芬', 'resting', '香草')]
+    workspace.mainPlan.facilities[destination].slots = [slot('砾', 'working', '香草')]
+    workspace.mainPlan.facilities.dormitory_1.slots = Array.from({length: 5}, () => ({occupant: {kind: 'free' as const}, groupId: null, replacements: []}))
+    workspace.compatibility.backupPlans = [{trigger: 'False', plan: {
+      room_1_1: {plans: [{agent: '砾', group: 'working', replacement: ['香草']}]},
+      [destination]: {plans: [{agent: '芬', group: 'resting', replacement: ['香草']}]},
+    }}]
+    const base = compileRosterSchedule(workspace), config = compiledScheduleToRuntimeConfig(base)
+    config.mowerAlpha = true
+    const state = createRosterRuntime(config)
+    createBackupPlanController(base, state)
+    const previous = getMowerSourceRuntime(state).data
+    Object.assign(previous.operators[id('芬')]!, {currentRoom: 'dormitory_1', currentIndex: 2, mood: 5, timeStampMicros: 0})
+    Object.assign(previous.operators[id('香草')]!, {currentRoom: 'room_1_1', currentIndex: 0, mood: 24, timeStampMicros: 0})
+    Object.assign(previous.operators[id('砾')]!, {currentRoom: destination, currentIndex: 0, mood: 24, timeStampMicros: 0})
+    previous.dorms[0]!.name = id('芬');previous.dorms[0]!.timeMicros = 3_600_000_000
+    previous.groupShiftState = {resting: true, working: false}
+    const next = state.mowerShiftModel!.swap(previous, [true])
+    const transition = state.mowerShiftModel!.transition(previous, next, [false], [true])
+    expect(transition.room_1_1).toEqual([id('砾')])
+    expect(transition[destination]).toEqual([id(destination === 'room_1_2' ? '香草' : '芬')])
+    expect(previous.operators[id('芬')]!.currentRoom).toBe('dormitory_1')
+    expect(previous.dorms[0]!.timeMicros).toBe(3_600_000_000)
   })
 
   it('keeps a resting primary in its bed when a backup changes the allowed replacement', () => {

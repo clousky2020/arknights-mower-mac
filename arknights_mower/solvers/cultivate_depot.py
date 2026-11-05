@@ -19,7 +19,7 @@ from arknights_mower.utils.skland import (
     restore_cached_session,
     skland_cache,
 )
-from arknights_mower.utils.workshop_data import parse_roster
+from arknights_mower.utils.workshop_data import parse_roster, valid_inventory_items
 
 _refresh_lock = Lock()
 
@@ -113,12 +113,7 @@ class cultivate:
                     }
                 items = resp.get("data", {}).get("items")
                 if items is not None:
-                    if not isinstance(items, list) or any(
-                        not isinstance(entry, dict)
-                        or not isinstance(entry.get("id"), str)
-                        or not str(entry.get("count", "")).isdigit()
-                        for entry in items
-                    ):
+                    if not valid_inventory_items(items):
                         raise ValueError("森空岛返回的库存数据无效")
                     # Use request start, not completion: a concurrent craft must win.
                     resp = {**resp, "_mower_inventory_observed_at": observed_at}

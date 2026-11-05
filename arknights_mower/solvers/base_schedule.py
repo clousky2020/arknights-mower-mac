@@ -1108,6 +1108,35 @@ class BaseSchedulerSolver(
                 # 实读完成或任务本身是读取前置时，不保留旧门控的观察挂起。
                 task.__dict__.pop("startup_observation_pending", None)
             failure = getattr(task, "execution_failure", None)
+            if failure:
+                from arknights_mower.utils.retained_recovery import (
+                    completed_ordinary_rest_request,
+                )
+
+                if completed_ordinary_rest_request(self.op_data, task):
+                    self.tasks = [
+                        pending for pending in self.tasks if pending is not task
+                    ]
+                    logger.debug("普通下班目标已实际入住，完成原请求：%s", task)
+                    continue
+            if failure and (waiting := getattr(task, "mastery_mood_wait", None)):
+                from arknights_mower.utils.mastery_mood import (
+                    support_mood_context,
+                    support_mood_shortages,
+                )
+
+                changed = (
+                    support_mood_context(waiting["plan_id"], self.op_data)
+                    != waiting["context"]
+                )
+                if not changed and support_mood_shortages(
+                    self.op_data, waiting["required"]
+                ):
+                    continue
+                del task.execution_failure
+                del task.mastery_mood_wait
+                task.execution_retained = True
+                continue
             if failure and (pending := getattr(task, "credit_shop_pending", None)):
                 if CreditShop.can_resume(self.recog, pending):
                     del task.execution_failure
@@ -3352,6 +3381,11 @@ class BaseSchedulerSolver(
                         self._prepare_correction_recovery(self.task)
                         self._prepare_group_shift(self.task)
                         self._prepare_shift_cycle(self.task)
+                        if self.task.time > datetime.now():
+                            self.tasks.sort(key=lambda pending: pending.time)
+                            self.task = None
+                            self.skip()
+                            return True
                         self._defer_conflicting_product_shift_slots(self.task)
                         if (
                             getattr(self.task, "initial_staffing", False)
@@ -5110,15 +5144,18 @@ class BaseSchedulerSolver(
                 return
             settings = snapshot.settings
             is_9colored = agent == "九色鹿"
+            deer_page_changed = object()
 
             def deer_gap():
                 for attempt in range(3):
-                    self.recog.update()
+                    if attempt:
+                        self.sleep()
+                        self.recog.update()
+                        if self.factory_scene() != Scene.FACTORY_DASHBOARD:
+                            return deer_page_changed
                     causality = self.digit_reader.get_deer_causality(self.recog.gray)
                     if causality is not None:
                         return 40 - causality
-                    if attempt < 2:
-                        self.sleep()
                 logger.error("九色鹿因果数字模板匹配失败，停止加工")
                 return None
 
@@ -5233,12 +5270,19 @@ class BaseSchedulerSolver(
                 ):  # 检测是否超过 5 分钟
                     raise Exception("循环运行时间超过 5 分钟，可能卡死")
                 scene = self.factory_scene()
+                if tasks[0] == "open_formula" and scene in (
+                    Scene.FACTORY_ROOM,
+                    Scene.INFRA_MAIN,
+                ):
+                    tasks[0] = "select"
                 if scene == Scene.UNKNOWN:
                     unknown_cnt += 1
                     if unknown_cnt > 5:
                         unknown_cnt = 0
                         self.back_to_infrastructure()
                         self.enter_room("factory")
+                        if tasks[0] == "open_formula":
+                            tasks[0] = "select"
                     else:
                         self.sleep()
                 elif scene == Scene.CONNECTING:
@@ -5250,14 +5294,20 @@ class BaseSchedulerSolver(
                 elif scene == Scene.FACTORY_DASHBOARD:
                     if tasks[0] == "enter":
                         if is_9colored:
-                            gap = deer_gap()
+                            observed_gap = deer_gap()
+                            if observed_gap is deer_page_changed:
+                                continue
+                            gap = observed_gap
                             if gap is None:
                                 return
                             logger.debug(f"初次记录九色鹿技能差值{gap}")
                         del tasks[0]
                     elif tasks[0] == "select":
                         if is_9colored:
-                            gap = deer_gap()
+                            observed_gap = deer_gap()
+                            if observed_gap is deer_page_changed:
+                                continue
+                            gap = observed_gap
                             if gap is None:
                                 return
                             tab_queue = deque(available_groups().items())
@@ -5267,6 +5317,10 @@ class BaseSchedulerSolver(
                                 )
                                 break
                         self.tap(scale_point(self.recog, OPEN_FORMULA), interval=0.5)
+                        tasks[0] = "open_formula"
+                    elif tasks[0] == "open_formula":
+                        # 点击后迟到的工作台帧只继续现有观察，不重复输入或读因果。
+                        pass
                     else:
                         add_btn = (self.recog.w * 0.84, self.recog.h * 0.4)
                         inventory_data = get_inventory_counts()
@@ -5303,7 +5357,10 @@ class BaseSchedulerSolver(
                                 )
                                 else self.op_data.operators[agent].mood
                             )
-                            gap = deer_gap()
+                            observed_gap = deer_gap()
+                            if observed_gap is deer_page_changed:
+                                continue
+                            gap = observed_gap
                             if gap is None:
                                 return
                             logger.debug(f"九色鹿技能差值{gap}")
@@ -5472,6 +5529,8 @@ class BaseSchedulerSolver(
                         tasks.insert(0, "select")
                         reset_scan = True
                 elif scene == Scene.FACTORY_FORMULA:
+                    if tasks[0] == "open_formula":
+                        tasks[0] = "select"
                     if tasks[0] in ["enter", "process"]:
                         self.back()
                     else:
@@ -5694,19 +5753,20 @@ class BaseSchedulerSolver(
         self.reset_room_time(room)
 
     def _queue_missing_run_order_reads(self):
-        """换班等待或失败让出调度后，保留尚未读取订单的独立责任。"""
+        """补齐订单读取责任；初始化或维护尚未就绪时返回 False。"""
         if self._initial_mood_read_pending() or getattr(
             self, "_initial_staffing_pending", False
         ):
-            return
+            return False
         if getattr(self, "maintenance_entry_pending", False) or any(
             getattr(task, "maintenance_replacement_run", False) for task in self.tasks
         ):
-            return
+            return False
         self._sync_run_order_tasks()
         for room in self.op_data.run_order_rooms:
             if self._emergency_run_order_available(room):
                 self._queue_order_refresh(room)
+        return True
 
     def _room_mood_signature(self, room):
         return tuple(
@@ -5907,6 +5967,11 @@ class BaseSchedulerSolver(
         for order_room in self.op_data.run_order_rooms:
             if self._emergency_run_order_available(order_room):
                 self._queue_order_refresh(order_room)
+        self._read_pending_order_times(room)
+        return False
+
+    def _read_pending_order_times(self, room=None):
+        """消费可执行的订单读取任务，失败保留原任务并让出调度。"""
         refreshes = [
             refresh
             for refresh in task_view(self.tasks, TaskScope.DISPATCH, self.op_data)
@@ -5930,7 +5995,7 @@ class BaseSchedulerSolver(
             except (MowerExit, DeviceRecoveryError, SharedADBError):
                 raise
             except Exception as e:
-                logger.warning("入驻后读取订单失败，保留独立刷新任务：%s", e)
+                logger.warning("读取订单失败，保留独立刷新任务：%s", e)
                 self._retain_failed_task(refresh, str(e), [refresh.meta_data])
                 self.back_to_infrastructure()
                 continue
@@ -5938,7 +6003,6 @@ class BaseSchedulerSolver(
                 self.tasks[:] = [task for task in self.tasks if task is not refresh]
         if observed_any:
             scheduling(self.tasks, op_data=self.op_data)
-        return False
 
     def _arrangement_room_budget(self, room, plan):
         operation = SchedulerTask(
@@ -6477,6 +6541,11 @@ class BaseSchedulerSolver(
                 continue
             # 忽略掉心情值没低于上限的的
             if mood > self.op_data.resting_mood_threshold(op):
+                continue
+            members = (
+                self.op_data.shift_group_members(op.group) if op.group else [op.name]
+            )
+            if self._has_pending_exhausted_shift(members):
                 continue
             previous_plan = copy.deepcopy(_plan)
             if op.group != "":
@@ -9717,6 +9786,96 @@ class BaseSchedulerSolver(
                         ):
                             continue
                     raise ValueError("原下班目标未完成，保留原任务并等待岗位释放")
+            if (
+                task.type == TaskTypes.SHIFT_ON
+                and not getattr(task, "initial_staffing", False)
+                and not task.retains_execution
+                and not getattr(task, "group_shift_expected", {})
+                and not getattr(task, "backup_shift_active", False)
+                and not getattr(task, "product_shift_locked", False)
+                and not explicit_slots
+                and not getattr(task, "exhaust_support", False)
+                and not getattr(task, "dorm_recovery_restore", ())
+            ):
+                from arknights_mower.utils.group_recovery import (
+                    restored_group_recovery_deadline,
+                    split_recovery_return,
+                )
+
+                effective = self.op_data.project_arrangements([])
+                if error := effective.swap_plan(
+                    conditions,
+                    refresh=True,
+                    backup_group=simulation.op_data.backup_group,
+                ):
+                    raise ValueError(error)
+                delayed_groups = set()
+                deadline = restored_group_recovery_deadline(
+                    self.op_data,
+                    effective,
+                    returning_groups,
+                    now=projection_now,
+                    delayed_groups=delayed_groups,
+                )
+                if deadline is not None:
+                    # 附带宿舍重排分别重算，不能把无关组的回班也连成恢复依赖。
+                    split = SchedulerTask(
+                        task.time,
+                        {
+                            room: list(row)
+                            for room, row in intent.items()
+                            if not room.startswith("dorm")
+                        },
+                        task.type,
+                    )
+                    independent = []
+                    split_recovery_return(
+                        self.op_data,
+                        split,
+                        independent,
+                        [
+                            name
+                            for group in delayed_groups
+                            for name in effective.shift_group_members(group)
+                        ],
+                    )
+                    if independent:
+                        for sibling in independent:
+                            source_times = []
+                            for source in (task, *coalesced):
+                                if source is not task and id(source) not in consumed:
+                                    continue
+                                source_intent = getattr(
+                                    source, "backup_shift_intent", source.plan
+                                )
+                                if any(
+                                    name != "Current"
+                                    and source_intent.get(room, [])[index : index + 1]
+                                    == [name]
+                                    for room, row in sibling.plan.items()
+                                    for index, name in enumerate(row)
+                                ):
+                                    source_times.append(source.time)
+                            sibling.time = min(source_times, default=task.time)
+                        trial_solver = copy.copy(self)
+                        trial = copy.deepcopy(task)
+                        trial.plan = split.plan
+                        trial.group_shift_transitions = {}
+                        trial.__dict__.pop("backup_shift_intent", None)
+                        trial.__dict__.pop("backup_shift_conditions", None)
+                        trial.time = max(task.time, deadline)
+                        trial_solver.tasks, trial_solver.task = [*pending, trial], trial
+                        for sibling in independent:
+                            trial_solver.tasks.append(sibling)
+                            trial_solver.task = sibling
+                            trial_solver._prepare_shift_cycle(sibling)
+                        task.__dict__.update(trial.__dict__)
+                        self.tasks[:] = [
+                            task if queued is trial else queued
+                            for queued in trial_solver.tasks
+                        ]
+                        return
+                    task.time = max(task.time, deadline)
             task.group_shift_transitions = {
                 group: resting
                 for group, resting in simulation.op_data.group_shift_state.items()
@@ -14195,6 +14354,18 @@ class BaseSchedulerSolver(
         start_time, finish_time = datetime.now(), datetime.now()
         observation = None
         previous_page = None
+
+        def uses_tail_search(name):
+            return (
+                not self.low_frame_rate_mode
+                and fast_mode
+                and is_dorm
+                and name != "阿米娅"
+                and name in self.op_data.operators
+                and self.op_data.operators[name].is_resting()
+                and name not in self.choose_error
+            )
+
         while len(agent) > 0:
             if retry_count > 1:
                 raise Exception("到达最大尝试次数 1次")
@@ -14222,6 +14393,16 @@ class BaseSchedulerSolver(
                     if len(agent) == 0:
                         break
                     index_change = True
+
+            if uses_tail_search(agent[0]):
+                # 同职业先顺路找普通目标，再跳末页；原名单仍用于最终槽位重排。
+                profession = agent_profession.get(agent[0])
+                for index, name in enumerate(agent[1:], 1):
+                    if agent_profession.get(
+                        name
+                    ) == profession and not uses_tail_search(name):
+                        agent.insert(0, agent.pop(index))
+                        break
 
             # 如果选中了人，则可能需要重新排序
             if index_change or first_time:
@@ -14287,15 +14468,7 @@ class BaseSchedulerSolver(
                     self.profession_filter("ALL")
                     right_swipe = 0
                     last_special_filter = "ALL"
-                if (
-                    not self.low_frame_rate_mode
-                    and agent[0] in self.op_data.operators
-                    and self.op_data.operators[agent[0]].is_resting()
-                    and fast_mode
-                    and is_dorm
-                    and agent[0] != "阿米娅"
-                    and agent[0] not in self.choose_error
-                ):
+                if uses_tail_search(agent[0]):
                     # 普通设备保留休息干员的末页快路；低帧率设备逐页确认。
                     tail_search_target = agent[0]
                     swipe_map = [20, 3, 5, 3, 3, 3, 3, 3, 3]
@@ -15379,7 +15552,7 @@ class BaseSchedulerSolver(
         return round((execute_time - datetime.now()).total_seconds(), 1)
 
     def _cancel_pending_shift_on(self, name):
-        """实际重新上岗后，撤销本人的旧回班预约，保留同批其他人的动作。"""
+        """实际上岗只撤销本人的旧工作目标，保留宿舍迁移和其他人的动作。"""
         locks_changed = False
         for task in task_view(self.tasks, TaskScope.REPLAN):
             if (
@@ -15389,7 +15562,8 @@ class BaseSchedulerSolver(
                 or not any(
                     name in names
                     for plan in (task.plan, getattr(task, "backup_shift_intent", {}))
-                    for names in plan.values()
+                    for room, names in plan.items()
+                    if not room.startswith("dorm")
                 )
             ):
                 continue
@@ -15400,9 +15574,12 @@ class BaseSchedulerSolver(
                 del task.backup_shift_intent
                 del task.backup_shift_conditions
             task.plan = {
-                room: ["Current" if agent == name else agent for agent in names]
+                room: names
+                if room.startswith("dorm")
+                else ["Current" if agent == name else agent for agent in names]
                 for room, names in task.plan.items()
-                if any(agent not in (name, "Current") for agent in names)
+                if room.startswith("dorm")
+                or any(agent not in (name, "Current") for agent in names)
             }
             locked = getattr(task, "product_shift_locked", False)
             locks_changed |= locked
@@ -16321,7 +16498,12 @@ class BaseSchedulerSolver(
                 if self.scene() in self.waiting_scene:
                     if not self.waiting_solver():
                         return
-                self._complete_room_arrangement(new_plan, room, plan)
+                self._complete_room_arrangement(
+                    new_plan,
+                    room,
+                    plan,
+                    settle_entry=choose_error == 0 and not selection_attempted,
+                )
                 if selection_attempted or choose_error > 0:
                     self.record_selection_success()
                 finished = True
@@ -16419,7 +16601,7 @@ class BaseSchedulerSolver(
                 continue
         return new_plan
 
-    def _complete_room_arrangement(self, new_plan, room, plan):
+    def _complete_room_arrangement(self, new_plan, room, plan, *, settle_entry=False):
         # 收尾返回仍属本轮安排；超时交回房间恢复，实读复核后再提交完成。
         keep_workshop = room == "factory" and (
             getattr(self, "_workshop_room_handoff", False) is True
@@ -16427,8 +16609,15 @@ class BaseSchedulerSolver(
         if not keep_workshop and (
             len(new_plan) != 1 or config.conf.run_order_buffer_time <= 0
         ):
-            self.back(0.5)
-            self._wait_for_room_exit()
+            if settle_entry and (room == "central" or room.startswith("room_")):
+                # 返回前复核当前房间，和退出确认共用一次预算。
+                deadline = monotonic() + self.performance_profile.transition_timeout
+                if self._wait_for_room_entry_before_exit(room, deadline=deadline):
+                    self.back(0.5)
+                    self._wait_for_room_exit(deadline=deadline)
+            else:
+                self.back(0.5)
+                self._wait_for_room_exit()
         if room in getattr(self.task, "dorm_recovery_restore", []):
             self.task.dorm_recovery_restore.remove(room)
         if getattr(self.task, "arrangement_retry_room", None) == room:
@@ -16436,10 +16625,30 @@ class BaseSchedulerSolver(
             del self.task.arrangement_retry_count
         del plan[room]
 
-    def _wait_for_room_exit(self):
+    def _wait_for_room_entry_before_exit(self, room, *, deadline):
+        """跳过换人时，一次新帧确认目标房间即可返回。"""
+        poll_interval = self.performance_profile.screenshot_interval / 1000
+        while True:
+            self.recog.update()
+            scene = self.scene()
+            if scene == Scene.INFRA_MAIN:
+                return False
+            confirmed = (
+                scene in (Scene.INFRA_DETAILS, Scene.CTRLCENTER_ASSISTANT)
+                and self.detect_room() == room
+            )
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise RecognizeError("返回前未确认目标房间，保留本房间安排")
+            if confirmed:
+                return True
+            self.sleep(min(poll_interval, remaining))
+
+    def _wait_for_room_exit(self, *, deadline=None):
         """确认已发送的返回键生效，再把地图交给下一次房间操作。"""
         profile = self.performance_profile
-        deadline = monotonic() + profile.transition_timeout
+        if deadline is None:
+            deadline = monotonic() + profile.transition_timeout
         poll_interval = profile.screenshot_interval / 1000
         while True:
             self.recog.update()
@@ -17223,7 +17432,6 @@ class BaseSchedulerSolver(
             if config.stop_mower.is_set():
                 raise MowerExit
             if not config.stop_maa.is_set():
-                self.restore_maa_theme()
                 # Close the native handle before applying a configuration change.
                 self.release_maa()
                 with backup_lock:
@@ -17768,8 +17976,8 @@ class BaseSchedulerSolver(
         self.maa_blackflow_task = None
         self.maa_event_shop_task = None
 
-    def restore_maa_theme(self):
-        """本轮 MAA 任务收尾时恢复指定主题，为下次调度预留时间。"""
+    def append_maa_theme_task(self):
+        """将主题恢复追加到当前队列，由调用者统一启动并处理停止。"""
         conf = config.conf
         if not conf.maa_restore_theme_enable or self.MAA is None:
             return
@@ -17779,15 +17987,6 @@ class BaseSchedulerSolver(
             return
         if config.stop_maa.is_set() or config.stop_mower.is_set():
             return
-
-        def next_task_time():
-            if getattr(getattr(self, "task", None), "type", None) in MANUAL_TASK_TYPES:
-                from arknights_mower.solvers.manual_tasks import manual_task_deadline
-
-                return manual_task_deadline(self)
-            return self.tasks[0].time
-
-        queued = False
         try:
             version = self.MAA.get_version()
             try:
@@ -17799,48 +17998,14 @@ class BaseSchedulerSolver(
                     f"恢复主题需要 MAA v6.17.3 或更高版本，当前为 {version}，跳过恢复"
                 )
                 return
-
-            deadline = min(
-                datetime.now() + timedelta(seconds=120),
-                next_task_time() - timedelta(seconds=5),
-            )
-            if (deadline - datetime.now()).total_seconds() < 10:
-                logger.info("距离下次调度时间过近，跳过恢复主题")
-                return
-
-            # 大型任务可能被调度器中断；清空原队列后只运行恢复任务。
-            self.MAA.stop()
-            if config.stop_maa.is_set() or config.stop_mower.is_set():
-                return
-            task_id = self.MAA.append_task("SwitchTheme", {"themes": [theme]})
-            if not task_id:
+            if not self.MAA.append_task("SwitchTheme", {"themes": [theme]}):
                 logger.warning("添加恢复主题任务失败，请检查 MAA 核心及配套资源版本")
                 return
-            queued = True
-            if not self.MAA.start():
-                logger.warning("恢复主题任务启动失败")
-                return
-            logger.info(f"开始恢复游戏主题：{theme}")
-            while self.MAA.running():
-                if config.stop_maa.is_set():
-                    logger.info("收到停止指令，停止恢复主题")
-                    return
-                if (
-                    datetime.now() >= deadline
-                    or (next_task_time() - datetime.now()).total_seconds() <= 5
-                ):
-                    logger.warning("恢复主题超时或即将开始下次调度，停止恢复")
-                    return
-                csleep(1)
-            logger.info("恢复主题任务结束，具体切换结果请查看 MAA 日志")
+            logger.info(f"已将恢复游戏主题加入 MAA 任务队列：{theme}")
         except MowerExit:
             raise
         except Exception:
-            logger.exception("恢复主题失败，继续原定调度")
-        finally:
-            if queued:
-                self.MAA.stop()
-                self.recog.reset_after_external_control()
+            logger.exception("添加恢复主题任务失败，继续原定任务")
 
     def has_maa_daily_tasks(self) -> bool:
         conf = config.conf
@@ -17920,11 +18085,18 @@ class BaseSchedulerSolver(
                     return long_task_deadline(self, long_limit)
                 return self.tasks[0].time
 
+            def large_task_start_allowed():
+                if config.stop_mower.is_set():
+                    raise MowerExit
+                return (
+                    not config.stop_maa.is_set()
+                    and (deadline() - datetime.now()).total_seconds() > 30
+                )
+
             record_execution = not one_time and (
                 not manual or tasks == "All" or "Fight" in tasks
             )
             self.drop_send = False
-            restore_theme = False
             conf = config.conf
             if (
                 not one_time
@@ -17985,6 +18157,7 @@ class BaseSchedulerSolver(
                         self.append_maa_task(maa_task, mall_action=mall_action)
                     else:
                         self.append_maa_task(maa_task)
+                self.append_maa_theme_task()
                 self.MAA.start()
                 stop_time = None
                 if one_time:
@@ -18018,7 +18191,6 @@ class BaseSchedulerSolver(
                     raise MowerExit
                 # MAA 运行期间只保存截图，没有连续执行 Mower 场景识别。
                 self.recog.reset_after_external_control()
-                restore_theme = not hard_stop
                 if hard_stop and manual:
                     return False
                 if hard_stop:
@@ -18132,9 +18304,10 @@ class BaseSchedulerSolver(
                         raise MowerExit
                     if config.stop_maa.is_set():
                         break
-                    restore_theme = False
                     self.release_maa()
-                    if paradox:
+                    if not paradox:
+                        self.initialize_maa()
+                    if selected_long not in ("sss", "rcl"):
                         from arknights_mower.utils.device.io_budget import (
                             device_io_budget,
                         )
@@ -18152,7 +18325,7 @@ class BaseSchedulerSolver(
                                 raise InterruptedError
                             seconds = navigation_end - monotonic()
                             if seconds <= 0:
-                                raise TimeoutError("悖论模拟干员列表导航超时")
+                                raise TimeoutError("MAA 大型任务启动前导航超时")
                             return min(
                                 seconds,
                                 (deadline() - datetime.now()).total_seconds() - 30,
@@ -18162,13 +18335,51 @@ class BaseSchedulerSolver(
                             with device_io_budget(navigation_remaining):
                                 self.recog.reset_after_external_control()
                                 self.back_to_index()
-                                ready = self.to_operator_list()
+                                if paradox:
+                                    ready = self.to_operator_list()
+                                else:
+                                    self.scene_graph_navigation(Scene.TERMINAL_MAIN)
+                                    navigation_remaining()
+                                    if selected_long == "copilot":
+                                        from arknights_mower.utils.maa_copilot import (
+                                            copilot_navigation_target,
+                                        )
+
+                                        target = copilot_navigation_target(
+                                            copilot_conf.scripts[copilot_run["next"]]
+                                        )
+                                        ready = NavigationSolver(
+                                            self.device, self.recog
+                                        ).run(target)
+                                        navigation_remaining()
+                                        if ready:
+                                            self.recog.update()
+                                            self.scene_graph_navigation(
+                                                Scene.OPERATOR_CHOOSE_LEVEL
+                                            )
+                                            ready = (
+                                                self.scene()
+                                                == Scene.OPERATOR_CHOOSE_LEVEL
+                                            )
+                                    else:
+                                        ready = self.scene() == Scene.TERMINAL_MAIN
                                 navigation_remaining()
                                 if not ready:
-                                    raise ValueError("未确认干员列表，未启动悖论模拟")
+                                    if paradox:
+                                        raise ValueError(
+                                            "未确认干员列表，未启动悖论模拟"
+                                        )
+                                    if selected_long == "copilot":
+                                        raise ValueError(
+                                            "未确认作业关卡地图，请检查导航关卡名与 Mower AI 配置"
+                                        )
+                                    raise ValueError(
+                                        "未确认终端首页，未启动 MAA 大型任务"
+                                    )
                         except InterruptedError:
                             break
-                        self.initialize_maa()
+                        if paradox:
+                            self.initialize_maa()
                         if config.stop_mower.is_set():
                             raise MowerExit
                         if (
@@ -18177,9 +18388,11 @@ class BaseSchedulerSolver(
                         ):
                             break
                     else:
-                        self.initialize_maa()
                         self.recog.reset_after_external_control()
                         self.back_to_index()
+                    if not large_task_start_allowed():
+                        break
+                    large_task_interrupted = False
                     if selected_long == "rogue":
                         professional = conf.rogue.squad in _PROFESSIONAL_SQUADS
                         rogue_params = {
@@ -18379,6 +18592,8 @@ class BaseSchedulerSolver(
                                 if not flight_prefix:
                                     rogue_params["core_char"] = "机械师"
                                     rogue_params["use_support"] = False
+                        if not large_task_start_allowed():
+                            break
                         task_id = self.MAA.append_task("Roguelike", rogue_params)
                         if blackflow_run is not None:
                             self.maa_blackflow_task = (task_id, blackflow_run)
@@ -18398,6 +18613,9 @@ class BaseSchedulerSolver(
                             params["copilot_list"] = [
                                 params["copilot_list"][copilot_index]
                             ]
+                            params["copilot_list"][0]["nav_name_override"] = target
+                        if not large_task_start_allowed():
+                            break
                         task_id = self.MAA.append_task(
                             "ParadoxCopilot" if paradox else "Copilot", params
                         )
@@ -18417,6 +18635,8 @@ class BaseSchedulerSolver(
                         params = build_sss_params(item)
                         if self.to_sss(item.type, item.ec):
                             raise ValueError("保全派驻导航失败")
+                        if not large_task_start_allowed():
+                            break
                         task_id = self.MAA.append_task("SSSCopilot", params)
                         self.maa_sss_task = {
                             "id": task_id,
@@ -18443,7 +18663,12 @@ class BaseSchedulerSolver(
                                     "num_craft_batches",
                                 ):
                                     rcl_params[key] = getattr(conf.rcl, key)
+                        if not large_task_start_allowed():
+                            break
                         self.MAA.append_task("Reclamation", rcl_params)
+                    if not large_task_start_allowed():
+                        self.maa_stop()
+                        break
                     logger.info("启动")
                     large_task_started = True
                     self.MAA.start()
@@ -18460,7 +18685,7 @@ class BaseSchedulerSolver(
                             or config.stop_mower.is_set()
                         ):
                             self.maa_stop()
-                            restore_theme = True
+                            large_task_interrupted = True
                             break
                     if config.stop_mower.is_set():
                         raise MowerExit
@@ -18482,7 +18707,7 @@ class BaseSchedulerSolver(
                         (more_copilot or more_sss)
                         and not config.stop_maa.is_set()
                         and not config.stop_mower.is_set()
-                        and not restore_theme
+                        and not large_task_interrupted
                         and deadline() - datetime.now() > timedelta(seconds=30)
                     ):
                         continue
@@ -18504,8 +18729,6 @@ class BaseSchedulerSolver(
                     finally:
                         resume_dorm_releases(self)
 
-            if restore_theme:
-                self.restore_maa_theme()
             self.release_maa()
         except MowerExit:
             try:

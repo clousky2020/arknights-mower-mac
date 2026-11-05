@@ -48,6 +48,8 @@ def resting_tier(op_data, name, now=None, *, replacement_names=None):
         return RestingTier.PRIORITY
     if name in op_data.config.resting_standby:
         return RestingTier.STANDBY
+    if name in op_data.config.resting_priority:
+        return RestingTier.LOW_MAIN
     if op is not None:
         if (op.room == "train" and op.index == 0) or (
             op.current_room == "train" and op.current_index == 0
@@ -121,10 +123,7 @@ def bed_takeover_allowed(op_data, requester, resident):
     resident_tier = resting_tier(op_data, resident, now)
     if is_full_dynamic_candidate(op_data, requester, now):
         return False
-    if (
-        requester_tier == RestingTier.EXCLUDED
-        or resident_tier <= RestingTier.PRIORITY_REPLACEMENT
-    ):
+    if requester_tier == RestingTier.EXCLUDED or resident_tier <= RestingTier.LOW_MAIN:
         return False
     from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
 
@@ -244,8 +243,8 @@ def _crafting_bonus_takeover(op_data, requester, resident):
         for entry in conf.workshop_settings
         if entry.enabled and entry.operator in (requester, resident)
     ]
-    assigned = {entry.operator for entry in entries if entry.items}
-    if not {requester, resident} <= assigned:
+    assigned = list(dict.fromkeys(entry.operator for entry in entries if entry.items))
+    if assigned != [requester, resident]:
         return False
     try:
         available = available_operators()
@@ -264,7 +263,7 @@ def _crafting_bonus_takeover(op_data, requester, resident):
 
 
 def crafting_rest_candidates(op_data, names, *, replacement_names=None):
-    """已配置的普通空闲加工候选按当前所需配方的加成排序。"""
+    """有待加工配方的普通空闲候选优先，并沿用用户保存的加工顺序。"""
     from arknights_mower.utils import config
     from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
     from arknights_mower.utils.workshop_recommendation import (
@@ -280,13 +279,10 @@ def crafting_rest_candidates(op_data, names, *, replacement_names=None):
     settings = [
         entry for entry in conf.workshop_settings if entry.enabled and entry.items
     ]
-    pending = {
-        entry.operator: index
-        for index, entry in enumerate(
-            prioritize_workshop_settings(settings, prefer_t4=False) if settings else []
-        )
-        if entry.items
-    }
+    pending = {}
+    for index, entry in enumerate(prioritize_workshop_settings(settings)):
+        if entry.items:
+            pending.setdefault(entry.operator, index)
     configured = sorted(
         configured,
         key=lambda name: (

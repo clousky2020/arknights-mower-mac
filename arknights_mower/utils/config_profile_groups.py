@@ -14,7 +14,7 @@ CONF_GROUPS = {
         "trust_rotation_enable trust_rotation_interval trust_rotation_prefer_low trust_rotation_threshold".split()
     ),
     "recruit": set(
-        "recruit_auto_5 recruit_auto_only5 recruit_enable recruit_gap recruit_robot recruitment_permit".split()
+        "recruit_auto_5 recruit_auto_only5 recruit_auto_robot recruit_enable recruit_gap recruit_robot recruitment_permit".split()
     ),
     "credit": set(
         "clue_credit_on_demand credit_fight credit_shop_by_value credit_shop_value_threshold maa_credit_fight maa_mall_blacklist maa_mall_buy maa_mall_enable maa_mall_ignore_blacklist_when_full maa_mall_mode maa_mall_only_buy_discount maa_mall_reserve_max_credit visit_friend_enable visit_friend_mode visit_friend".split()
@@ -42,7 +42,7 @@ CONF_GROUPS = {
     ),
     "rescue_plan": {"automatic_rescue_enable"},
     "base": set(
-        "assistant_follows_schedule dorm_isolation enable_mastery favorite fia_fool fia_threshold free_blacklist free_room group_mood_gap_exclusions group_mood_gap_max_extra_wait_hours group_mood_gap_threshold_minutes group_rest_in_full_on_mood_gap group_resting_thresholds merge_interval product_switching rescue_threshold resting_threshold right_side_room_order save_mastery_screenshots swap_contact_train test_mood_calculation version_update_resting_threshold version_update_threshold_advance_hours".split()
+        "assistant_follows_schedule dorm_isolation enable_mastery favorite fia_fool fia_threshold free_blacklist free_room group_mood_gap_exclusions group_mood_gap_max_extra_wait_hours group_mood_gap_threshold_minutes group_rest_in_full_on_mood_gap group_resting_thresholds mastery_consecutive_skills merge_interval product_switching rescue_threshold resting_threshold right_side_room_order save_mastery_screenshots swap_contact_train test_mood_calculation version_update_resting_threshold version_update_threshold_advance_hours".split()
     ),
     "runorder": {
         "run_order_delay",

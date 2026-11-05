@@ -760,6 +760,20 @@ def test_conf_fields_have_one_group_and_no_unmapped_current_fields():
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("inherit", [[], ["recruit"], ["daily"]])
+def test_robot_automation_follows_recruit_profile_group(storage, enabled, inherit):
+    config.conf.recruit_auto_robot = enabled
+    config.save_conf()
+
+    _create("支援机械配置", inherit)
+
+    expected = enabled if "recruit" in inherit else False
+    assert config.conf.recruit_auto_robot is expected
+    saved = config.Conf(**yaml.safe_load(config.conf_path.read_text(encoding="utf-8")))
+    assert saved.recruit_auto_robot is expected
+
+
+@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("inherit", [[], ["daily"], ["credit"]])
 def test_event_sign_in_follows_daily_profile_group(storage, enabled, inherit):
     config.conf.event_sign_in_enable = enabled
@@ -812,19 +826,22 @@ def test_workshop_reserves_follow_workshop_profile_group(
     assert (saved.workshop_t1_reserve, saved.workshop_t2_reserve) == expected
 
 
+@pytest.mark.parametrize(
+    "field", ["save_mastery_screenshots", "mastery_consecutive_skills"]
+)
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("operation", ["create", "activate", "import"])
 @pytest.mark.parametrize("selected", [[], ["base"], ["other_settings"]])
-def test_mastery_screenshots_follow_base_profile_group(
-    storage, enabled, operation, selected
+def test_mastery_preferences_follow_base_profile_group(
+    storage, enabled, operation, selected, field
 ):
-    config.conf.save_mastery_screenshots = not enabled
+    setattr(config.conf, field, not enabled)
     config.save_conf()
     original = profiles.list_profiles()["active_id"]
     incoming = backup.export_archive()
     if operation == "activate":
         _create("目标配置")
-    config.conf.save_mastery_screenshots = enabled
+    setattr(config.conf, field, enabled)
     config.save_conf()
 
     if operation == "create":
@@ -842,9 +859,9 @@ def test_mastery_screenshots_follow_base_profile_group(
     expected = False if operation == "create" else not enabled
     if "base" in selected:
         expected = enabled
-    assert config.conf.save_mastery_screenshots is expected
+    assert getattr(config.conf, field) is expected
     saved = config.Conf(**yaml.safe_load(config.conf_path.read_text(encoding="utf-8")))
-    assert saved.save_mastery_screenshots is expected
+    assert getattr(saved, field) is expected
 
 
 @pytest.mark.parametrize("enabled", [False, True])

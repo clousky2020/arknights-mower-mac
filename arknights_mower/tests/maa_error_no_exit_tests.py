@@ -306,6 +306,7 @@ class MaaErrorNoExitTests(unittest.TestCase):
             maa_rg_sleep_min="12:00",
             maa_rg_sleep_max="12:00",
             maa_rg_theme="Sami",
+            maa_restore_theme_enable=False,
             rogue=SimpleNamespace(
                 squad="",
                 roles="",
@@ -335,6 +336,10 @@ class MaaErrorNoExitTests(unittest.TestCase):
         with (
             patch.object(base_schedule.config, "conf", conf),
             patch.object(solver, "back_to_index"),
+            patch.object(solver, "scene_graph_navigation"),
+            patch.object(
+                solver, "scene", return_value=base_schedule.Scene.TERMINAL_MAIN
+            ),
             patch.object(solver, "initialize_maa", side_effect=_init_maa) as init_maa,
             patch.object(solver, "append_maa_task"),
             patch.object(solver, "rest_until_next_task") as rest,
