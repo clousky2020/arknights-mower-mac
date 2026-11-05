@@ -685,3 +685,72 @@ def test_adb_eof_is_a_recoverable_connection_failure(monkeypatch):
         channel.recv_exactly(4)
 
     channel.close()
+
+
+def _ui_fault():
+    return recovery.UIUnresponsiveError()
+
+
+def test_ui_fault_notifies_before_repair_and_once_after_recovery(
+    task_main, monkeypatch, cancellation
+):
+    """故障先发一封，恢复成功再发一封；两封各只发一次。"""
+    device = SimpleNamespace(device_id="emulator-5554")
+    result = SimpleNamespace(unwrap=lambda: device)
+    control = SimpleNamespace(
+        shutdown_requested=False,
+        recover=Mock(side_effect=[result]),
+    )
+    monkeypatch.setattr(task_main, "device_control", control)
+    monkeypatch.setattr(task_main, "_ui_fault_notified_at", None)
+    notify = Mock()
+    monkeypatch.setattr("arknights_mower.utils.email.send_message", notify)
+
+    assert task_main._resume_device_dispatch(failure=_ui_fault()) is device
+
+    assert notify.call_count == 2
+    fault, recovered = notify.call_args_list
+    assert fault.kwargs["subject"] == "设备界面无响应，正在自动恢复"
+    assert recovered.kwargs["subject"] == "设备已自动恢复"
+    assert fault.kwargs["level"] == "ERROR"
+    assert recovered.kwargs["level"] == "ERROR"
+    assert "emulator-5554" in recovered.args[0]
+    assert task_main._ui_fault_notified_at is None
+
+
+def test_ui_fault_inside_the_quiet_window_stays_silent(task_main, monkeypatch):
+    """同一事件的后续重试周期不再重复发故障信，恢复信仍关闭该事件一次。"""
+    from datetime import datetime, timedelta
+
+    device = SimpleNamespace(device_id="emulator-5554")
+    control = SimpleNamespace(
+        shutdown_requested=False,
+        recover=Mock(return_value=SimpleNamespace(unwrap=lambda: device)),
+    )
+    monkeypatch.setattr(task_main, "device_control", control)
+    notify = Mock()
+    monkeypatch.setattr("arknights_mower.utils.email.send_message", notify)
+    monkeypatch.setattr(
+        task_main, "_ui_fault_notified_at", datetime.now() - timedelta(minutes=1)
+    )
+
+    assert task_main._resume_device_dispatch(failure=_ui_fault()) is device
+    assert notify.call_count == 1
+    assert notify.call_args.kwargs["subject"] == "设备已自动恢复"
+    assert task_main._ui_fault_notified_at is None
+
+
+def test_ui_fault_notification_error_never_blocks_the_repair(task_main, monkeypatch):
+    """邮件通道坏了也必须照常恢复，恢复信同样不因通道故障改变流程。"""
+    device = object()
+    control = SimpleNamespace(
+        shutdown_requested=False,
+        recover=Mock(return_value=SimpleNamespace(unwrap=lambda: device)),
+    )
+    monkeypatch.setattr(task_main, "device_control", control)
+    monkeypatch.setattr(task_main, "_ui_fault_notified_at", None)
+    notify = Mock(side_effect=OSError("smtp unreachable"))
+    monkeypatch.setattr("arknights_mower.utils.email.send_message", notify)
+
+    assert task_main._resume_device_dispatch(failure=_ui_fault()) is device
+    assert notify.call_count == 2

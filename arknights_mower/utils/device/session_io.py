@@ -231,6 +231,17 @@ class ProductionSessionADB:
             [adb_path, "-s", serial, "shell", "getprop", "sys.boot_completed"]
         )
 
+    def reboot(self, adb_path: str, serial: str, timeout: float) -> bool:
+        """Restart the Android system inside the bound endpoint.
+
+        This restarts the guest OS, not the emulator process, so it needs no
+        manager ownership: the same instance and the same serial come back.
+        """
+        if not serial.strip():
+            raise ValueError("设备 serial 不能为空")
+        self._adb_window(timeout).run([adb_path, "-s", serial, "reboot"])
+        return True
+
     def display_size(self, adb_path: str, serial: str, timeout: float) -> str:
         if not serial.strip():
             raise ValueError("设备 serial 不能为空")

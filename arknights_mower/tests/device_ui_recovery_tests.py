@@ -276,6 +276,28 @@ def test_no_full_restart_authority_preserves_original_target(ui_session, preset)
     assert env.control._device is env.handle
 
 
+def test_untouchable_instance_restarts_the_guest_system_in_place(ui_session):
+    """无受管生命周期的实例改为重启设备内系统：不关闭、不启动、不动别的实例。"""
+    env = ui_session
+    env.session.profile = env.session.profile.model_copy(
+        update={"preset_id": "manual.other"}
+    )
+    reboots = []
+    env.session.adb.reboot = lambda adb_path, serial, timeout: (
+        reboots.append((adb_path, serial)),
+        True,
+    )[1]
+    fail_ui(env)
+
+    result = env.control.recover()
+
+    assert result.ok, result.error
+    assert reboots == [("verified-adb", "USB-A")]
+    assert env.events == ["close", "rebind", "probe"]
+    assert env.simulator.actions == []
+    assert env.control._device is env.handle
+
+
 def test_changed_binding_never_restarts_another_instance(ui_session):
     env = ui_session
     fail_ui(env)

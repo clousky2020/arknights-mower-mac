@@ -16,7 +16,7 @@ from arknights_mower.utils.device.application import (
     RECOVERABLE_DEVICE_ERRORS,
     create_device_control,
 )
-from arknights_mower.utils.device.recovery import wait_for_recovery
+from arknights_mower.utils.device.recovery import UIUnresponsiveError, wait_for_recovery
 from arknights_mower.utils.device.touch_backend import TouchFailure
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.news_checker import MaintenanceInfo, NewsChecker
@@ -40,6 +40,10 @@ base_scheduler = None
 _startup_maintenance_tasks = ()
 _manual_pause = None
 _manual_pause_lock = Lock()
+# One interface fault can retry every 30 seconds for hours; the paired
+# fault/recovery notices are meant to describe one incident, not each cycle.
+UI_FAULT_NOTICE_QUIET_MINUTES = 10
+_ui_fault_notified_at = None
 
 
 def get_manual_pause():
@@ -596,6 +600,62 @@ def _notify_uncertain_input(failure):
         logger.exception("待核实通知发送失败")
 
 
+def _notify_ui_fault(failure):
+    """Announce one interface fault before this process tries to repair it.
+
+    The notification goes out first so a run that ends in a manual recovery is
+    still reported: the repair path below can block for hours without emitting
+    another user-visible state change. A notification fault must not prevent the
+    repair itself. Repeated faults inside one quiet window belong to the incident
+    the first notice opened, so they add no second fault mail and the eventual
+    recovery notice closes that incident once.
+    """
+    global _ui_fault_notified_at
+    now = datetime.now()
+    if _ui_fault_notified_at is not None:
+        elapsed = now - _ui_fault_notified_at
+        if elapsed < timedelta(minutes=UI_FAULT_NOTICE_QUIET_MINUTES):
+            logger.info("设备故障通知处于静默窗口，跳过重复发送")
+            return False
+    reason = str(failure) or getattr(failure, "code", "")
+    body = (
+        "设备界面未响应输入，程序将自动尝试恢复：优先重启该设备内的 Android "
+        "系统，失败后每 30 秒重试。任务与补偿均已保留，恢复成功后会再发一封通知。\n\n"
+        f"原因：{reason}"
+    )
+    try:
+        from arknights_mower.utils.email import send_message
+
+        send_message(body, subject="设备界面无响应，正在自动恢复", level="ERROR")
+    except Exception:
+        logger.exception("设备故障通知发送失败")
+    _ui_fault_notified_at = now
+    return True
+
+
+def _notify_ui_recovered(device):
+    """Report that the automatic repair brought the bound device back.
+
+    Only the fault notice authorizes the paired recovery notice: a quiet
+    duplicate fault never announced a new incident, so it has nothing to close.
+    """
+    global _ui_fault_notified_at
+    if _ui_fault_notified_at is None:
+        return
+    _ui_fault_notified_at = None
+    serial = getattr(device, "device_id", "") or ""
+    body = (
+        "设备界面已恢复响应，任务与补偿保留，将继续执行。\n\n"
+        f"设备：{serial or '原实例'}"
+    )
+    try:
+        from arknights_mower.utils.email import send_message
+
+        send_message(body, subject="设备已自动恢复", level="ERROR")
+    except Exception:
+        logger.exception("设备恢复通知发送失败")
+
+
 def _resume_device_dispatch(scheduler=None, failure=None):
     if is_memory_error(failure):
         raise failure
@@ -625,8 +685,13 @@ def _resume_device_dispatch(scheduler=None, failure=None):
                 scheduler.recog.update()
         return device
 
+    ui_unresponsive = isinstance(failure, UIUnresponsiveError)
+    if ui_unresponsive:
+        _notify_ui_fault(failure)
     csleep(30)
     device = wait_for_recovery(resume, retry_errors=RECOVERABLE_DEVICE_ERRORS)
+    if ui_unresponsive:
+        _notify_ui_recovered(device)
     if uncertain and scheduler is not None:
         from arknights_mower.utils.crash_recovery import observe_scheduler
 

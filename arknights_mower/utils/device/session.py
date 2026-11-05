@@ -306,15 +306,23 @@ class DeviceSession:
             self.profile is None
             or failure.restart_binding is None
             or failure.restart_binding != self._restart_binding()
-            or self.profile.preset_id not in MANAGED_INSTANCE_PRESETS
+        ):
+            raise SessionFailure(
+                self.last, "无法确认界面故障原实例的完整重启权限，请手动恢复所选设备。"
+            )
+        if (
+            self.profile.preset_id not in MANAGED_INSTANCE_PRESETS
             or self.profile.preset_id in CONFIRMED_START_PRESETS
             or (
                 self.profile.preset_id == "macos.mumu_pro"
                 and not self.profile.topology_fingerprint
             )
         ):
-            raise SessionFailure(
-                self.last, "无法确认界面故障原实例的完整重启权限，请手动恢复所选设备。"
+            return self._restart_in_device(
+                failure,
+                deadline=deadline,
+                frame_probe=frame_probe,
+                prepare_target=prepare_target,
             )
 
         if not failure.stop_requested:
@@ -370,6 +378,48 @@ class DeviceSession:
         failure.start_requested = True
         logger.info("模拟器已完全退出，正在重新启动原实例")
         return self._launch(self._remaining(deadline))
+
+    def _restart_in_device(
+        self, failure, *, deadline, frame_probe=None, prepare_target=None
+    ) -> ReadinessResult:
+        """Restart the guest Android system when the instance itself is untouchable.
+
+        The bound preset exposes no owned lifecycle: the emulator may have been
+        started by a launcher this process cannot re-create, and its own start
+        path requires an explicit user confirmation. Rebooting the guest keeps
+        the instance, the endpoint identity and the serial, so the same binding
+        comes back and no other instance is ever touched.
+        """
+        reboot = getattr(self.adb, "reboot", None)
+        if reboot is None:
+            raise SessionFailure(
+                self.last, "无法确认界面故障原实例的完整重启权限，请手动恢复所选设备。"
+            )
+        serial = self.last.serial or (
+            self.profile.last_serial.strip() if self.profile is not None else ""
+        )
+        if not serial:
+            raise SessionFailure(self.last, "无法确认原实例的端点，已拒绝自动重启。")
+        if not self.adb_path:
+            self.resolve_adb(deadline)
+        if not failure.start_requested:
+            # A lost acknowledgement cannot authorize another reboot.
+            failure.stop_requested = True
+            failure.start_requested = True
+            logger.warning("设备界面无法响应输入，正在重启已绑定设备内的 Android 系统")
+
+            def reboot_once(timeout):
+                return reboot(self.adb_path, serial, timeout)
+
+            self._action(reboot_once, deadline)
+            self._remaining(deadline)
+            logger.info("已向原实例发出系统重启，等待其重新就绪")
+        return self._wait_ready(
+            deadline,
+            connect=True,
+            frame_probe=frame_probe,
+            prepare_target=prepare_target,
+        )
 
     def resolve_adb(self, deadline: float) -> str:
         """Resolve the bound transport once within the caller's Recovery Budget."""
