@@ -1,7 +1,9 @@
 import {restingThresholdFor} from './mowerOperatorState'
 import {projectMowerArrangements} from './mowerObservations'
 import type {MowerDependencyReturnAdmission} from './mowerTaskDerivation'
+import {mowerForcedWorkGroups} from './mowerBackupGroupTasks'
 import {mowerExhaustGroups,mowerPendingExhaustDeparture} from './mowerExhaustPolicy'
+import {planMowerExhaustSupport} from './mowerExhaustPlanning'
 import {mowerWorkingReplacementAssignments,mowerWorkingReplacementBlocked,mowerSameGroupPrimaryReplacement,mowerRestingBindingGroups,mowerSharedReplacements,normalizeMowerSharedArrangement,mowerArrangementGroupTransitions,commitMowerGroupShifts} from './mowerSharedGroups'
 // Port of default plan_solver/resting/_get_resting_plan_legacy/try_reorder.
 // Source: c6bdbb292fe7fcd84c6dfb66154a12a1a9bc5b88 (MIT, Copyright 2021 Nano).
@@ -73,6 +75,7 @@ export function mowerGetRestingPlan(data:MowerSchedulingData,names:string[],exis
  return true
 }
 function alphaGetRestingPlan(data:MowerSchedulingData,names:string[],existing:string[],plan:MowerTaskPlan,options:MowerRestingOptions):boolean{
+ if(data.shiftRequestGroups(names).some(group=>mowerForcedWorkGroups(data).has(group)))return false
  if(names.some(name=>data.reservedProductReplacements.has(name)||options.reservedNames?.has(name))||mowerWorkingReplacementBlocked(data,names,plan))return false
  const transitions={...mowerArrangementGroupTransitions(data,plan),...Object.fromEntries(data.shiftRequestGroups(names).map(group=>[group,true]))}
  const shared=Object.values(data.operators).filter(op=>op.multiGroup),previousState=data.groupShiftState
@@ -138,6 +141,14 @@ function alphaGetRestingPlan(data:MowerSchedulingData,names:string[],existing:st
 export function mowerResting(data:MowerSchedulingData,queue:MowerTaskQueue,options:MowerRestingOptions={}):MowerTaskPlan {
  return resting(data,queue,options,false)
 }
+/** A confirmed ordinary handoff continues with the requesting group's concrete departure. */
+export function planMowerOrdinarySupportAdmission(data:MowerSchedulingData,names:readonly string[],options:MowerRestingOptions={}):MowerTaskPlan|undefined {
+ const projected=projectMowerArrangements(data,[]),plan:MowerTaskPlan={}
+ const members=[...new Set(names.flatMap(name=>{const op=projected.operators[name];return op?.group?projected.shiftGroupMembers(op.group):op?[name]:[]}))]
+ if(!members.length||!mowerGetRestingPlan(projected,members,[],plan,{...options,dormAdmissions:new Map(),onBlocked:undefined}))return
+ const reorder=mowerTryReorder(projected,plan);if(reorder)Object.assign(plan,reorder)
+ return Object.keys(plan).length?plan:undefined
+}
 function resting(data:MowerSchedulingData,queue:MowerTaskQueue,options:MowerRestingOptions,metadataPrepared:boolean):MowerTaskPlan {
  options={...options,dormAdmissions:new Map()}
  if(data.policy.experimentalDormLogic)throw new Error('Experimental ordinary resting requires its source port')
@@ -148,8 +159,9 @@ function resting(data:MowerSchedulingData,queue:MowerTaskQueue,options:MowerRest
  const current=mowerActiveHighRestingCount(data),effective=data.dorms.filter(b=>data.effectiveFreeSlot(b)).length
  const ideal=mowerAverageMood(data)>data.policy.restingThreshold*data.policy.rescueThreshold?Math.min(4,effective):effective
  const ordinaryRequests:string[]=[],replacements:string[]=[],plan:MowerTaskPlan={},used=new Set<number>(),attempted=new Set<string>();let highDone=false
- const exhaustGroups=mowerExhaustGroups(data)
+ const exhaustGroups=mowerExhaustGroups(data),working=mowerForcedWorkGroups(data)
  for(const op of [...total.filter(op=>op.isHigh()),...total.filter(op=>!op.isHigh())]){
+  if(working.has(op.group))continue
   if(data.alpha&&(moods.get(op.name)===undefined||data.reservedProductReplacements.has(op.name)||options.returning?.has(op.name)||options.returningGroups?.has(op.group)||op.group&&data.group(op.group).some(n=>options.returning?.has(n))||replacements.includes(op.name)||alphaRestingTier(data,op.name)===7))continue
   if(op.isHigh()&&!op.workshop){
    const standby=mowerStandbyCandidates(data,op.group?data.group(op.group):[op.name])
@@ -170,8 +182,13 @@ function resting(data:MowerSchedulingData,queue:MowerTaskQueue,options:MowerRest
   if(mowerPendingExhaustDeparture(data,[...new Set([...queue.tasks,...options.tasks??[]])],members))continue
   if(!mowerGetRestingPlan(data,[...members],replacements,plan,{...options,tasks:queue.tasks})){
    options.onBlocked?.(members)
-   if(data.alpha&&!queue.tasks.some(task=>task.type===T.EXHAUST_OFF&&members.some(name=>task.metadata.split(',').includes(name)))){
-    const task=new MowerTask({type:T.EXHAUST_OFF,metadata:members.join(',')});task.ordinaryCoordination=true;task.coordinationRequestNames=[...members];task.timeMicros=data.nowMicros;queue.tasks.push(task)
+   if(data.alpha&&!queue.tasks.some(task=>task.exhaustSupport&&task.coordinationRequestNames.some(name=>members.includes(name)))){
+    const support=planMowerExhaustSupport(data,[...members],{...options,urgentExhaust:false,dormAdmissions:undefined,
+     reservedNames:new Set([...options.reservedNames??[],...replacements,...options.dormAdmissions?.values()??[]]),
+     reservedSlots:new Set([...options.reservedSlots??[],...options.dormAdmissions?.keys()??[]])})
+    if(support&&Object.keys(support).length){
+     const task=new MowerTask({type:T.SELF_CORRECTION,plan:support});task.exhaustSupport=true;task.ordinaryCoordination=true;task.coordinationRequestNames=[op.name];task.timeMicros=data.nowMicros;queue.tasks.push(task)
+    }
    }
   }else ordinaryRequests.push(op.name)
  }

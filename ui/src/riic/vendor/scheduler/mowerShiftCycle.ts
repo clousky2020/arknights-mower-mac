@@ -1,5 +1,6 @@
+import {mowerForcedWorkGroups} from './mowerBackupGroupTasks'
 import {mowerExhaustTaskSignatures,invalidateMowerExhaustTasks,type MowerExhaustRoomContext} from './mowerExhaustReservations'
-import type {BackupSelection} from './backupGroups'
+import {sameBackupGroups,type BackupSelection,type BackupGroupState} from './backupGroups'
 import type {MowerBackupGroupTask} from './mowerBackupGroupTasks'
 import {completeMowerBackupDepartureRecovery} from './mowerBackupDepartureRecovery'
 import {mowerStandbyCandidates} from './mowerDormAssignment'
@@ -8,7 +9,7 @@ import {mowerExhaustGroups} from './mowerExhaustPolicy'
 import {mowerRestoredGroupRecoveryDeadline,splitMowerRecoveryTask} from './mowerGroupRecovery'
 import {planMowerDormIsolation} from './mowerDormIsolation'
 import {inheritMowerBackupRefreshRules} from './mowerBackupRefresh'
-import {normalizeMowerSharedArrangement,mowerArrangementGroupTransitions,commitMowerGroupShifts,mowerSameGroupPrimaryReplacement} from './mowerSharedGroups'
+import {normalizeMowerSharedArrangement,mowerArrangementGroupTransitions,commitMowerGroupShifts,mowerSameGroupPrimaryReplacement,completeMowerWorkaholicGroupReturn} from './mowerSharedGroups'
 // Complete in-memory arrangement replay, Mower alpha b2d9ac8 (MIT).
 import type {MowerSchedulingData} from './mowerSchedulingData'
 import {MowerResourceWaitError,MowerShiftPreviewError} from './mowerNativeErrors'
@@ -35,7 +36,7 @@ export interface MowerShiftModel {
  nextIdleConditionWakeMicros?(data:MowerSchedulingData):number|undefined
  select?(data:MowerSchedulingData):BackupSelection
  evaluate(data:MowerSchedulingData):boolean[]
- swap(data:MowerSchedulingData,conditions:boolean[],groupId?:string):MowerSchedulingData
+ swap(data:MowerSchedulingData,conditions:boolean[],groupId?:BackupGroupState):MowerSchedulingData
  transition(previous:MowerSchedulingData,next:MowerSchedulingData,original:boolean[],conditions:boolean[],previousRecovery?:MowerSchedulingData,pendingTasks?:MowerTask[],intent?:MowerTaskPlan):MowerTaskPlan
  activate(conditions:boolean[],task?:MowerTask):void
 }
@@ -56,7 +57,7 @@ export function mergeMowerShiftTransition(target:MowerTaskPlan,overlay:MowerTask
 }
 export function stripMowerCurrent(plan:MowerTaskPlan):MowerTaskPlan{return Object.fromEntries(Object.entries(plan).filter(([,names])=>names.some(name=>name!=='Current')))}
 const assigned=(plan:MowerTaskPlan)=>new Set(Object.entries(plan).flatMap(([room,names])=>room.startsWith('dorm')?[]:names.filter(n=>!['Current','Free',''].includes(n))))
-export const cloneMowerShiftTask=(task:MowerTask):MowerTask=>Object.assign(new MowerTask({type:task.type}),task,{plan:structuredClone(task.plan),backupRetentionReleasedNames:[...task.backupRetentionReleasedNames],backupRetentionAdmissions:[...task.backupRetentionAdmissions],backupRetentionEmptySlots:{...task.backupRetentionEmptySlots},backupRetentionWait:task.backupRetentionWait&&{names:[...task.backupRetentionWait.names]},urgentRecoveryRequestNames:[...task.urgentRecoveryRequestNames],urgentRecoverySupportNames:[...task.urgentRecoverySupportNames],urgentRecoveryReservedNames:[...task.urgentRecoveryReservedNames],urgentRecoveryReservedSlots:[...task.urgentRecoveryReservedSlots],groupShiftTransitions:{...task.groupShiftTransitions},backupExplicitSlots:new Set(task.backupExplicitSlots),dormFillPlan:structuredClone(task.dormFillPlan),backupShiftIntent:task.backupShiftIntent&&structuredClone(task.backupShiftIntent),backupShiftConditions:task.backupShiftConditions&&[...task.backupShiftConditions]})
+export const cloneMowerShiftTask=(task:MowerTask):MowerTask=>Object.assign(new MowerTask({type:task.type}),task,{plan:structuredClone(task.plan),coordinationAdmissionPlan:task.coordinationAdmissionPlan&&structuredClone(task.coordinationAdmissionPlan),backupRetentionReleasedNames:[...task.backupRetentionReleasedNames],backupRetentionAdmissions:[...task.backupRetentionAdmissions],backupRetentionEmptySlots:{...task.backupRetentionEmptySlots},backupRetentionWait:task.backupRetentionWait&&{names:[...task.backupRetentionWait.names]},urgentRecoveryRequestNames:[...task.urgentRecoveryRequestNames],urgentRecoverySupportNames:[...task.urgentRecoverySupportNames],urgentRecoveryReservedNames:[...task.urgentRecoveryReservedNames],urgentRecoveryReservedSlots:[...task.urgentRecoveryReservedSlots],groupShiftTransitions:{...task.groupShiftTransitions},backupExplicitSlots:new Set(task.backupExplicitSlots),dormFillPlan:structuredClone(task.dormFillPlan),backupShiftIntent:task.backupShiftIntent&&structuredClone(task.backupShiftIntent),backupShiftConditions:task.backupShiftConditions&&[...task.backupShiftConditions]})
 
 /** Application protection beyond pinned alpha: a canceled shift must not complete through incidental bed swaps. */
 function cancelledShiftLeavesOnlyDormFill(data:MowerSchedulingData,simulation:MowerSchedulingData,task:MowerTask,intent:MowerTaskPlan,conditions:boolean[],coalesced:MowerTask[],final:MowerTaskPlan):boolean{
@@ -132,6 +133,7 @@ export function prepareMowerShiftBackup(data:MowerSchedulingData,task:MowerTask,
  const selected=selectionFor(model,data),effectiveRules=model.swap(projectMowerArrangements(data,[]),selected.conditions,selected.groupId)
  const cleaned=mowerBackupRetentionTaskPlan(effectiveRules,task,task.backupShiftIntent??task.plan,true)
  const intent=cleaned,original=[...data.planConditions],entrySlots=new Set(task.backupExplicitSlots)
+ if(!task.arrangementStarted&&Object.entries(mowerArrangementGroupTransitions(data,intent)).some(([group,resting])=>resting&&mowerForcedWorkGroups(data).has(group)))throw new MowerShiftPreviewError('副表要求整组强制上班，等待副表退出')
  let transitions=task.productShiftLocked?{...task.groupShiftTransitions}:mowerArrangementGroupTransitions(data,intent)
  const returning=new Set(Object.entries(transitions).filter(([group,resting])=>!resting&&data.groupIsResting(group)).map(([group])=>group))
  let seed=projectMowerArrangements(data,[intent])
@@ -175,13 +177,13 @@ export function prepareMowerShiftBackup(data:MowerSchedulingData,task:MowerTask,
   for(const room of Object.keys(merged))delete merged[room]
   Object.assign(merged,completed)
   const projected=projectMowerArrangements(effective,[merged]),nextSelection=selectionFor(model,projected),next=nextSelection.conditions
-  if(same(next,conditions)&&nextSelection.groupId===selection.groupId){
+  if(same(next,conditions)&&sameBackupGroups(nextSelection.groupId,selection.groupId)){
    task.backupGroup=selection.groupId
    // A backup workaholic override removes anchors, not the group's scheduled return.
    // Changed slot owners require fresh transitions; effective departures supersede returns.
    task.groupShiftTransitions={...(task.productShiftLocked?transitions:retainedMowerBackupTransitions(data,simulation,intent)),...mowerArrangementGroupTransitions(simulation,merged)}
    task.backupExplicitSlots=entrySlots
-   if(same(conditions,original)&&selection.groupId===data.backupGroup&&JSON.stringify(merged)===JSON.stringify(intent)){task.plan=intent;delete task.backupShiftIntent;delete task.backupShiftConditions;return}
+   if(same(conditions,original)&&sameBackupGroups(selection.groupId,data.backupGroup)&&JSON.stringify(merged)===JSON.stringify(intent)){task.plan=intent;delete task.backupShiftIntent;delete task.backupShiftConditions;return}
    task.backupShiftIntent=intent;task.backupShiftConditions=[...conditions];task.plan=stripMowerCurrent(merged);recordMowerBackupRetention(data,simulation,task,new Set(Object.values(intent).flat().filter(name=>!task.backupRetentionAdmissions.includes(name))));return
   }
   conditions=next;selection=nextSelection
@@ -224,6 +226,8 @@ function unfinishedRequiredDepartures(data:MowerSchedulingData,names:string[],ex
 export function prepareMowerShiftCycle(data:MowerSchedulingData,task:MowerTask,queue:MowerTaskQueue,model:MowerShiftModel,options:MowerRestingOptions={}):void{
  delete task.previewReturnVeto
  if(task.backupShiftActive||task.arrangementStarted)return
+ completeMowerWorkaholicGroupReturn(data,task.backupShiftIntent??task.plan)
+ if(task.fiaReturnTarget)return
  if(task.exhaustSupport){prepareMowerShiftBackup(data,task,model,queue.tasks.filter(t=>t!==task));return}
  const probe=new MowerTask({time:data.nowMicros/3_600_000_000,type:T.FILL_DORM});simplifyMowerAlphaDormFill(probe,queue.tasks,data.nowMicros,options.priorityScheduling)
  if(probe.simpleDormFill||task.productShiftLocked||queue.tasks.some(t=>t!==task&&(t.type===T.FIAMMETTA&&t.timeMicros<=data.nowMicros||t.backupShiftActive||t.productShiftLocked))){
@@ -322,7 +326,7 @@ export function prepareMowerShiftCycle(data:MowerSchedulingData,task:MowerTask,q
   }
   let final:MowerTaskPlan={}
   for(const [room,names] of Object.entries(simulation.plan))names.forEach((_,index)=>{const old=data.currentOperator(room,index)?.name??'',name=simulation.currentOperator(room,index)?.name??'';if(old!==name||unresolved.has(alphaPosition(room,index)))(final[room]??=Array(names.length).fill('Current'))[index]=name||(cleared.has(alphaPosition(room,index))?'':'Free')})
-  if(!same(data.planConditions,conditions)||data.backupGroup!==simulation.backupGroup){
+  if(!same(data.planConditions,conditions)||!sameBackupGroups(data.backupGroup,simulation.backupGroup)){
    const explicitNames=new Set(Object.values(intent).flat().filter(name=>!['Current','Free',''].includes(name)))
    for(const slot of explicitSlots){const [room,index]=slot.split('\0'),name=final[room!]?.[Number(index)];if(name&&!['Current','Free'].includes(name))explicitNames.add(name)}
    final=reconcileMowerBackupRetention(data,simulation,final,effectivePending,explicitNames)

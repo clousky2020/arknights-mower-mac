@@ -437,6 +437,7 @@ def test_corrected_image_plan_skips_mutually_exclusive_combinations(image_plan):
     image_plan["backup_plans"][3].plan["central"][4].replacement = ["清道夫"]
     result = initialize(image_plan).validate_backup_plans()
     assert result == {
+        "warnings": [],
         "success": True,
         "status": "passed",
         "message": "验证成功，共验证 13 次",
@@ -465,6 +466,7 @@ def test_mutually_exclusive_backups_do_not_report_an_impossible_conflict():
     )
     result = initialize(plan).validate_backup_plans()
     assert result == {
+        "warnings": [],
         "success": True,
         "status": "passed",
         "message": "验证成功，共验证 3 次",
@@ -487,6 +489,7 @@ def test_twenty_mutually_exclusive_backups_are_supported():
     ]
     result = initialize(plan).validate_backup_plans()
     assert result == {
+        "warnings": [],
         "success": True,
         "status": "passed",
         "message": "验证成功，共验证 2 次",
@@ -627,6 +630,7 @@ def test_later_backup_overrides_a_shared_slot_without_duplicate_primary_error():
     plan["backup_plans"][1].plan = {"central": [Room("德克萨斯", "", ["翎羽"])]}
     result = initialize(plan).validate_backup_plans()
     assert result == {
+        "warnings": [],
         "success": True,
         "status": "passed",
         "message": "验证成功，共验证 3 次",
@@ -853,7 +857,7 @@ def test_analysis_budget_returns_an_incomplete_warning_without_mutating_state(
 
 @pytest.mark.parametrize("failure", ["baseline", "ownership"])
 @pytest.mark.parametrize("max_seconds", [None, 0])
-def test_configuration_errors_still_block_when_combination_budget_is_exhausted(
+def test_exhausted_budget_preserves_structural_errors_and_roster_warnings(
     monkeypatch, failure, max_seconds
 ):
     plan = two_backups()
@@ -866,8 +870,12 @@ def test_configuration_errors_still_block_when_combination_budget_is_exhausted(
         )
     result = Operators(plan).validate_backup_plans(max_seconds=max_seconds)
     assert result["success"] is False
-    assert result["status"] == "failed"
-    assert "验证未完成" not in result["message"]
+    if failure == "baseline":
+        assert result["status"] == "failed"
+        assert "验证未完成" not in result["message"]
+    else:
+        assert result["status"] == "incomplete"
+        assert "缺少已持有干员" in result["warnings"][0]
 
 
 def test_unexpected_analysis_error_is_not_an_incomplete_warning(monkeypatch):
@@ -942,6 +950,7 @@ def test_elapsed_budget_stops_combinations_and_manual_validation_is_untimed(
     result = data.validate_backup_plans(max_seconds=max_seconds)
     if max_seconds is None:
         assert result == {
+            "warnings": [],
             "success": True,
             "status": "passed",
             "message": "验证成功，共验证 16 次",
@@ -1009,7 +1018,35 @@ def test_valid_plan_passes_within_the_startup_budget(monkeypatch):
     plan = two_backups()
     plan["backup_plans"][1].plan["central"][1].replacement = ["初雪"]
     assert initialize(plan).validate_backup_plans(max_seconds=5) == {
+        "warnings": [],
         "success": True,
         "status": "passed",
         "message": "验证成功，共验证 3 次",
     }
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_parallel_group_validation_checks_full_cross_group_roster(excluded):
+    plan = two_backups()
+    plan["backup_groups"] = [
+        {
+            "id": "a",
+            "name": "A",
+            "trigger": {"left": "True"},
+            "exclusive_with": ["b"] if excluded else [],
+        },
+        {"id": "b", "name": "B", "trigger": {"left": "True"}, "exclusive_with": []},
+    ]
+    for backup, group in zip(plan["backup_plans"], ["a", "b"]):
+        backup.group_ids = [group]
+        backup.backup_type = "exclusive"
+        backup.trigger = LogicExpression("True", "==", "True")
+    data = initialize(plan)
+    previous = repr(data.plan), list(data.plan_condition), data.backup_group
+    result = data.validate_backup_plans(check_owned=False)
+    assert result["success"] is excluded
+    if not excluded:
+        assert "主力变更" in result["message"]
+        assert "替班变更" in result["message"]
+        assert "替换组不可用高效组干员" in result["message"]
+    assert (repr(data.plan), data.plan_condition, data.backup_group) == previous

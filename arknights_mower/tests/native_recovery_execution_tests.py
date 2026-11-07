@@ -446,3 +446,242 @@ def test_partial_dorm_read_only_updates_tasks_from_confirmed_slots(resting, conf
     assert getattr(scheduler, "_recovery_plan_dirty", False) is confirmed
     assert "dormitory_1" not in getattr(scheduler.op_data, "room_observations", {})
     assert scheduler.op_data.operators["讯使"].is_resting()
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_fia_return_keeps_explicit_recovery_and_releases_dispatch(
+    resting, monkeypatch, unknown
+):
+    scheduler, now = resting
+    data = scheduler.op_data
+    task = returning_task()
+    task.time = now - timedelta(minutes=1)
+    task.fia_return_time = task.time
+    task.fia_return_target = "伊内丝"
+    task.execution_retained = True
+    data.operators["伊内丝"].mood = 24
+    member = data.operators["讯使"]
+    member.rest_in_full = True
+    if unknown:
+        data.get_dorm_by_name(member.name)[1].time = None
+    other = SchedulerTask(time=now, task_type=TaskTypes.WORKSHOP)
+    scheduler.tasks, scheduler.task = [task, other], task
+    monkeypatch.setattr(scheduler, "craft_material", Mock())
+    prepare_dispatch(scheduler, monkeypatch)
+    scheduler.infra_main()
+    scheduler.agent_arrange.assert_not_called()
+    if unknown:
+        assert any(waiting is task for waiting in scheduler.waiting_group_shifts)
+    else:
+        assert task.time == now + timedelta(hours=5)
+    scheduler.task = other
+    scheduler.infra_main()
+    scheduler.craft_material.assert_called_once()
+    assert all(pending is not other for pending in scheduler.tasks)
+    previous = task.time
+    for _ in range(3):
+        scheduler._resume_waiting_group_shifts()
+        assert task.time == previous
+        assert task.plan["contact"] == ["讯使"]
+    member.mood, member.time_stamp = 24, datetime.now()
+    data.operators["银灰"].mood = 24
+    scheduler._resume_waiting_group_shifts()
+    scheduler._prepare_fia_return(task)
+    assert task.time == task.fia_return_time
+    scheduler.tasks = [task]
+    scheduler.task = task
+    scheduler.infra_main()
+    scheduler.agent_arrange.assert_called_once()
+    assert member.current_room == "contact"
+    assert all(pending is not task for pending in scheduler.tasks)
+
+
+@pytest.mark.parametrize("protection", ["product", "forced_off"])
+def test_fia_return_preserves_existing_staffing_protection(resting, protection):
+    from types import SimpleNamespace
+
+    from arknights_mower.solvers.base_schedule import ProductSwitchDeferred
+
+    scheduler, now = resting
+    data = scheduler.op_data
+    task = returning_task()
+    task.fia_return_target, task.fia_return_time = "伊内丝", now
+    task.execution_retained = True
+    if protection == "product":
+        lock = SchedulerTask(task_plan={"contact": ["讯使"]})
+        lock.product_shift_locked = True
+        lock.product_lock_names = {"讯使"}
+        lock.product_lock_slots = {("contact", 0)}
+        scheduler.tasks = [task, lock]
+    else:
+        data.plan_condition = [True]
+        data.backup_plans = [
+            SimpleNamespace(
+                group_tasks=[{"group": "联动", "action": "off", "mode": "forced"}]
+            )
+        ]
+        scheduler.tasks = [task]
+    expected = deepcopy(task.plan)
+    for _ in range(2):
+        with pytest.raises(ProductSwitchDeferred):
+            scheduler._prepare_group_shift(task)
+            scheduler._defer_conflicting_product_shift_slots(task)
+        assert task.plan == expected
+        assert task.time == now
+        assert data.operators["伊内丝"].is_resting()
+    scheduler.tasks = [task]
+    data.plan_condition = [False] if protection == "forced_off" else data.plan_condition
+    scheduler._prepare_group_shift(task)
+    scheduler._defer_conflicting_product_shift_slots(task)
+    assert task.plan == expected
+
+
+def test_forced_group_return_dispatches_at_zero_mood_without_waiting_for_full_recovery(
+    resting, monkeypatch
+):
+    from arknights_mower.utils.backup_group_tasks import sync_group_tasks
+    from arknights_mower.utils.plan import Plan, PlanConfig
+
+    scheduler, _ = resting
+    data = scheduler.op_data
+    backup = Plan(
+        {},
+        PlanConfig("", "", ""),
+        group_tasks=[{"group": "联动", "action": "on", "mode": "forced"}],
+    )
+    data.backup_plans = scheduler.global_plan["backup_plans"] = [backup]
+    data.plan_condition = [True]
+    for name in ("伊内丝", "银灰", "讯使"):
+        data.operators[name].mood = 0
+        data.operators[name].rest_in_full = True
+    sync_group_tasks(scheduler)
+    scheduler.task = next(
+        t for t in scheduler.tasks if getattr(t, "backup_group_request", None)
+    )
+    prepare_dispatch(scheduler, monkeypatch)
+    scheduler.infra_main()
+    scheduler.agent_arrange.assert_called_once()
+    assert not scheduler.op_data.group_is_resting("联动")
+    for name in ("伊内丝", "银灰", "讯使"):
+        assert scheduler.op_data.operators[name].is_working()
+        assert scheduler.op_data.operators[name].workaholic is False
+
+
+def test_forced_work_retains_nonordinary_departure_and_releases_it_after_deactivation(
+    resting, monkeypatch
+):
+    from arknights_mower.utils.plan import Plan, PlanConfig
+    from arknights_mower.utils.scheduler_task import try_reorder
+
+    scheduler, _ = resting
+    apply_plan(scheduler, returning_task().plan)
+    data = scheduler.op_data
+    data.commit_group_shifts({"联动": False})
+    for name in ("伊内丝", "银灰", "讯使"):
+        data.operators[name].mood = 0
+    plan = {}
+    assert scheduler.get_resting_plan(["伊内丝", "银灰", "讯使"], [], plan, 0)
+    plan.update(try_reorder(data, plan) or {})
+    backup = Plan(
+        {},
+        PlanConfig("", "", ""),
+        group_tasks=[{"group": "联动", "action": "on", "mode": "forced"}],
+    )
+    data.backup_plans = scheduler.global_plan["backup_plans"] = [backup]
+    data.plan_condition = [True]
+    task = SchedulerTask(task_type=TaskTypes.SHIFT_OFF, task_plan=plan)
+    at, original = task.time, deepcopy(plan)
+    scheduler.tasks, scheduler.task = [task], task
+    prepare_dispatch(scheduler, monkeypatch)
+    scheduler.infra_main()
+    assert task.execution_failure
+    for _ in range(3):
+        scheduler._resume_failed_tasks()
+        assert task.execution_failure
+        assert task.time == at and task.plan == original
+    name, room = "芬", "room_1_1"
+    data.operators[name] = Operator(name, room, index=0, mood=24, operator_type="high")
+    data.plan[room] = [Room(name, "", ["年"])]
+    scheduler.global_plan["default_plan"].plan[room] = data.plan[room]
+    unrelated = SchedulerTask(
+        task_type=TaskTypes.SELF_CORRECTION, task_plan={room: [name]}
+    )
+    scheduler.tasks.append(unrelated)
+    scheduler.task = unrelated
+    scheduler.infra_main()
+    assert data.operators[name].current_room == room
+    assert unrelated not in scheduler.tasks
+    assert task in scheduler.tasks and task.time == at
+    data.plan_condition = [False]
+    scheduler._resume_failed_tasks()
+    assert not getattr(task, "execution_failure", None)
+    scheduler.task = task
+    scheduler.infra_main()
+    assert data.group_is_resting("联动")
+    assert task not in scheduler.tasks
+
+
+@pytest.mark.parametrize("exit_mood", [0, 24])
+def test_forced_work_cancels_generated_ordinary_departure_and_replans_on_exit(
+    resting, monkeypatch, exit_mood
+):
+    from arknights_mower.utils.logic_expression import LogicExpression
+    from arknights_mower.utils.plan import Plan, PlanConfig
+
+    scheduler, _ = resting
+    apply_plan(scheduler, returning_task().plan)
+    data = scheduler.op_data
+    data.commit_group_shifts({"联动": False})
+    for name in ("伊内丝", "银灰", "讯使"):
+        data.operators[name].mood = 0
+    scheduler.total_agent = [op for op in data.operators.values() if op.is_high()]
+    scheduler.resting()
+    original = next(t for t in scheduler.tasks if t.type == TaskTypes.SHIFT_OFF)
+    assert original.ordinary_coordination
+    assert original.coordination_request_names
+    assert original.plan
+    backup = Plan(
+        {},
+        PlanConfig("", "", ""),
+        trigger=LogicExpression("True", "==", "True"),
+        group_tasks=[{"group": "联动", "action": "on", "mode": "forced"}],
+    )
+    data.backup_plans = scheduler.global_plan["backup_plans"] = [backup]
+    data.plan_condition = [True]
+    scheduler.task = original
+    prepare_dispatch(scheduler, monkeypatch)
+    scheduler.infra_main()
+    assert original not in scheduler.tasks
+    assert not getattr(original, "execution_failure", None)
+    scheduler.agent_arrange.assert_not_called()
+    for _ in range(3):
+        data.correct_dorm()
+        scheduler.resting()
+        assert not any(t.type == TaskTypes.SHIFT_OFF for t in scheduler.tasks)
+    unrelated = SchedulerTask(task_type=TaskTypes.CLUE)
+    monkeypatch.setattr(scheduler, "_run_clue_flow", Mock(return_value=True))
+    scheduler.tasks.append(unrelated)
+    scheduler.task = unrelated
+    scheduler.infra_main()
+    scheduler._run_clue_flow.assert_called_once()
+    assert unrelated not in scheduler.tasks
+    data = scheduler.op_data
+    assert not data.group_is_resting("联动")
+    data.plan_condition = [False]
+    backup.trigger = LogicExpression("False", "==", "True")
+    for name in ("伊内丝", "银灰", "讯使"):
+        data.operators[name].mood = exit_mood
+    data.correct_dorm()
+    scheduler.total_agent = [op for op in data.operators.values() if op.is_high()]
+    scheduler.resting()
+    regenerated = [t for t in scheduler.tasks if t.type == TaskTypes.SHIFT_OFF]
+    assert len(regenerated) == (1 if exit_mood == 0 else 0), [
+        (t.type, t.plan) for t in scheduler.tasks
+    ]
+    if regenerated:
+        assert regenerated[0] is not original
+        scheduler.task = regenerated[0]
+        scheduler.infra_main()
+        assert scheduler.op_data.group_is_resting("联动")
+        assert regenerated[0] not in scheduler.tasks
+    assert original not in scheduler.tasks

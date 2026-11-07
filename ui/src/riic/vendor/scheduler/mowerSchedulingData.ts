@@ -1,3 +1,4 @@
+import type {BackupGroupState} from './backupGroups'
 import {mowerDormCandidateMood} from './mowerSchedulingMood'
 import type {MowerBackupGroupTask} from './mowerBackupGroupTasks'
 import {isTradeRunOrderOperator} from '../domain/shiftRunPolicy'
@@ -20,7 +21,7 @@ export interface MowerSchedulingDataOptions {
  dormIsolation?:string[][]
  alpha?:boolean;priorityReplacement?:string[];freeRoomExclusions?:string[];dormOrder?:string[];standbyNames?:string[];lowPriorityNames?:string[]
  plan:Record<string,string[]>;operators:Record<string,MowerOperatorState>;dorms:MowerDormState[];nowMicros:number;partyTime?:MowerDateTimeValue|boolean|null;runOrderRooms?:Record<string,Record<string,never>>
- policy?:Partial<MowerMoodPolicy>;freeRoom?:boolean;powerPlantCount?:number;planConditions?:boolean[];backupGroup?:string
+ policy?:Partial<MowerMoodPolicy>;freeRoom?:boolean;powerPlantCount?:number;planConditions?:boolean[];backupGroup?:BackupGroupState
  urgentRecoverySupporters?:Record<string,string[]>
  groupRecoveryFullMembers?:Record<string,string[]>
  groupRecoveryReturnMicros?:Record<string,number>
@@ -45,7 +46,7 @@ export class MowerSchedulingData {
  standbyNames:string[];lowPriorityNames:string[]
  plan:Record<string,string[]>;operators:Record<string,MowerOperatorState>;dorms:MowerDormState[];nowMicros:number;partyTime?:MowerDateTimeValue|boolean|null;runOrderRooms:Record<string,Record<string,never>>
  recoveryOrderVersion=0
- policy:MowerMoodPolicy;freeRoom:boolean;powerPlantCount:number;planConditions:boolean[];backupGroup:string
+ policy:MowerMoodPolicy;freeRoom:boolean;powerPlantCount:number;planConditions:boolean[];backupGroup:BackupGroupState
  urgentRecoverySupporters:Record<string,string[]>
  groupRecoveryFullMembers:Record<string,string[]>
  groupRecoveryReturnMicros:Record<string,number>
@@ -132,6 +133,10 @@ export class MowerSchedulingData {
   return anchors.some(other=>other.isHigh()&&(this.alpha?!this.canStandby(other):other.restingPriority==='high')&&!other.room.startsWith('dorm')&&!other.workaholic&&(this.alpha||this.policy.experimentalDormLogic||!other.workshop)&&other.isResting()&&!!this.getDormByName(other.name))
  }
  isGroupShiftAnchor(op:MowerOperatorState,group?:string):boolean{return op.isHigh()&&(!op.multiGroup||!!op.shiftGroup)&&(group===undefined||op.group===group)&&!op.workaholic&&!op.room.startsWith('dorm')&&!this.canStandby(op)}
+ isWorkaholicGroup(group:string):boolean {
+  const workers=this.shiftGroupMembers(group).map(name=>this.operators[name]!).filter(op=>!op.room.startsWith('dorm')&&(!op.multiGroup||op.shiftGroup===group))
+  return workers.length>0&&workers.every(op=>op.workaholic)
+ }
  shiftRequestGroups(names:readonly string[]):string[]{
   const members=names.map(name=>this.operators[name]!)
   return [...new Set(members.filter(op=>op.group&&this.isGroupShiftAnchor(op)&&!(op.multiGroup&&members.some(other=>other.group!==op.group&&this.isGroupShiftAnchor(other)&&mowerSameGroupPrimaryReplacement(this,other,op.name)))).map(op=>op.group))]

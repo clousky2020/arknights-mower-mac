@@ -136,6 +136,18 @@ class PlanConf(BaseModel):
 
 
 class BackupPlanConf(PlanConf):
+    drone_room: Optional[str] = None
+    "无人机使用房间；空值继承，空字符串表示加速任意跑单贸易站"
+    drone_count_limit: Optional[int] = None
+    "无人机使用阈值；空值继承"
+
+    @field_validator("drone_count_limit", mode="before")
+    @classmethod
+    def normalize_drone_limit(cls, value):
+        from arknights_mower.utils.config.conf import validate_drone_count_limit
+
+        return None if value is None else validate_drone_count_limit(value)
+
     removed_operators: dict[
         Literal[
             "rest_in_full",
@@ -275,7 +287,10 @@ class Trigger(BaseModel):
 class BackupGroup(BaseModel):
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
-    trigger: Trigger | FunctionTrigger = Field(default_factory=Trigger)
+    trigger: Trigger | FunctionTrigger = Field(
+        default_factory=lambda: Trigger(left="True")
+    )
+    exclusive_with: list[str] = Field(default_factory=list)
 
 
 class GroupTask(BaseModel):
@@ -287,8 +302,8 @@ class GroupTask(BaseModel):
     def validate_mode(self):
         if not self.group.strip() or self.group != self.group.strip():
             raise ValueError("绑组任务须填写有效组名")
-        if self.action == "on" and self.mode != "once":
-            raise ValueError("上班任务只执行一次，后续沿用正常轮换")
+        if self.action == "on" and self.mode == "while_active":
+            raise ValueError("上班任务仅支持执行一次或强制保持上班")
         return self
 
 
@@ -339,6 +354,33 @@ class PlanModel(BaseModel):
     backup_groups: list[BackupGroup] = Field(
         default_factory=lambda: [BackupGroup(id="default", name="默认分组")]
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_group_exclusions(cls, value):
+        if not isinstance(value, dict):
+            return value
+        from arknights_mower.utils.backup_groups import normalize_backup_groups
+
+        value = dict(value)
+        groups = value.get("backup_groups", [])
+        if not isinstance(groups, list):
+            raise ValueError("副表分组必须为列表")
+        raw = [
+            group.model_dump() if isinstance(group, BackupGroup) else group
+            for group in groups
+        ]
+        if not all(
+            isinstance(group, dict)
+            and isinstance(group.get("id"), str)
+            and isinstance(group.get("name"), str)
+            and isinstance(group.get("exclusive_with", []), list)
+            and all(isinstance(key, str) for key in group.get("exclusive_with", []))
+            for group in raw
+        ):
+            raise ValueError("副表分组名称、标识或互斥对象无效")
+        value["backup_groups"] = normalize_backup_groups(raw)
+        return value
 
     @model_validator(mode="after")
     def validate_backup_groups(self):

@@ -85,6 +85,8 @@ class PlanConfig:
         free_room_exclusions: str = "",
         removed_operators: Optional[dict[str, str]] = None,
         group_resting_thresholds: Optional[dict[str, float]] = None,
+        drone_room: Optional[str] = None,
+        drone_count_limit: Optional[int] = None,
     ):
         """排班的设置
 
@@ -126,6 +128,8 @@ class PlanConfig:
             name: MoodLimits.model_validate(limits).model_dump()
             for name, limits in (operator_mood_limits or {}).items()
         }
+        self.drone_room = drone_room
+        self.drone_count_limit = drone_count_limit
         self.resting_threshold = resting_threshold
         self.group_resting_thresholds = dict(group_resting_thresholds or {})
         self.resting_threshold_override = None
@@ -220,6 +224,10 @@ class PlanConfig:
         if target.mood_limits is not None:
             n.mood_limits = copy.deepcopy(target.mood_limits)
         n.operator_mood_limits.update(copy.deepcopy(target.operator_mood_limits))
+        for field in ("drone_room", "drone_count_limit"):
+            value = getattr(target, field)
+            if value is not None:
+                setattr(n, field, value)
         return n
 
 
@@ -302,7 +310,12 @@ class Plan:
 
     def condition_source(self, group_id=None):
         groups = getattr(self, "group_triggers", {})
-        triggers = groups.values() if group_id is None else [groups.get(group_id)]
+        if group_id is None:
+            triggers = groups.values()
+        else:
+            from arknights_mower.utils.backup_groups import selected_group_ids
+
+            triggers = [groups.get(key) for key in selected_group_ids(group_id)]
         return " or ".join(f"({trigger})" for trigger in [self.trigger, *triggers])
 
     @property
