@@ -38,6 +38,8 @@ def captured_footer_frame():
 
 def recognizer(frame):
     device = Mock()
+    # Mock 的属性恒为真值，会误触发 graph 里的 AVD 分支（input tap + sleep）。
+    device.is_avd_like = False
     device.check_current_focus.return_value = False
     device.screencap.return_value = (
         None,
