@@ -30,17 +30,12 @@ def syncer(tmp_path, monkeypatch):
         growth, "get_path", lambda name: tmp_path / name.rsplit("/", 1)[-1]
     )
     monkeypatch.setattr(module, "get_path", lambda _: tmp_path / "cultivate.json")
-    # `import server` 会在模块级读 config.conf.webview.token（server.py:85），
-    # 并在导入时调用 config.conf.assistant_enabled_for_launch；
-    # 这里整体替换了 config.conf，缺这两项会让该导入直接 AttributeError。
+    # 只替换森空岛账号列表，保留 Conf 的其余字段：合成材料预留、启动守卫等都从
+    # 真实配置默认值取，整体换成 SimpleNamespace 会让这些新字段读不到。
     monkeypatch.setattr(
-        module.config,
-        "conf",
-        SimpleNamespace(
-            skland_info=[SimpleNamespace(cultivate_select=True)],
-            webview=SimpleNamespace(token="", port=58000, scale=1, tray=False),
-            assistant_enabled_for_launch=lambda managed: False,
-        ),
+        module.config.conf,
+        "skland_info",
+        [SimpleNamespace(cultivate_select=True)],
     )
     monkeypatch.setattr(module, "log", lambda _: "login")
     monkeypatch.setattr(module, "get_cred_by_token", lambda _: {})
@@ -88,11 +83,9 @@ def test_other_account_credential_is_never_reused(syncer, monkeypatch):
         return {}
 
     monkeypatch.setattr(
-        module.config,
-        "conf",
-        SimpleNamespace(
-            skland_info=[SimpleNamespace(cultivate_select=True, account="15067703927")]
-        ),
+        module.config.conf,
+        "skland_info",
+        [SimpleNamespace(cultivate_select=True, account="15067703927")],
     )
     # 缓存里存的是本账号的会话
     monkeypatch.setattr(
@@ -129,11 +122,9 @@ def test_missing_or_expired_cache_relogins_instead_of_using_blank_token(
     """缓存缺失/过期时必须真登录，不得用空 sign_token 或残留 cred 发起请求。"""
     signs = []
     monkeypatch.setattr(
-        module.config,
-        "conf",
-        SimpleNamespace(
-            skland_info=[SimpleNamespace(cultivate_select=True, account="15067703927")]
-        ),
+        module.config.conf,
+        "skland_info",
+        [SimpleNamespace(cultivate_select=True, account="15067703927")],
     )
     monkeypatch.setattr(module, "restore_cached_session", lambda account: None)
     monkeypatch.setattr(
