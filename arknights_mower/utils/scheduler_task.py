@@ -8,7 +8,6 @@ from arknights_mower.solvers.record import get_inventory_counts
 from arknights_mower.utils import config
 from arknights_mower.utils.datetime import the_same_time
 from arknights_mower.utils.dorm_candidates import (
-    dorm_candidate_mood,
     dorm_candidates,
     dorm_task_reservations,
     retained_task_reservations,
@@ -119,6 +118,44 @@ class TaskScope(Enum):
     REPLAN = "replan"
 
 
+def retain_mastery_backup_tasks(tasks, waiting):
+    """保留未解除的副表前置；等待区持有的任务不进入活动队列。"""
+    predecessors = {
+        id(previous): previous
+        for task in [*tasks, *waiting]
+        for previous in getattr(task, "mastery_backup_predecessors", ())
+    }
+    pending_ids = {id(task) for task in [*tasks, *waiting]}
+    waiting_ids = {id(task) for task in waiting}
+    for key, previous in predecessors.items():
+        if key in waiting_ids or hasattr(previous, "group_shift_waiting"):
+            if key not in waiting_ids:
+                waiting.append(previous)
+                waiting_ids.add(key)
+            tasks[:] = [task for task in tasks if task is not previous]
+        elif key not in pending_ids:
+            tasks.append(previous)
+    return set(predecessors)
+
+
+def resolve_mastery_backup_tasks(tasks, predecessors, replacement=None):
+    """仅在前置完成或其工作被合并时，解除依赖或转交给最终换人任务。"""
+    resolved = {id(previous) for previous in predecessors}
+    for task in tasks:
+        previous = getattr(task, "mastery_backup_predecessors", ())
+        remaining = tuple(item for item in previous if id(item) not in resolved)
+        if len(previous) == len(remaining):
+            continue
+        if replacement is not None and all(
+            item is not replacement for item in remaining
+        ):
+            remaining += (replacement,)
+        if remaining:
+            task.mastery_backup_predecessors = remaining
+        else:
+            task.__dict__.pop("mastery_backup_predecessors", None)
+
+
 def replan_update_tasks(saved):
     """更新重启保留专项任务、未完成操作和依赖，再用空任务重建普通安排。"""
     if not saved:
@@ -157,6 +194,10 @@ def replan_update_tasks(saved):
     )
     result = dict(saved)
     tasks = list(saved.get("tasks", ()))
+    waiting = saved.get("waiting_group_shifts", [])
+    retain_mastery_backup_tasks(tasks, waiting)
+    if waiting:
+        result["waiting_group_shifts"] = waiting
     retained = [
         task
         for task in tasks
@@ -168,7 +209,7 @@ def replan_update_tasks(saved):
         or task.type == TaskTypes.NOT_SPECIFIC
         and (task.plan or task.meta_data)
     ]
-    dependencies = [*retained, *saved.get("waiting_group_shifts", ())]
+    dependencies = [*retained, *waiting]
     protected = set()
     while dependencies:
         task = dependencies.pop()
@@ -177,6 +218,7 @@ def replan_update_tasks(saved):
         protected.add(id(task))
         dependencies.extend(getattr(task, "group_shift_predecessors", ()))
         dependencies.extend(getattr(task, "product_shift_predecessors", ()))
+        dependencies.extend(getattr(task, "mastery_backup_predecessors", ()))
     result["tasks"] = [task for task in tasks if id(task) in protected]
     result["tasks"].append(SchedulerTask())
     return result
@@ -194,6 +236,7 @@ def task_view(tasks, scope, op_data=None):
             if not getattr(task, "execution_failure", None)
             and not getattr(task, "startup_observation_pending", False)
             and not getattr(task, "maintenance_preparation_pending", False)
+            and not getattr(task, "mastery_backup_predecessors", ())
             and id(task) not in blocked
         ]
     if scope == TaskScope.REPLAN:
@@ -201,7 +244,7 @@ def task_view(tasks, scope, op_data=None):
     raise ValueError(f"未知任务查询用途：{scope}")
 
 
-def merge_restored_waiting_shifts(waiting):
+def merge_restored_waiting_shifts(waiting, *, replacements=None):
     """旧缓存中的重复派生上班保留最早原任务；未知执行状态保持原样。"""
     planning_fields = {
         "time",
@@ -217,7 +260,7 @@ def merge_restored_waiting_shifts(waiting):
         "group_shift_predecessors",
         "group_shift_transitions",
     }
-    result, buckets = [], defaultdict(list)
+    result, buckets, positions = [], defaultdict(list), {}
     for task in waiting:
         predecessors = getattr(task, "group_shift_predecessors", ())
         if (
@@ -238,6 +281,7 @@ def merge_restored_waiting_shifts(waiting):
             or not (predecessors or task.group_shift_waiting)
             or set(vars(task)) - planning_fields
         ):
+            positions[id(task)] = len(result)
             result.append(task)
             continue
         # 执行、补偿、副表或未知字段不在白名单内，即使数值相同也不合并。
@@ -270,10 +314,16 @@ def merge_restored_waiting_shifts(waiting):
                     for name in earlier_windows
                 ):
                     result[index] = earlier
+                    positions[id(task)] = index
                     break
         else:
             buckets[key].append((len(result), metadata))
+            positions[id(task)] = len(result)
             result.append(task)
+    if replacements is not None:
+        replacements.update(
+            (identity, result[index]) for identity, index in positions.items()
+        )
     removed = len(waiting) - len(result)
     if removed:
         logger.info("恢复等待换班时合并 %d 份重复安排，保留最早任务与原时间", removed)
@@ -685,24 +735,25 @@ def _is_dorm_only_task(task):
 def blocked_run_order_ids(tasks, op_data=None):
     """根据实际驻员判断等待中的普通跑单；保留任务，但不占用关键窗口。"""
     restorations = [
-        task
+        (task, roster)
         for task in tasks
         if task.type == TaskTypes.RUN_ORDER
         and getattr(task, "run_order_restore_pending", False)
+        and (roster := getattr(task, "run_order_original_roster", None)) is not None
     ]
     if not restorations:
         return set()
-    rooms = {room for task in restorations for room in task.run_order_original_roster}
+    rooms = {room for _, roster in restorations for room in roster}
     reserved = {
         name
-        for task in restorations
-        for row in task.run_order_original_roster.values()
+        for _, roster in restorations
+        for row in roster.values()
         for name in row
         if name not in ("", "Free", "Current")
     }
     reserved.update(
         name
-        for task in restorations
+        for task, _ in restorations
         if (pending := getattr(task, "run_order_confirmation_pending", None))
         and pending["submitted"]
         for name in pending["target"]
@@ -710,13 +761,14 @@ def blocked_run_order_ids(tasks, op_data=None):
     )
     conflicting_rooms = set(rooms)
     if op_data is not None:
+        operators = op_data.operators.copy()
         conflicting_rooms.update(
             op.current_room
             for name in reserved
-            if (op := op_data.operators.get(name)) is not None and op.is_working()
+            if (op := operators.get(name)) is not None and op.is_working()
         )
         reserved.update(
-            name for name, op in op_data.operators.items() if op.current_room in rooms
+            name for name, op in operators.items() if op.current_room in rooms
         )
         # 首次选人可能尚未确认；配置中的实际换入人选仍归这次补偿占用。
         reserved.update(
@@ -730,8 +782,7 @@ def blocked_run_order_ids(tasks, op_data=None):
     blocked = {
         id(task)
         for task in tasks
-        if restorations
-        and task.type == TaskTypes.RUN_ORDER
+        if task.type == TaskTypes.RUN_ORDER
         and task.meta_data
         and not getattr(task, "run_order_restore_pending", False)
         and (
@@ -739,7 +790,7 @@ def blocked_run_order_ids(tasks, op_data=None):
             or conflicting_rooms.intersection(task.plan)
             or any(
                 name in reserved
-                for row in task.plan.values()
+                for row in task.plan.copy().values()
                 for name in row
                 if name not in ("", "Free", "Current")
             )
@@ -748,12 +799,12 @@ def blocked_run_order_ids(tasks, op_data=None):
     if op_data is not None:
         blocked.update(
             id(task)
-            for task in restorations
+            for task, roster in restorations
             if any(
-                (op := op_data.operators.get(name)) is not None
+                (op := operators.get(name)) is not None
                 and op.is_working()
                 and op.current_room != room
-                for room, row in task.run_order_original_roster.items()
+                for room, row in roster.items()
                 for name in row
                 if name not in ("", "Free", "Current")
             )
@@ -1135,7 +1186,7 @@ def _find_run_order_conflict(tasks, run_order_delay=5, time_now=None, op_data=No
             and now < previous_order.time
             and not task.adjusted
         ):
-            logger.info("检测到跑单任务过于接近，准备修正跑单时间")
+            logger.debug("检测到跑单任务过于接近，准备修正跑单时间")
             return previous_order, task
         previous_order = task
 
@@ -1434,10 +1485,13 @@ def adjust_run_order_for_maintenance(
     :param advance_time: 维护副表要求更早执行时使用的截止时间
     :param now: 本轮调度时间，未提供时使用本地当前时间
     """
+    now = now or datetime.now()
     time_gap = max(run_order_delay * 2, 10)  # 确保最小间隔为10分钟操作时间
-    reset = NewsChecker.get_daily_reset(now or datetime.now())
+    reset = NewsChecker.get_daily_reset(now)
+    start, end = NewsChecker.get_update_time()
     windows = [
-        (*NewsChecker.get_update_time(), False),
+        # 提前登录后新生成的订单不再执行停服前的无人机加速。
+        *([(start, end, False)] if start is not None and now < start else []),
         (reset.start, reset.end, True),
         *[
             (task.maintenance_info.start, task.maintenance_info.end, False)
@@ -1778,7 +1832,7 @@ def dorm_rebalance_signature(op_data):
                 slot_type,
                 op_data.is_effective_free_slot(bed),
                 bed.name,
-                resting_tier(op_data, bed.name) if bed.name else None,
+                resting_key(op_data, bed.name)[:2] if bed.name else None,
             )
         )
     return tuple(op_data.config.dorm_order), tuple(beds)
@@ -1799,6 +1853,13 @@ def rebalance_plan_swap_dorms(
     """
     reserved_names = reserved_names or set()
     locked_positions = set(reserved_slots)
+    # 仍在固定宿舍岗位接替宿管的同组主班不参与动态床位迁移。
+    locked_positions.update(
+        bed.position
+        for bed in getattr(op_data, "group_dorm", ())
+        if (current := op_data.get_current_operator(*bed.position)) is not None
+        and op_data.is_recovery_dorm(bed, current.name)
+    )
     if reorder:
         locked_positions.update(bed.position for bed in op_data.group_dorm)
         locked_positions.update(op_data.reserved_product_beds)
@@ -1906,7 +1967,7 @@ def rebalance_plan_swap_dorms(
     for bed in op_data.dorm:
         if bed.position not in destinations and bed.position not in locked_positions:
             bed.reset()
-    logger.info(
+    logger.debug(
         "副表切换后重排宿舍：保留%s，离开%s",
         sorted(assigned),
         sorted(set(unique) - assigned),
@@ -2079,7 +2140,8 @@ def generate_plan_by_drom(
                     if existing_targets and agent in existing_targets:
                         t_room, t_index = existing_targets[agent]
                         if (
-                            t_room in op_data.plan
+                            (not t_room.startswith("dorm") or o.room.startswith("dorm"))
+                            and t_room in op_data.plan
                             and t_index < len(op_data.plan[t_room])
                             and (
                                 t_room not in plan
@@ -2279,6 +2341,11 @@ def plan_metadata(
                 for room, agents in t.plan.items():
                     for idx, name in enumerate(agents):
                         if name not in ("Current", "Free", ""):
+                            op = op_data.operators.get(name)
+                            if room.startswith("dorm") and (
+                                op is None or not op.room.startswith("dorm")
+                            ):
+                                continue
                             existing_targets[name] = (room, idx)
     previous_returns = {}
     for task in tasks:
@@ -2983,7 +3050,7 @@ def prioritize_new_dorm_recovery(
             groups.append([bed])
     now = datetime.now()
     # 满心情垫位者与空床同级，不能仅为填满前方空床而搬动满心情住客。
-    filler_tier = int(RestingTier.EXCLUDED) + 1
+    filler_tier = (int(RestingTier.EXCLUDED) + 1, 0)
 
     def tier(name):
         if not name:
@@ -2995,7 +3062,8 @@ def prioritize_new_dorm_recovery(
             and resting_mood(op, now) >= op.upper_limit
         ):
             return filler_tier
-        return resting_tier(projected, name)
+        # 高优名单内的先后也决定单回配额，不能被已有单回位保位覆盖。
+        return resting_key(projected, name, now)[:2]
 
     names = [bed.name for bed in beds if bed.name]
     names.sort(key=lambda name: resting_key(projected, name, now))
@@ -3064,7 +3132,8 @@ def prioritize_new_dorm_recovery(
         allocations[groups[index][0].position] != previous[groups[index][0].position]
         for index in targets
     ):
-        # 单回归属改变时，同级恢复者重新按缺口分配；满心情垫位保留兼容原位。
+        # 单回归属改变时，高优恢复者按名单顺序，其余同级按缺口重新分配。
+        # 满心情垫位保留兼容原位。
         remaining = [
             bed.name for bed in beds if bed.name and tier(bed.name) != filler_tier
         ]
@@ -3112,7 +3181,8 @@ def prioritize_new_dorm_recovery(
                 < single_recovery_bed_cost(source, all_beds)
                 and (
                     not allocations[bed.position]
-                    or tier(allocations[bed.position]) == tier(name)
+                    or resting_tier(projected, allocations[bed.position])
+                    == resting_tier(projected, name)
                 )
             ),
             None,
@@ -3504,11 +3574,7 @@ def try_add_release_dorm(
                 for name in candidates.estimated_recovering
                 if name in op_data.operators
             ],
-            key=lambda name: (
-                resting_tier(op_data, name),
-                dorm_candidate_mood(op_data, name, now)
-                - op_data.operators[name].upper_limit,
-            ),
+            key=lambda name: resting_key(op_data, name, now),
         )
         recovery_names = crafting_rest_order(op_data, recovery_names)
         if priority_only:
@@ -3673,14 +3739,20 @@ def try_add_release_dorm(
             }
         task.plan = isolated
         tasks.append(task)
+        from arknights_mower.utils.task_presentation import (
+            build_task_presentation,
+            format_task_log_message,
+        )
+
+        snapshot = build_task_presentation(task, op_data)
+        if not filling_vacancies and not priority_only:
+            header = f"当前没有可用空床，已生成宿舍调整任务「{snapshot['title']}」，执行时间 {task.time}"
+        else:
+            purpose = "宿舍补位" if filling_vacancies else "高优恢复"
+            header = f"已添加{purpose}任务「{snapshot['title']}」，执行时间 {task.time}"
+        snapshot["header"] = header
         logger.info(
-            "添加%s任务完成：%s",
-            "宿舍补位"
-            if filling_vacancies
-            else "高优恢复"
-            if priority_only
-            else "宿舍恢复接管",
-            task.plan,
+            format_task_log_message(snapshot, header), extra={"log_task": snapshot}
         )
     except Exception as ex:
         logger.exception(ex)
@@ -3925,6 +3997,12 @@ class SchedulerTask:
 
     @property
     def display_name(self):
+        if (
+            self.type == TaskTypes.RUN_ORDER
+            and getattr(self, "run_order_restore_pending", False)
+            and not self.meta_data
+        ):
+            return "恢复原班"
         if self.type in MAINTENANCE_TASK_TYPES:
             mode = "提前准备" if self.maintenance_info.prepare else "直接暂停"
             if self.type == TaskTypes.SERVER_UPDATE:

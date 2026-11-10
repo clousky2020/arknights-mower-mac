@@ -292,9 +292,10 @@ def native_opportunity(solver, required, now=None, *, budget=128, current_only=F
                 and mood <= data.resting_mood_threshold(op)
             ):
                 groups[op.group or name] = (
-                    data.shift_group_members(op.group) if op.group else [name]
+                    name,
+                    data.shift_group_members(op.group) if op.group else [name],
                 )
-        for members in groups.values():
+        for source, members in groups.values():
             candidate = copy.copy(trial)
             candidate.op_data = copy.deepcopy(
                 data, {id(data.eval_model): data.eval_model}
@@ -307,13 +308,16 @@ def native_opportunity(solver, required, now=None, *, budget=128, current_only=F
                     [],
                     plan,
                     candidate.op_data.active_high_resting_count(),
+                    request_names=[source],
                 )
                 if (
                     not plan
                     and current_only
                     and any(data.operators[name].exhaust_require for name in members)
                 ):
-                    support = candidate._plan_exhaust_support(list(members))
+                    support = candidate._plan_exhaust_support(
+                        list(members), request_names=[source]
+                    )
                     if support:
                         coordinated = data.project_arrangements([support])
                         queue.append((coordinated, when, used, served))
@@ -493,7 +497,7 @@ def native_opportunity(solver, required, now=None, *, budget=128, current_only=F
 def emergency_dorm_plan(
     data, state, tasks=(), *, members=None, reallocate=False, recovery_order=None
 ):
-    """救急优先连续安排同组恢复；余床沿用共享候选和预约。"""
+    """救急按正常运行交接需要连续恢复同组；余床沿用共享候选和预约。"""
     from arknights_mower.utils.dorm_candidates import (
         dorm_candidate_mood,
         dorm_candidates,
@@ -616,13 +620,12 @@ def emergency_dorm_plan(
     for name in sorted(
         need,
         key=lambda name: (
-            resting_tier(data, name),
             recovery_order.get(name, (2, float("inf"))),
-            resting_key(data, name),
+            resting_mood(data.operators[name]),
             name,
         ),
     ):
-        group = (resting_tier(data, name), data.operators[name].group or name)
+        group = data.operators[name].group or name
         groups.setdefault(group, []).append(name)
     ordered = [name for members in groups.values() for name in members]
     ordinary.discard("菲亚梅塔")
@@ -646,6 +649,7 @@ def emergency_dorm_plan(
             active_groups=active_groups,
             plan=plan,
             isolation=not reallocate,
+            use_configured_order=name in need,
         )
         if index is None:
             if name in retained:

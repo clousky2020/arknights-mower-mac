@@ -15,7 +15,7 @@ from arknights_mower.solvers import record
 from arknights_mower.utils import config_backup as backup
 from arknights_mower.utils.config import gui
 from arknights_mower.utils.log import logger
-from arknights_mower.utils.web_auth import origin_allowed, require_token
+from arknights_mower.utils.web_auth import check_request_origin, require_token
 from arknights_mower.views.mastery import _purge_plan_tasks
 
 db_admin_bp = Blueprint("db_admin", __name__)
@@ -34,6 +34,18 @@ CATEGORY_TABLES = {
     "trading_history": "trading_history",  # 交易历史
     "inventory": "inventory",  # 仓库库存
     "saved_state": "saved_state",  # 运行缓存（重启续传书签）
+}
+
+_CATEGORY_LABELS = {
+    "mastery_plan": "专精计划",
+    "mastery_route": "专精路线配置",
+    "mastery_notify": "专精通知记录",
+    "log": "错误日志",
+    "agent_action": "干员心情记录",
+    "operation_history": "刷图记录",
+    "trading_history": "跑单记录",
+    "inventory": "仓库库存",
+    "saved_state": "运行缓存",
 }
 
 # 「正在练」的专精计划状态集（与 mastery_db 的 active 集合一致：is_operator_busy / get_active_plan）
@@ -113,7 +125,12 @@ def delete():
         return {"error": str(e)}, 500
     for pid in plan_ids:
         _purge_plan_tasks(pid)
-    logger.info(f"[db-admin] 删除 {len(keys)} 类数据 {deleted}")
+    logger.info(
+        "数据库清理完成：%s",
+        "、".join(
+            f"{_CATEGORY_LABELS[key]} {count} 条" for key, count in deleted.items()
+        ),
+    )
     return {"deleted": deleted}
 
 
@@ -162,9 +179,7 @@ def _maintenance(action=None):
     if action is not None:
         if request.headers.get("X-Mower-Settings") != "1":
             abort(403)
-        origin = request.headers.get("Origin")
-        if origin and not origin_allowed(origin):
-            abort(403)
+        check_request_origin()
     factory = current_app.config.get("CONFIG_PROFILES_LOCKS")
     locks = (
         factory()

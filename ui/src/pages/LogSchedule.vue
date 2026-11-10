@@ -1,8 +1,10 @@
 <script setup>
-import { computed, inject, onMounted, onUnmounted, ref } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useThemeVars } from 'naive-ui'
+import { routeLocationKey } from 'vue-router'
 
 const axios = inject('axios')
+const route = inject(routeLocationKey, null)
 const themeVars = useThemeVars()
 const deleteDialogStyle = computed(() => ({
   width: 'min(440px, calc(100vw - 32px))',
@@ -24,6 +26,12 @@ const activeEventId = ref('')
 const screenshots = ref([])
 const imageIndex = ref(0)
 const imageFailed = ref(false)
+const imageUrl = ref('')
+const shotImage = ref(null)
+
+function openImagePreview() {
+  shotImage.value?.click?.()
+}
 const searchText = ref('')
 const levelFilter = ref('all')
 const exporting = ref(false)
@@ -61,6 +69,21 @@ const archiveBusy = computed(() => deleting.value || exporting.value)
 
 const activeEvent = computed(() => events.value.find((event) => event.id === activeEventId.value))
 const imagePath = computed(() => screenshots.value[imageIndex.value] || '')
+const historyAt = computed(() => {
+  const at = route?.query?.at
+  if (typeof at !== 'string' || !at || /\D/.test(at)) return null
+  const timestamp = Number(at)
+  return Number.isSafeInteger(timestamp) && timestamp <= Date.now() + 3600000 ? timestamp : null
+})
+const imageCaption = computed(() => {
+  if (!imagePath.value) return '当前窗口没有可读取的截图'
+  const time = imageTime(imagePath.value)
+  return browseMode.value === 'time' &&
+    loadedAt.value === historyAt.value &&
+    imageIndex.value === imageNearest(loadedAt.value)
+    ? `所选时间附近的截图 · ${time}`
+    : time
+})
 const canExport = computed(
   () => !logLoading.value && !logError.value && (browseMode.value === 'time' || !!activeEvent.value)
 )
@@ -81,9 +104,6 @@ const windowLabel = computed(() => {
   const format = (value) => new Date(value).toLocaleString('zh-CN', { hour12: false })
   return `${format(first - 300000)} — ${format(last + 300000)}`
 })
-const imageUrl = computed(() =>
-  imagePath.value ? `${import.meta.env.VITE_HTTP_URL}/screenshots/${imagePath.value}` : ''
-)
 const visibleLogs = computed(() => {
   const search = searchText.value.trim().toLocaleLowerCase()
   return logs.value
@@ -472,8 +492,41 @@ onUnmounted(() => {
 })
 
 onMounted(() => {
+  watch(
+    imagePath,
+    async (path, _, onCleanup) => {
+      imageUrl.value = ''
+      imageFailed.value = false
+      if (!path) return
+      const controller = new AbortController()
+      let url = ''
+      onCleanup(() => {
+        controller.abort()
+        if (url) URL.revokeObjectURL(url)
+      })
+      try {
+        const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/screenshots/${path}`, {
+          responseType: 'blob',
+          signal: controller.signal,
+          timeout: 10000
+        })
+        if (controller.signal.aborted) return
+        url = URL.createObjectURL(response.data)
+        imageUrl.value = url
+      } catch {
+        if (!controller.signal.aborted) imageFailed.value = true
+      }
+    },
+    { immediate: true }
+  )
   loadEvents()
-  loadWindow()
+  watch(
+    historyAt,
+    (at) => {
+      if (!route || route.name === 'log_schedule') loadWindow(at ?? Date.now())
+    },
+    { immediate: true }
+  )
 })
 </script>
 
@@ -578,6 +631,7 @@ onMounted(() => {
     </section>
     <p class="export-hint">
       所有日志导出均附带当前保存的排班表 JSON，以及导出时的 Mower 版本信息。
+      导出的截图是原始画面，未经脱敏，分享前请检查账号等信息。
     </p>
     <p v-if="exportError && !showExportDialog" class="export-error" role="alert">
       {{ exportError }}
@@ -786,21 +840,23 @@ onMounted(() => {
             {{ imageIndex + 1 }} / {{ screenshots.length }}
           </span>
         </div>
-        <p class="panel-intro">
-          {{ imagePath ? imageTime(imagePath) : '当前窗口没有可读取的截图' }}
-        </p>
+        <p class="panel-intro">{{ imageCaption }}</p>
         <div class="image-stage">
           <div v-if="!imagePath" class="image-empty">
             <strong>{{ logLoading ? '正在读取画面…' : '暂无截图' }}</strong>
             <span>普通截图可能已过期清理，异常归档单独保留。</span>
           </div>
           <div v-else-if="imageFailed" class="image-empty">截图文件暂时无法读取</div>
-          <img
+          <div v-else-if="!imageUrl" class="image-empty">正在读取画面…</div>
+          <n-image
             v-else
             :key="imagePath"
+            ref="shotImage"
             class="shot-image"
             :src="imageUrl"
             alt="所选时间的游戏截图"
+            object-fit="contain"
+            show-toolbar-tooltip
             @error="imageFailed = true"
           />
         </div>
@@ -822,15 +878,9 @@ onMounted(() => {
             下一张
           </n-button>
         </div>
-        <a
-          v-if="imagePath"
-          class="open-image"
-          :href="imageUrl"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
+        <button v-if="imageUrl" type="button" class="open-image" @click="openImagePreview">
           打开原图 ↗
-        </a>
+        </button>
       </section>
     </div>
 
@@ -946,6 +996,13 @@ h2 {
   color: var(--mower-primary);
   text-decoration: none;
   white-space: nowrap;
+}
+.open-image {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
 }
 .back-link {
   flex-shrink: 0;
@@ -1258,14 +1315,23 @@ h2 {
   opacity: 0.6;
 }
 .shot-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: min(56vh, 600px);
+}
+.shot-image :deep(img) {
   display: block;
   max-width: 100%;
   max-height: min(56vh, 600px);
+  width: auto;
+  height: auto;
   object-fit: contain;
   border-radius: 4px;
   outline: 1px solid rgba(0, 0, 0, 0.1);
 }
-:global(html[data-mower-theme='dark']) .shot-image {
+:global(html[data-mower-theme='dark']) .shot-image :deep(img) {
   outline-color: rgba(255, 255, 255, 0.1);
 }
 .image-navigation {

@@ -614,7 +614,6 @@ async function prepareIncome() {
   try {
     const plan = JSON.parse(JSON.stringify(plan_store.build_plan()))
     plan.advanced_settings = JSON.parse(JSON.stringify(config_store.build_advanced_settings()))
-    const droneRoom = config_store.drone_room
     const { incomeWorkspace } = await import('@/riic/income')
     incomeWorkspace(plan)
     if (generation !== income_preparation) return
@@ -658,7 +657,7 @@ async function prepareIncome() {
       timeout: 60000
     })
     if (generation === income_preparation)
-      income_snapshot.value = { plan, image: data, theme: imageTheme, label, roomBounds, droneRoom }
+      income_snapshot.value = { plan, image: data, theme: imageTheme, label, roomBounds }
   } catch (error) {
     if (generation === income_preparation) income_error.value = error.message || '排班快照准备失败'
   } finally {
@@ -954,10 +953,10 @@ function movePlanForward() {
           <help-text>
             <p>
               高优干员 → 普通主班 → 低优干员 → 高优替班 → 候补 → 普通替班 →
-              空闲；同级距心情上限更远者优先。
+              空闲；高优干员按名单从前到后排序，其余同级距心情上限更远者优先。
             </p>
             <p>
-              只影响分床和单回，不改变下班顺序。更高排名的新入住者可重分单回，已有普通床位保持不动。
+              只影响分床和单回，不改变下班顺序。拖动名单可调整高优干员的先后；入住、离宿或恢复配置变化时按此顺序分配单回，普通床位仍受保位规则约束。
             </p>
             <p>
               动态选择的干员达到或超过个人心情上限后，按普通空闲级参与分床和保床；固定宿舍岗位及宿舍保留干员除外。

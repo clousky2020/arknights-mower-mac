@@ -1118,6 +1118,7 @@ def test_operator_only_selection_can_be_read_by_real_depot_reader(storage, monke
     _create("operators only", ["operators"])
     monkeypatch.setattr(depot, "get_path", storage)
     monkeypatch.setattr(depot, "save_inventory_counts", lambda counts, **_: counts)
+    monkeypatch.setattr(depot, "get_inventory_counts", lambda: {})
     result = depot.读取仓库()
     assert isinstance(result[0], dict)
     assert json.loads(snapshot.read_text(encoding="utf-8"))["data"]["items"] == []
@@ -1156,7 +1157,7 @@ def _headers(generation="0", **extra):
     }
 
 
-def test_http_auth_settings_origin_and_generation_guards(client):
+def test_http_auth_settings_and_generation_guards_after_forwarding(client):
     assert client.get("/config-profiles").status_code == 403
     assert (
         client.get("/config-profiles", headers={"token": "secret"}).status_code == 200
@@ -1170,7 +1171,9 @@ def test_http_auth_settings_origin_and_generation_guards(client):
     )
     assert (
         client.post(
-            "/config-profiles", json=body, headers=_headers(Origin="https://other.test")
+            "/config-profiles",
+            json=body,
+            headers=_headers(token="wrong", Origin="https://mower.example:8443"),
         ).status_code
         == 403
     )
@@ -1182,7 +1185,11 @@ def test_http_auth_settings_origin_and_generation_guards(client):
         ).json["code"]
         == "configuration_changed"
     )
-    result = client.post("/config-profiles", json=body, headers=_headers())
+    result = client.post(
+        "/config-profiles",
+        json=body,
+        headers=_headers(Host="127.0.0.1:58000", Origin="https://mower.example:8443"),
+    )
     assert result.status_code == 200
     assert result.json["generation"] != "0"
     assert (
@@ -1705,7 +1712,8 @@ def test_event_shop_settings_follow_daily_profile_group(storage, inherit):
     _create("商店配置", inherit)
     assert config.conf.maa_event_shop.enable is ("daily" in inherit)
     if "daily" in inherit:
-        assert config.conf.maa_event_shop.x == 900
+        assert "activity" not in config.conf.maa_event_shop.model_dump()
+        assert "custom_entry" not in config.conf.maa_event_shop.model_dump()
         assert config.conf.maa_event_shop.switch_source == "活动"
 
 

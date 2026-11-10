@@ -1,9 +1,14 @@
 import { appendFileSync } from 'node:fs'
 import process from 'node:process'
 import { expect, it } from 'vitest'
-import plan from './fixtures/income-21trade-3proviso.json'
+import originalPlan from './fixtures/income-21trade-3proviso.json'
 import { defaultIncomeSettings } from './income'
 import { calculateIncome } from './incomeWorker'
+
+const plan = {
+  ...originalPlan,
+  advanced_settings: { ...originalPlan.advanced_settings, drone_room: 'room_3_3' }
+}
 
 const longRun = process.env.MOWER_INCOME_LONG_TEST === '1'
 const warmupDays = longRun ? 3 : 0
@@ -26,8 +31,7 @@ it.each([true, false])(
         operatorMode: 'maximum',
         inventorySource: 'manual',
         finiteInventory: false,
-        weightMode: 'custom',
-        droneRoom: 'room_3_3'
+        weightMode: 'custom'
       },
       (progress) => {
         const percent = Math.floor(progress.fraction * 100)
@@ -107,22 +111,22 @@ it.each([true, false])(
         result.simulationReport.production.expected.output.exp,
         6
       )
-      expect(result.simulationReport.production.expected.droneGenerated).toBeCloseTo(
-        result.stability.drones.generated,
-        6
-      )
+      expect(result.simulationReport.production.expected.droneGenerated).toBeGreaterThan(0)
+      expect(result.stability.drones).toBeUndefined()
       expect(result.orderDistribution.rows[2].count).toBe(0)
     } else {
       expect(result.simulationReport.production.assumptions.seed).toBe(42)
       expect(sampled.every((event) => !event.order.expectationComponents)).toBe(true)
     }
-    const drones = result.stability.drones
-    expect(drones.consumed).toBeGreaterThan(0)
-    expect(drones.closing).toBeCloseTo(
-      drones.opening + drones.generated - drones.overflow - drones.consumed,
-      6
-    )
-    expect(drones.consumed).toBeCloseTo(result.resources.outflows.drone, 6)
+    if (!expectationMode) {
+      const drones = result.stability.drones
+      expect(drones.consumed).toBeGreaterThan(0)
+      expect(drones.closing).toBeCloseTo(
+        drones.opening + drones.generated - drones.overflow - drones.consumed,
+        6
+      )
+      expect(drones.consumed).toBeCloseTo(result.resources.outflows.drone, 6)
+    }
     expect(result.stability.roomComparisons.length).toBeGreaterThan(0)
     expect(plan).toEqual(original)
   },

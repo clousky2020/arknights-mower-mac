@@ -2,6 +2,18 @@
 
 Recognition consumes standard canvas frames and their crops. [Device Control](device-control.md#4-capture-frame-contract--storage) owns acquisition and screenshot storage; this subsystem owns model input preparation and OCR execution.
 
+## Windows OpenCV Runtime
+
+On Windows, [package startup](../../arknights_mower/__init__.py) sets `OPENCV_OPENCL_RUNTIME=disabled` before importing OpenCV when the environment variable is absent. OpenCV uses its CPU paths by default, avoiding OpenCL driver cleanup that can block process exit after application resources have closed. Spawned instances and helpers inherit this setting. An explicitly supplied value, including an empty string, is retained; other platforms keep their existing OpenCV runtime selection.
+
+The [OpenCV runtime tests](../../arknights_mower/tests/opencv_runtime_tests.py) cover source and frozen startup, explicit values and platform isolation. Windows native checks exercise image operations, a background thread and a spawned helper, and verify that they exit without enabling OpenCL.
+
+## Windows OpenBLAS Thread Default
+
+On Windows, [package startup](../../arknights_mower/__init__.py) sets `OPENBLAS_NUM_THREADS=1` before NumPy loads to reduce private memory committed for OpenBLAS threads. It supplies this default only when `OPENBLAS_NUM_THREADS`, `OPENBLAS_DEFAULT_NUM_THREADS`, `GOTO_NUM_THREADS` and `OMP_NUM_THREADS` are all absent. Spawned processes inherit the setting. Other platforms keep their library defaults. ONNX Runtime and OpenCV use their own thread settings.
+
+[Native runtime tests](../../arknights_mower/tests/opencv_runtime_tests.py) cover startup before NumPy loads, including source and frozen startup paths, explicit overrides and other platforms.
+
 ## Login Captcha Panel
 
 Captcha scene recognition and the existing solver share the same white-panel bounds. The bounds must contain the solver's complete crop regions and a nonzero template border; pure-white pixels must occupy at least ten percent of their bounding rectangle. Sparse startup-background highlights do not confirm a captcha panel, even when the generic captcha feature matches. Missing or invalid bounds prevent template matching and captcha input. Refreshing a confirmed panel requires new bounds before matching the refreshed image. Cancellation and device exceptions propagate through the existing recovery boundary.
@@ -51,6 +63,8 @@ Tiny prioritizes inference speed and model size. Fixed screenshot checks retain 
 [`rapidocr.py`](../../arknights_mower/utils/rapidocr.py) owns the production model factory. The detector input passes through two steps. RapidOCR first applies its own letterbox: when the width/height ratio exceeds 8 or the height is at most 30 pixels, it pads black bands above and below until the height is about twice the width divided by 8, so a 441×48 crop becomes 441×110. The bounded wrapper in `rapidocr.py` then scales that letterboxed image with two bounds: a long-edge cap at 1920 pixels and short-edge enlargement toward 736 pixels for small text, followed by alignment to the network's 32-pixel units. The tighter bound determines the scale, so above a letterboxed aspect ratio of 1920/736 (about 2.61) the long edge stays at 1920 pixels and the short edge follows that cap instead of enlarging toward 736 pixels; the same 441×48 crop reaches the detector as 1920×480, and a 1920×65 crop becomes 1920×479 after letterbox and 1920×480 after the wrapper. Wide crops therefore keep a bounded detector tensor instead of the wider input under the previous short-edge rule (2944×736 for these crops). This limit changes only the detector input size; result coordinates retain their existing meaning and recognition thresholds are unchanged.
 
 Concurrent initialization publishes one engine per instance; failed construction leaves initialization retryable. The in-process engine constructs the model in the calling instance through the same factory with the library's default session threads. The shared service constructs the model in its worker through the same factory, with two intra-operation threads and one inter-operation thread per ONNX session, and an OpenCV thread limit of two. The shared path bounds each library's parallel work rather than reserving particular CPU cores. The input limit reduces inference allocations; it does not establish an application-wide resident-memory limit.
+
+At the [scheduler's long-wait boundary](base-scheduler.md#idle-observation-boundary), the in-process engine releases its model sessions if no inference holds its lock. The engine retains its configured recognition threshold and reloads the models at the next valid OCR call or explicit initialization. A failed reload reports the error to the caller and leaves the models eligible for loading on a later call. The shared OCR service manages its own idle lifetime.
 
 <a id="independent-shared-ocr"></a>
 ## Independent Shared OCR

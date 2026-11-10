@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import atexit
 import datetime
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -61,7 +62,11 @@ from arknights_mower.utils.path import get_path, resolve_config_path
 from arknights_mower.utils.resource_pkg import register_resource_reload
 from arknights_mower.utils.resource_update_job import ResourceUpdateJob
 from arknights_mower.utils.update_runtime import active_job
-from arknights_mower.utils.web_auth import check_token, require_token
+from arknights_mower.utils.web_auth import (
+    check_request_origin,
+    check_token,
+    require_token,
+)
 from arknights_mower.views.config_backup import config_backup_bp
 from arknights_mower.views.config_profiles import config_profiles_bp
 from arknights_mower.views.db_admin import db_admin_bp
@@ -781,13 +786,9 @@ def _authorize_websocket(ws, allow_local_log=False):
         return False
 
     expected = getattr(app, "token", "")
-    origin = request.headers.get("Origin", "")
     if allow_local_log and _local_log_request_allowed(require_origin=True):
         return True
-    if not expected or (
-        not allow_local_log
-        and (not origin or not _diagnostic_delete_origin_allowed(origin))
-    ):
+    if not expected:
         return reject()
     try:
         first = ws.receive(timeout=5)
@@ -1974,6 +1975,144 @@ def get_status():
     return response
 
 
+# 记录名、完成日期属性、尝试日期属性。
+_DAILY_STATUS_RECORDS = (
+    ("skland", "daily_skland", None),
+    ("mail", "daily_mail", None),
+    ("event_sign_in", "daily_event_sign_in", "daily_event_sign_in_attempt"),
+    ("report", "daily_report", None),
+    ("visit_friend", "daily_visit_friend", "daily_visit_friend_attempt"),
+)
+_MAA_DAILY_STATUS_KEYS = (
+    "credit_fight",
+    "recruit",
+    "orundum",
+    "mining",
+    "specialaccess",
+    "signinevent",
+)
+daily_status_lock = RLock()
+daily_status_cache = {"snapshot": None, "values": None}
+
+
+def _daily_status_values(read, *, live=True):
+    from arknights_mower.utils.task_activity import snapshot_activity_values
+
+    values = {
+        name: read(name)
+        for _, completion, attempt in _DAILY_STATUS_RECORDS
+        for name in (completion, attempt)
+        if name
+    }
+    # MAA 回调可能同时修改这份记录，先复制再读取。
+    completed = read("maa_daily_completed")
+    values["maa_daily_completed"] = (
+        dict(completed) if isinstance(completed, dict) else {}
+    )
+    values["activities"] = snapshot_activity_values(read, live=live)
+    return values
+
+
+def _daily_status_records(values, game_day):
+    def reached(day):
+        # 调度器在 daily_X < 游戏日时重新运行；旧快照里无法比较的值视为未完成。
+        try:
+            return day >= game_day
+        except TypeError:
+            return False
+
+    records = {}
+    for name, completion, attempt in _DAILY_STATUS_RECORDS:
+        if reached(values.get(completion)):
+            records[name] = "done"
+        elif attempt and values.get(attempt) == game_day:
+            records[name] = "attempted"
+        else:
+            records[name] = "pending"
+    completed = values["maa_daily_completed"]
+    for key in _MAA_DAILY_STATUS_KEYS:
+        # MAA 记录只在等于当天游戏日时跳过。
+        records[f"maa_{key}"] = "done" if completed.get(key) == game_day else "pending"
+    return records
+
+
+def _saved_daily_status_values():
+    """读取最近一次运行缓存的每日记录；同一行只解析一次，解析失败只记录一次。"""
+    import pickle
+    import sqlite3
+
+    from arknights_mower.utils.task_activity import readonly_connection
+
+    with daily_status_lock:
+        try:
+            with readonly_connection(get_path("@app/tmp/data.db")) as connection:
+                row = connection.execute(
+                    "SELECT time, state FROM saved_state ORDER BY time DESC LIMIT 1"
+                ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        saved_at, blob = row
+        digest = hashlib.sha256(blob).digest() if isinstance(blob, bytes) else None
+        snapshot = (saved_at, digest)
+        if daily_status_cache["snapshot"] != snapshot:
+            try:
+                state = pickle.loads(blob)
+                if not isinstance(state, dict):
+                    raise TypeError(f"快照类型为 {type(state).__name__}")
+                values = _daily_status_values(state.get, live=False)
+            except Exception as exc:
+                logger.warning("运行缓存 %s 无法读取每日记录：%s", saved_at, exc)
+                values = None
+            daily_status_cache.update(snapshot=snapshot, values=values)
+        return daily_status_cache["values"]
+
+
+@app.route("/daily-status")
+@require_token
+def get_daily_status():
+    """只读返回游戏日记录、周期检查和待执行安排。"""
+    from arknights_mower.utils.task_activity import (
+        build_task_activities,
+        read_long_progress,
+    )
+
+    server_now = get_server_time()
+    game_day = server_now.date()
+    values, source = None, "none"
+    if mower_thread and mower_thread.is_alive():
+        from arknights_mower.__main__ import base_scheduler
+
+        if base_scheduler is not None and getattr(
+            base_scheduler, "_state_restore_complete", False
+        ):
+            values = _daily_status_values(
+                lambda name: getattr(base_scheduler, name, None)
+            )
+            source = "live"
+    elif (values := _saved_daily_status_values()) is not None:
+        source = "saved"
+    progress = (
+        read_long_progress(get_path("@app/tmp/data.db"), config.conf.maa_long_task_type)
+        if values is not None and config.conf.maa_rg_enable
+        else None
+    )
+    return {
+        "game_day": game_day.isoformat(),
+        "source": source,
+        "records": {} if values is None else _daily_status_records(values, game_day),
+        "activities": build_task_activities(
+            None if values is None else values["activities"],
+            source=source,
+            game_day=game_day,
+            now=server_now,
+            conf=config.conf,
+            progress=progress,
+        ),
+    }
+
+
 @app.route("/start/<start_type>", methods=["GET", "POST"])
 @require_token
 def start(start_type, *, automatic=False):
@@ -2485,6 +2624,7 @@ def log(ws):
 
 
 @app.route("/screenshots/<path:filename>")
+@require_token
 def serve_screenshot(filename):
     """
     提供截图文件的访问
@@ -2619,8 +2759,7 @@ def diagnostic_error_logs(archive_id):
 def diagnostic_error_analyze(archive_id):
     if request.headers.get("X-Mower-Diagnostics") != "1":
         abort(403)
-    if not _diagnostic_delete_origin_allowed(request.headers.get("Origin")):
-        abort(403)
+    check_request_origin()
     if not archive_id.isascii() or not archive_id.isdigit() or len(archive_id) > 20:
         abort(404)
     folder = get_path("@app/screenshot") / "errors" / archive_id
@@ -2666,9 +2805,7 @@ def diagnostic_error_export(archive_id):
 def diagnostic_error_delete(archive_id):
     if request.headers.get("X-Mower-Diagnostics") != "1":
         abort(403)
-    origin = request.headers.get("Origin")
-    if not _diagnostic_delete_origin_allowed(origin):
-        abort(403)
+    check_request_origin()
     if not archive_id.isascii() or not archive_id.isdigit() or len(archive_id) > 20:
         abort(404)
     screenshot_root = get_path("@app/screenshot")
@@ -2703,6 +2840,7 @@ def get_screenshot_stats():
 
 
 @app.route("/latest-screenshot")
+@require_token
 def get_latest_screenshot():
     """
     返回最新截图的路径

@@ -23,6 +23,8 @@ from arknights_mower.utils.swipe import NOINERTIA_OFFSET
 ENTRY_SCOPE = ((90, 100), (270, 347))
 EXPAND_SCOPE = ((20, 265), (115, 410))
 COSTUME_SCOPE = ((1500, 840), (1920, 1035))
+COSTUME_BRAND_SCOPE = ((140, 372), (270, 414))
+COSTUME_FLOT_SCOPE = ((1195, 526), (1385, 589))
 PRESENTATION_SKIP_SCOPE = ((1680, 0), (1920, 180))
 MAX_DAYS = 15
 
@@ -413,14 +415,35 @@ class EventSignInSolver(SceneGraphSolver):
         start_y = top if whole else top + (bottom - top) * 2 // 3
         band = cropimg(page.image, ((left, start_y), (right, bottom)))
         gray = cv2.cvtColor(band, cv2.COLOR_RGB2GRAY)
-        return cv2.resize(gray, (96, 160) if whole else (48, 64))
+        # 按面板比例保留细节，允许匹配时对齐有少量偏差的卡片裁剪区域。
+        signature = cv2.resize(
+            gray, None, fx=1 / page.progress.scale, fy=1 / page.progress.scale
+        )
+        if whole:
+            # 整卡比较使用图像梯度，减少大块相同底色对匹配结果的影响。
+            return cv2.merge(
+                (
+                    cv2.Sobel(signature, cv2.CV_32F, 1, 0),
+                    cv2.Sobel(signature, cv2.CV_32F, 0, 1),
+                )
+            )
+        return signature
 
     def _card_match_score(self, before, anchor, after, card, *, whole=False):
         signature = self._card_signature(before, anchor, whole=whole)
         candidate = self._card_signature(after, card, whole=whole)
-        # 卡片区域取整后可能错开少量像素，允许归一化图像在一像素内对齐。
+        # 印章中心和日数网格会产生少量裁剪偏差，在保留细节的图上平移对齐。
+        margin = 8
+        template = signature[margin:-margin, margin:-margin]
+        if any(
+            size > available
+            for size, available in zip(template.shape[:2], candidate.shape[:2])
+        ):
+            return 0.0
         scores = cv2.matchTemplate(
-            candidate, signature[1:-1, 1:-1], cv2.TM_CCOEFF_NORMED
+            candidate,
+            template,
+            cv2.TM_CCOEFF_NORMED,
         )
         return cv2.minMaxLoc(scores)[1]
 
@@ -543,6 +566,13 @@ class EventSignInSolver(SceneGraphSolver):
                 points = np.asarray(box)
                 x, y = (points.min(axis=0) + points.max(axis=0)) / 2
                 return "时装动画", (int(x + 1680), int(y))
+        if (
+            self.template_match("event_sign_in/costume_brand", COSTUME_BRAND_SCOPE)[0]
+            >= 0.9
+            and self.template_match("event_sign_in/costume_flot", COSTUME_FLOT_SCOPE)[0]
+            >= 0.9
+        ):
+            return "时装", (450, 300)
         for _, text, score in self._ocr(COSTUME_SCOPE) or []:
             if score >= 0.9 and "穿戴" in "".join(text.split()):
                 return "时装", (450, 300)

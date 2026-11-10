@@ -6,7 +6,8 @@ from threading import Event, Lock, Timer
 from typing import TYPE_CHECKING
 
 from arknights_mower.data import base_room_list
-from arknights_mower.utils import config, path, rapidocr
+from arknights_mower.utils import config, rapidocr
+from arknights_mower.utils.activity_observations import restore_observations
 from arknights_mower.utils.crash_recovery import is_memory_error
 from arknights_mower.utils.csleep import MowerExit, cancellation_scope, csleep
 from arknights_mower.utils.csv_utils import EmptyDataError, read_csv_rows
@@ -31,6 +32,7 @@ from arknights_mower.utils.scheduler_task import (
     find_next_task,
     merge_restored_waiting_shifts,
     protect_priority_tasks,
+    retain_mastery_backup_tasks,
 )
 
 if TYPE_CHECKING:
@@ -285,7 +287,10 @@ def _arm_maintenance_timer(
         action_name = (
             "启用版本维护心情阈值" if action == "threshold" else "响应服务器维护"
         )
-        logger.info(f"已安排在 {target:%Y-%m-%d %H:%M} {action_name}")
+        logger.info(
+            f"已安排在 {target:%Y-%m-%d %H:%M} {action_name}",
+            extra={"log_group": "base-scheduler"} if action == "threshold" else None,
+        )
 
 
 def _apply_version_update_resting_threshold(info, scheduler, now=None):
@@ -330,7 +335,10 @@ def _apply_version_update_resting_threshold(info, scheduler, now=None):
             changed = True
     if changed:
         label = "版本维护" if active else "日常"
-        logger.info(f"已即时应用{label}心情阈值：{desired:.0%}")
+        logger.info(
+            f"已即时应用{label}心情阈值：{desired:.0%}",
+            extra={"log_group": "base-scheduler"},
+        )
     return changed
 
 
@@ -384,7 +392,7 @@ def _handle_maintenance(
 
     flash_probe_at = min(info.end, info.start + timedelta(minutes=2))
     flash_probe_pending = False
-    if not info.manual and info.is_flash_update:
+    if not info.manual and info.is_flash_update and not info.allows_early_login:
         if info.announcement_id in _flash_probe_ids:
             return False
         probe_reference = max(now, flash_probe_at)
@@ -436,6 +444,7 @@ def _wait_before_early_login_retry(now=None):
     if (
         info is not None
         and info.is_flash_update
+        and not info.allows_early_login
         and info.announcement_id in _flash_probe_ids
         and now < info.end
     ):
@@ -676,6 +685,7 @@ def _resume_device_dispatch(scheduler=None, failure=None):
         device = device_control.recover().unwrap()
         if scheduler is not None:
             scheduler.device = device
+            scheduler._simulator_closed_for_idle = False
             scheduler.recog.device = device
             if uncertain or getattr(scheduler, "_idle_observation_pending", False):
                 from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
@@ -723,7 +733,7 @@ def simulate(saved):
     """
     具体调用方法可见各个函数的参数说明
     """
-    logger.info(f"正在使用全局配置空间: {path.global_space}")
+    logger.info("已载入全局配置空间")
     tasks = (
         [
             task
@@ -805,13 +815,19 @@ def simulate(saved):
     # base_scheduler.仓库扫描() #别删了 方便我找
     validation_msg = base_scheduler.initialize_operators()
     if validation_msg is not None:
-        logger.error(validation_msg)
+        logger.error(validation_msg, extra={"log_group": "base-scheduler"})
         return
     validation_msg = base_scheduler.op_data.validate_backup_plans(max_seconds=5)
     if validation_msg.get("status") == "incomplete":
-        logger.warning(f"排班校验未完成: {validation_msg['message']}")
+        logger.warning(
+            f"排班校验未完成: {validation_msg['message']}",
+            extra={"log_group": "base-scheduler"},
+        )
     elif not validation_msg["success"]:
-        logger.error(f"排班验证失败: {validation_msg['message']}")
+        logger.error(
+            f"排班验证失败: {validation_msg['message']}",
+            extra={"log_group": "base-scheduler"},
+        )
         return
     _apply_version_update_resting_threshold(
         NewsChecker.get_major_maintenance(), base_scheduler
@@ -878,8 +894,10 @@ def simulate(saved):
             base_scheduler.backup_group_task_issued = set(
                 saved.get("backup_group_task_issued", ())
             )
+            restored_predecessors = {}
             base_scheduler.waiting_group_shifts = merge_restored_waiting_shifts(
-                saved.get("waiting_group_shifts", [])
+                saved.get("waiting_group_shifts", []),
+                replacements=restored_predecessors,
             )
             from arknights_mower.utils.config.plan import migrate_backup_tasks
 
@@ -891,37 +909,82 @@ def simulate(saved):
                     - {backup.name for backup in base_scheduler.op_data.backup_plans}
                 )
             )
-            restored_tasks, restored_predecessors, restored_pairs = [], {}, []
-            for task in tasks:
-                migrated = migrate_backup_tasks(
+
+            def migrate_task(task):
+                return migrate_backup_tasks(
                     [task],
                     saved.get("backup_plan_names", []),
                     [backup.name for backup in base_scheduler.op_data.backup_plans],
                     config.retired_backup_indices,
                     retired=retired_backups,
                 )
+
+            waiting = []
+            for task in base_scheduler.waiting_group_shifts:
+                migrated = migrate_task(task)
+                if not migrated:
+                    for identity, owner in restored_predecessors.items():
+                        if owner is task:
+                            restored_predecessors[identity] = None
+                    continue
+                if hasattr(task, "backup_shift_conditions"):
+                    task.backup_shift_conditions = migrated[0].backup_shift_conditions
+                waiting.append(task)
+            base_scheduler.waiting_group_shifts = waiting
+            restored_tasks, restored_pairs = [], []
+            for task in tasks:
+                if id(task) in restored_predecessors and hasattr(
+                    task, "group_shift_waiting"
+                ):
+                    continue
+                migrated = migrate_task(task)
+                restored_predecessors[id(task)] = migrated[0] if migrated else None
                 if migrated:
-                    restored_predecessors[id(task)] = migrated[0]
                     restored_pairs.append((task, migrated[0]))
                     restored_tasks.extend(migrated)
             base_scheduler.tasks = restored_tasks
             restored_pairs.extend(
                 (task, task) for task in base_scheduler.waiting_group_shifts
             )
+            # 仅由专精引用的前置也经过相同迁移，退役判定不能因离开队列而丢失。
+            pending = [
+                previous
+                for original, _ in restored_pairs
+                for previous in getattr(original, "mastery_backup_predecessors", ())
+            ]
+            while pending:
+                original = pending.pop()
+                if id(original) in restored_predecessors:
+                    continue
+                migrated = migrate_task(original)
+                restored_predecessors[id(original)] = migrated[0] if migrated else None
+                if migrated:
+                    restored_pairs.append((original, migrated[0]))
+                    pending.extend(getattr(original, "mastery_backup_predecessors", ()))
             for original, task in restored_pairs:
                 for attribute in (
                     "group_shift_predecessors",
                     "product_shift_predecessors",
+                    "mastery_backup_predecessors",
                 ):
                     if hasattr(original, attribute):
                         setattr(
                             task,
                             attribute,
                             tuple(
-                                restored_predecessors.get(id(previous), previous)
+                                restored
                                 for previous in getattr(original, attribute)
+                                if (
+                                    restored := restored_predecessors.get(
+                                        id(previous), previous
+                                    )
+                                )
+                                is not None
                             ),
                         )
+            retain_mastery_backup_tasks(
+                base_scheduler.tasks, base_scheduler.waiting_group_shifts
+            )
             base_scheduler.op_data.restore_dorm_state(
                 saved["dorm"],
                 group_transitions=base_scheduler._pending_group_transitions(),
@@ -967,6 +1030,10 @@ def simulate(saved):
             base_scheduler.maa_daily_completed = dict(
                 saved.get("maa_daily_completed", {})
             )
+            base_scheduler.annihilation_lock_mail_day = saved.get(
+                "annihilation_lock_mail_day"
+            )
+            restore_observations(base_scheduler, saved.get("display_observations", {}))
             base_scheduler.daily_visit_friend_attempt = saved.get(
                 "daily_visit_friend_attempt"
             )
@@ -1044,6 +1111,8 @@ def simulate(saved):
     task_failures = 0
     while True:
         try:
+            if config.maintenance_recheck.is_set():
+                config.wake_scheduler.clear()
             config.maintenance_recheck.clear()
             refresh_resource_at_boundary()
             from arknights_mower.utils.scheduler_task import MAINTENANCE_TASK_TYPES
@@ -1074,6 +1143,12 @@ def simulate(saved):
                         for task in base_scheduler.tasks
                     )
                 ):
+                    continue
+            if config.maintenance_recheck.is_set():
+                continue
+            if getattr(base_scheduler, "_idle_observation_pending", False) is True:
+                base_scheduler._idle_sleep(0)
+                if config.maintenance_recheck.is_set():
                     continue
             if _next_scheduler_task() is not None:
                 # 维护避让先于日常任务和等待预算，包含从存档恢复的专精换人。
@@ -1135,14 +1210,20 @@ def simulate(saved):
                             timestamp = _read_depot_scan_timestamp(path)
                             if timestamp is not None:
                                 return timestamp
-                            logger.warning(f"{path} 没有有效仓库记录，重新初始化")
+                            logger.warning(
+                                f"{path} 没有有效仓库记录，重新初始化",
+                                extra={"log_group": "depot-recognition"},
+                            )
                             创建csv()
                             return (
                                 int(datetime.now().timestamp())
                                 - config.conf.maa_gap * 3600
                             )
                         else:
-                            logger.info(f"{path} 不存在,新建一个存储仓库物品的csv")
+                            logger.info(
+                                f"{path} 不存在,新建一个存储仓库物品的csv",
+                                extra={"log_group": "depot-recognition"},
+                            )
                             now_time = (
                                 int(datetime.now().timestamp())
                                 - config.conf.maa_gap * 3600
@@ -1157,7 +1238,8 @@ def simulate(saved):
                             base_scheduler.仓库扫描()
                         else:
                             logger.info(
-                                f"仓库扫描未到时间，将在 {config.conf.maa_gap - dt // 3600}小时之内开始扫描"
+                                f"仓库扫描未到时间，将在 {config.conf.maa_gap - dt // 3600}小时之内开始扫描",
+                                extra={"log_group": "depot-recognition"},
                             )
 
                     from arknights_mower.utils.scheduler_task import (
@@ -1168,7 +1250,10 @@ def simulate(saved):
                         task_type=_TaskTypes.SKILL_UPGRADE
                     )
                     if next_upgrade is not None and next_upgrade.time <= datetime.now():
-                        logger.info("仓库扫描后有专精任务待执行，立即运行后继续日常")
+                        logger.info(
+                            "仓库扫描后有专精任务待执行，立即运行后继续日常",
+                            extra={"log_group": "growth-planning"},
+                        )
                         base_scheduler.run()
                         from arknights_mower.utils.scheduler_task import scheduling
 
@@ -1210,10 +1295,6 @@ def simulate(saved):
                         remaining_time = 0
 
                     if remaining_time >= 540 and base_scheduler.has_maa_tasks():
-                        subject = f"下次任务在{find_next_task(base_scheduler.tasks, op_data=base_scheduler.op_data).time.strftime('%H:%M:%S')}"
-                        context = f"下一次任务:{find_next_task(base_scheduler.tasks, op_data=base_scheduler.op_data).plan}"
-                        logger.info(context)
-                        logger.info(subject)
                         base_scheduler.maa_plan_solver()
 
                 if (
@@ -1335,6 +1416,7 @@ def simulate(saved):
             if _wait_before_early_login_retry():
                 if config.stop_mower.is_set():
                     return
+                task_failures = 0
                 continue
             try:
                 _resume_device_dispatch(base_scheduler, e)
@@ -1355,6 +1437,7 @@ def simulate(saved):
             if _wait_before_early_login_retry():
                 if config.stop_mower.is_set():
                     return
+                task_failures = 0
                 continue
             try:
                 _resume_device_dispatch(base_scheduler, e)
@@ -1374,6 +1457,7 @@ def simulate(saved):
             if _wait_before_early_login_retry():
                 if config.stop_mower.is_set():
                     return
+                task_failures = 0
                 continue
             try:
                 base_scheduler.recog.update()

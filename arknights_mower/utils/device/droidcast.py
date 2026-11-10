@@ -9,7 +9,6 @@ import uuid
 from pathlib import Path
 from threading import Event, RLock
 
-import cv2
 import numpy as np
 import requests
 from urllib3.exceptions import HTTPError, ReadTimeoutError
@@ -330,6 +329,9 @@ class DroidCastSession:
             raise DroidCastError("closed", "DroidCast 会话已关闭或所有权不匹配")
         if self.process is None or self.http is None:
             raise DroidCastError("start_failed", "DroidCast helper 尚未启动")
+
+        import cv2
+
         deadline = time.monotonic() + io_timeout(START_TIMEOUT)
         self._verify_owned_mapping()
         while True:
@@ -376,12 +378,15 @@ class DroidCastSession:
                         raise DroidCastError(
                             "http_failed", "DroidCast 图像超过 16 MiB 上限"
                         )
-                frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                frame = cv2.imdecode(
+                    np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR_RGB
+                )
                 if frame is None:
                     raise DroidCastError("frame_failed", "DroidCast 未返回可解码图像")
                 self.starting = False
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                return cv2.rotate(frame, cv2.ROTATE_180) if self.rotate else frame
+                if self.rotate:
+                    cv2.flip(frame, -1, dst=frame)
+                return frame
             except (requests.Timeout, ReadTimeoutError, TimeoutError) as exc:
                 raise DroidCastError(
                     "http_timeout",

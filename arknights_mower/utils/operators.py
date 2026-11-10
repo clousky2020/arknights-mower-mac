@@ -11,7 +11,10 @@ from typing import Any, Literal, overload
 from evalidate import EvalModel, ExecutionException, Expr, base_eval_model
 
 from arknights_mower.utils import config
-from arknights_mower.utils.calculated_mood import measure_mood_calculation
+from arknights_mower.utils.calculated_mood import (
+    MOOD_ESTIMATE,
+    measure_mood_calculation,
+)
 from arknights_mower.utils.config.plan_advanced import export_advanced_settings
 from arknights_mower.utils.manufacture_product import (
     MANUFACTURE_PRODUCTS,
@@ -948,7 +951,7 @@ class Operators:
             self.mood_model.enabled = enabled
         return enabled
 
-    @measure_mood_calculation
+    @measure_mood_calculation(MOOD_ESTIMATE)
     def calculated_mood(self, name, now=None):
         if not self.mood_calculation_enabled:
             return None
@@ -958,7 +961,7 @@ class Operators:
             self, getattr(self, "_projection_now", None), advance_clock=False
         ).value(name, now or getattr(self, "_projection_now", None))
 
-    @measure_mood_calculation
+    @measure_mood_calculation(MOOD_ESTIMATE)
     def calculated_mood_rate(self, name, now=None):
         if not self.mood_calculation_enabled:
             return None
@@ -971,7 +974,6 @@ class Operators:
             model.advance(now)
         return model._rates().get(name) if name in model.moods else None
 
-    @measure_mood_calculation
     def calculated_mood_deadline(self, name, target, now=None, max_hours=240):
         if not self.mood_calculation_enabled:
             return None
@@ -1302,7 +1304,7 @@ class Operators:
             if hasattr(self, "_projection_maintenance")
             else NewsChecker.get_major_maintenance(datetime.now())
         )
-        if info is None or info.update_type != "major" or info.is_flash_update:
+        if info is None or not info.is_server_maintenance:
             return float("inf")
         if duration_operator is not None:
             duration = (info.end - info.start).total_seconds() / 3600
@@ -1348,7 +1350,7 @@ class Operators:
         if not thresholds:
             return None
         info = NewsChecker.get_major_maintenance(now or datetime.now())
-        if info is None or info.update_type != "major" or info.is_flash_update:
+        if info is None or not info.is_server_maintenance:
             return None
         now = now or datetime.now()
         times = []
@@ -1383,23 +1385,12 @@ class Operators:
         )
 
     def shift_request_groups(self, names):
-        """工作换位成员跟随本次请求，不额外发起自己的正常下班。"""
-        members = [self.operators[name] for name in names]
+        """只解析原始请求者的正常下班组，不从展开后的换位成员推断请求。"""
         return list(
             dict.fromkeys(
                 op.group
-                for op in members
-                if op.group
-                and self.is_group_shift_anchor(op)
-                and not (
-                    op.multi_group
-                    and any(
-                        other.group != op.group
-                        and self.is_group_shift_anchor(other)
-                        and self.is_same_group_primary_replacement(other, op.name)
-                        for other in members
-                    )
-                )
+                for name in names
+                if (op := self.operators[name]).group and self.is_group_shift_anchor(op)
             )
         )
 
@@ -1572,10 +1563,14 @@ class Operators:
                 assignments[owner.name] = name
         return assignments
 
-    def working_replacement_blockers(self, names, plan=None):
+    def working_replacement_blockers(self, names, plan=None, *, request_groups=None):
         """共享成员保留工作替班岗位；实际离岗仍须完成交接。"""
         names = list(names)
-        request_groups = set(self.shift_request_groups(names))
+        request_groups = set(
+            self.shift_request_groups(names)
+            if request_groups is None
+            else request_groups
+        )
         plan = plan or {}
         return {
             self.operators[owner].group
@@ -1624,7 +1619,11 @@ class Operators:
             for name in self.shift_group_members(group)
             if name not in excluded_names
         }
-        if self.working_replacement_blockers(shifting, plan):
+        if self.working_replacement_blockers(
+            shifting,
+            plan,
+            request_groups=[group for group, resting in transitions.items() if resting],
+        ):
             return False
         followers = [
             op
@@ -2321,7 +2320,6 @@ class Operators:
         if name not in self.operators:
             return None, None
         _op = self.operators[name]
-        logger.debug(name)
         for idx, dorm in enumerate(self.all_dorms()):
             if (
                 dorm.position[0] == _op.current_room
@@ -2330,8 +2328,6 @@ class Operators:
                     dorm, name, group_transitions=group_transitions
                 )
             ):
-                logger.debug(idx)
-                logger.debug(dorm)
                 return idx, dorm
         return None, None
 
@@ -2344,9 +2340,6 @@ class Operators:
         operator.rest_in_full = self.config.is_rest_in_full(operator.name)
         operator.workaholic = self.config.is_workaholic(operator.name)
         operator.refresh_order_room = self.config.is_refresh_trading(operator.name)
-        logger.debug(
-            f"设置 {operator.name} 刷新交易房间: {operator.refresh_order_room}"
-        )
         operator.refresh_drained = self.config.is_refresh_drained(operator.name)
         if operator.name in agent_arrange_order:
             operator.arrange_order = agent_arrange_order[operator.name]
@@ -3271,7 +3264,15 @@ class Operators:
         return sorted(self.dorm, key=key)
 
     def _find_dorm_slot(
-        self, name, used, *, active_groups=None, plan=None, isolation=True
+        self,
+        name,
+        used,
+        *,
+        active_groups=None,
+        plan=None,
+        isolation=True,
+        use_configured_order=False,
+        preferred_slots=(),
     ):
         from arknights_mower.utils.dorm_recovery import single_recovery_bed_cost
         from arknights_mower.utils.dorm_skills import is_single_recovery_manager
@@ -3288,7 +3289,7 @@ class Operators:
             for bed in self.ordered_dorms(active_groups=active_groups)
         ]
         explicit_order = any(item.endswith("_low") for item in self.config.dorm_order)
-        if not is_high and not explicit_order:
+        if not is_high and not explicit_order and not use_configured_order:
             order = order[max_count:] + order[:max_count]
         candidates = [
             i
@@ -3326,7 +3327,7 @@ class Operators:
                     if isolation
                     else 0,
                 )
-            tier, recovery_order = resting_key(self, bed.name, now)
+            tier, _, recovery_order = resting_key(self, bed.name, now)
             # 先使用空位和已回满补位者，再按层级接管未完成恢复者。
             return (
                 1 if is_full_dorm_filler(self, bed.name, now) else 2,
@@ -3338,7 +3339,14 @@ class Operators:
                 -recovery_order,
             )
 
-        return min(candidates, key=takeover_cost, default=None)
+        return min(
+            candidates,
+            key=lambda index: (
+                self.dorm[index].position not in preferred_slots,
+                takeover_cost(index),
+            ),
+            default=None,
+        )
 
     def has_resting_anchor(self, group=None):
         """是否已有能为候补提供回班时机的必需恢复者。"""
@@ -3391,7 +3399,14 @@ class Operators:
         }
 
     def assign_dorm_group(
-        self, names, active_groups=None, plan=None, *, reserved_slots=()
+        self,
+        names,
+        active_groups=None,
+        plan=None,
+        *,
+        reserved_slots=(),
+        reserved_slots_by_name=None,
+        preferred_slots_by_name=None,
     ):
         """先保障必需床位；候补有床则休息，无床则随组离岗待命。"""
         # 保留干员随组离岗仍须有床；上限完成不能授权将其安排为空闲。
@@ -3421,8 +3436,17 @@ class Operators:
         )
         pending = copy.deepcopy(plan or {})
         for name in ordered_names:
+            blocked = used | {
+                index
+                for index, bed in enumerate(self.dorm)
+                if bed.position in (reserved_slots_by_name or {}).get(name, ())
+            }
             index = self._find_dorm_slot(
-                name, used, active_groups=active_groups, plan=pending
+                name,
+                blocked,
+                active_groups=active_groups,
+                plan=pending,
+                preferred_slots=(preferred_slots_by_name or {}).get(name, ()),
             )
             if index is None:
                 if name in optional:

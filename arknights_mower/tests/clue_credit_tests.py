@@ -293,7 +293,7 @@ def prepare_stuck_access_record_dispatch(scheduler, state, monkeypatch):
         side_effect=lambda _: setattr(popup, "in_room", False)
     )
     scheduler.enter_room = MagicMock(
-        side_effect=lambda _: setattr(popup, "in_room", True)
+        side_effect=lambda _, **kwargs: setattr(popup, "in_room", True)
     )
     scheduler._run_clue_shop = MagicMock()
     scheduler.skip = MagicMock()
@@ -340,7 +340,7 @@ def test_stuck_access_record_retains_dispatched_clue_task(shopping, monkeypatch,
         assert scheduler.tap.call_count == 1
     assert scheduler.clue_new() is False
     assert scheduler.tap.call_count == 1
-    scheduler.enter_room.assert_called_once_with("meeting")
+    scheduler.enter_room.assert_called_once_with("meeting", log_group="clue")
 
     popup.visible = False
     popup.in_room = False
@@ -476,7 +476,7 @@ def test_periodic_stuck_access_record_preserves_interval_and_other_work(
         assert scheduler.party_time == party_end
         assert scheduler.tasks == []
         assert scheduler.tap.call_count == 1
-    scheduler.enter_room.assert_called_once_with("meeting")
+    scheduler.enter_room.assert_called_once_with("meeting", log_group="clue")
 
     popup.visible = False
     popup.in_room = False
@@ -629,7 +629,7 @@ def test_started_clue_workflow_continues_into_exclusion_interval(shopping, monke
     clock = prepare_clue_dispatch(scheduler, state, monkeypatch)
     prepare_empty_clue_workflow(scheduler)
     # 在实际房间导航期间跨过 03:45，线索整理及购物仍继续完成。
-    scheduler.enter_room.side_effect = lambda *_: setattr(
+    scheduler.enter_room.side_effect = lambda *_, **kwargs: setattr(
         state, "now", datetime.fromisoformat("2026-10-14T03:50:00+08:00")
     )
     scheduler.find.side_effect = lambda name, **_: (
@@ -731,6 +731,7 @@ def main_runtime(monkeypatch):
     runtime.daily_visit_friend_attempt = None
     runtime.maa_copilot_progress = {}
     runtime.maa_daily_completed = {}
+    runtime.annihilation_lock_mail_day = None
     runtime.find_next_task.return_value = None
     runtime.has_maa_tasks.return_value = False
     runtime.rest_until_next_task.side_effect = MowerExit
@@ -1221,7 +1222,7 @@ def board_navigation(shopping, monkeypatch):
 
     scheduler.scene_graph_navigation = MagicMock(side_effect=navigate)
     shop.scene_graph_navigation = navigate
-    scheduler.enter_room = MagicMock(side_effect=lambda _: show("room"))
+    scheduler.enter_room = MagicMock(side_effect=lambda _, **kwargs: show("room"))
     scheduler.scene = lambda: state.scene
     scheduler.wait_product_complete = MagicMock()
     scheduler.sleep = MagicMock(
@@ -1245,7 +1246,7 @@ def board_navigation(shopping, monkeypatch):
             return (800, 800)
         return None
 
-    def tap(position):
+    def tap(position, **_kwargs):
         if position == (500, 500):
             ui.events.append("open")
             ui.entry_actions.append("open")
@@ -1331,7 +1332,7 @@ def test_legacy_workflow_uses_real_board_open_and_preserves_claim_policy(
     ui.open_failures = failures
     original_tap = scheduler.tap.side_effect
 
-    def tap(position):
+    def tap(position, **_kwargs):
         if position == (330, 1000):
             # 进入后续线索整理前结束观测，信息板打开与领取均走真实调用路径。
             raise MowerExit
@@ -1368,7 +1369,8 @@ def test_clue_workflow_resumes_from_access_record(
     ui.record_stuck = stuck
     state.current = 60
 
-    def enter_room(_room):
+    def enter_room(_room, *, log_group=None):
+        assert log_group == "clue"
         if scheduler.enter_room.call_count > 1:
             pytest.fail("Recognized access record must not restart room navigation")
         ui.panel = "record"
@@ -1377,7 +1379,7 @@ def test_clue_workflow_resumes_from_access_record(
     scheduler.enter_room = MagicMock(side_effect=enter_room)
     original_tap = scheduler.tap.side_effect
 
-    def tap(position):
+    def tap(position, **_kwargs):
         if position == (330, 1000):
             if stuck:
                 pytest.fail("An unchanged access record must stop the clue workflow")
@@ -1400,7 +1402,7 @@ def test_clue_workflow_resumes_from_access_record(
     )
     assert ui.entry_actions == ([] if stuck or defer_credit else ["activate", "open"])
     assert state.current == (60 if stuck or defer_credit else 0)
-    scheduler.enter_room.assert_called_once_with("meeting")
+    scheduler.enter_room.assert_called_once_with("meeting", log_group="clue")
 
 
 @pytest.mark.parametrize("entry", ["clue_new", "visit_message_board"])
@@ -1454,10 +1456,10 @@ def test_opened_settlement_failure_retains_dispatched_clue_task(
     )
     original_enter = scheduler.enter_room.side_effect
 
-    def enter_room(room):
+    def enter_room(room, *, log_group=None):
         if ui.panel == "record":
             raise RuntimeError("Room entry cannot cross an unchanged settlement")
-        original_enter(room)
+        original_enter(room, log_group=log_group)
 
     scheduler.enter_room.side_effect = enter_room
 
@@ -1478,7 +1480,8 @@ def test_opened_settlement_failure_retains_dispatched_clue_task(
     ui.access_record = ui.record_stuck = True
     if appears_during_preparation:
 
-        def show_record():
+        def show_record(*, log_group=None):
+            assert log_group == "clue"
             ui.panel = "record"
             state.scene = Scene.CLUE_ACCESS_RECORD
 
@@ -1504,7 +1507,7 @@ def test_opened_settlement_failure_retains_dispatched_clue_task(
         "dismiss_record"
     ]
     assert state.current == 300
-    scheduler.enter_room.assert_called_once_with("meeting")
+    scheduler.enter_room.assert_called_once_with("meeting", log_group="clue")
     scheduler._run_clue_shop.assert_not_called()
     scheduler.skip.assert_not_called()
     assert scheduler.scene_graph_navigation.call_count == (
@@ -1535,6 +1538,55 @@ def test_failed_board_click_is_recovered_after_fresh_activation(board_navigation
     assert state.current == 300
 
 
+def test_short_lived_board_entry_is_clicked_before_it_expires(board_navigation):
+    scheduler, _, _, ui, _ = board_navigation
+    original_tap = scheduler.tap.side_effect
+    original_find = scheduler.find
+    clock = SimpleNamespace(now=0.0, activated_at=None)
+
+    def tap(position, interval=1):
+        if position == (680, 1000):
+            clock.activated_at = clock.now
+        elif position == (500, 500):
+            assert clock.now - clock.activated_at < 0.8
+        original_tap(position)
+        clock.now += interval
+
+    def find(name):
+        clock.now += 0.02
+        if name == "clue/message_board" and clock.activated_at is not None:
+            ui.entry_visible = clock.now - clock.activated_at < 0.8
+        return original_find(name)
+
+    scheduler.tap.side_effect = tap
+    scheduler.find = find
+    scheduler.recog.update.side_effect = lambda: setattr(clock, "now", clock.now + 0.1)
+
+    assert scheduler._collect_clue_message_board(collect_current=False) is True
+    assert ui.entry_actions == ["activate", "open"]
+    assert ui.events == ["open", "back"]
+
+
+def test_board_entry_animation_is_observed_before_clicking(board_navigation):
+    scheduler, _, _, ui, _ = board_navigation
+    original_find = scheduler.find
+    observations = []
+
+    def find(name):
+        if name == "clue/message_board" and ui.activation_count:
+            observations.append(name)
+            if len(observations) < 3:
+                return None
+        return original_find(name)
+
+    ui.entry_visible = False
+    scheduler.find = find
+
+    assert scheduler._collect_clue_message_board(collect_current=False) is True
+    assert len(observations) == 3
+    assert ui.entry_actions == ["activate", "open"]
+
+
 def test_recovery_relocates_the_entry_instead_of_reusing_old_coordinates(
     board_navigation,
 ):
@@ -1548,7 +1600,7 @@ def test_recovery_relocates_the_entry_instead_of_reusing_old_coordinates(
             return (600, 500) if ui.activation_count >= 2 else (500, 500)
         return original_find(name)
 
-    def tap(position):
+    def tap(position, **_kwargs):
         if position == (500, 500) and ui.activation_count >= 2:
             pytest.fail("Recovery reused the stale entry coordinates")
         original_tap((500, 500) if position == (600, 500) else position)
@@ -1581,7 +1633,7 @@ def test_expired_visible_entry_is_reactivated_before_opening(board_navigation):
     scheduler, _, _, ui, _ = board_navigation
     original_tap = scheduler.tap.side_effect
 
-    def tap(position):
+    def tap(position, **_kwargs):
         original_tap(position)
         if position == (680, 1000) and ui.activation_count == 1:
             ui.entry_visible = False
@@ -1630,7 +1682,7 @@ def test_residence_panel_closes_before_furniture_activation(
             return panels[ui.residents].find(name)
         return original_find(name)
 
-    def tap(position):
+    def tap(position, **_kwargs):
         if position == (680, 1000) and ui.residents:
             ui.entry_actions.append("close_residents")
             if not stuck:
@@ -1684,7 +1736,7 @@ def test_board_open_input_error_propagates_without_recovery(board_navigation, er
     scheduler, _, _, ui, _ = board_navigation
     original_tap = scheduler.tap.side_effect
 
-    def tap(position):
+    def tap(position, **_kwargs):
         original_tap(position)
         raise error
 

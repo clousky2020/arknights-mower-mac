@@ -742,14 +742,48 @@ def run_desktop():
             raise SystemExit(INTENTIONAL_EXIT_CODE)
 
 
+def start_hud_local_server(app, instance_id, mower_port, name):
+    from arknights_mower.utils.hud_local import start_hud_local_server as start
+
+    return start(app, instance_id, mower_port, name)
+
+
 def start_http_server(app, host, port):
     from threading import Thread
 
-    from werkzeug.serving import make_server
+    from werkzeug.serving import WSGIRequestHandler, make_server
 
+    from arknights_mower.utils.instance_supervisor import (
+        HTTP_PROBE_PATH,
+        HTTP_PROBE_USER_AGENT,
+    )
     from arknights_mower.utils.lifecycle import Phase, shutdown
+    from arknights_mower.utils.log import logger
 
-    http = make_server(host, port, app, threaded=True)
+    class RequestHandler(WSGIRequestHandler):
+        def log_request(self, code="-", size="-"):
+            # 启动 URL 含会话凭据；正常和非法请求都不记录原始请求行。
+            try:
+                status = int(code)
+            except (TypeError, ValueError):
+                return
+            if (
+                status == 403
+                and self.client_address[0] == "127.0.0.1"
+                and self.command == "GET"
+                and self.path == HTTP_PROBE_PATH
+                and self.headers.get("User-Agent") == HTTP_PROBE_USER_AGENT
+                and "token" not in self.headers
+            ):
+                return
+            if 400 <= status < 600:
+                logger.debug("HTTP 请求完成，状态码 %s", status)
+
+        def log(self, kind, message, *args):
+            # 协议错误的参数也可能带原始 URL，不交给独立的 stderr 日志。
+            logger.debug("HTTP 请求处理事件：%s", kind)
+
+    http = make_server(host, port, app, threaded=True, request_handler=RequestHandler)
     worker = Thread(
         target=http.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True
     )
@@ -919,6 +953,20 @@ def _run_desktop():
     url = f"http://127.0.0.1:{port}"
     url += f"?token={runtime_token}"
     start_http_server(server.app, host, port)
+    instance_path = path.get_path("@app", space=path.global_space).resolve()
+    identity = sha256(
+        (
+            os.path.normcase(str(runtime.installation_root().resolve()))
+            + "\0"
+            + os.path.normcase(str(instance_path))
+        ).encode("utf-8")
+    ).hexdigest()
+    try:
+        hud_service = start_hud_local_server(server.app, identity, port, instance_name)
+    except (OSError, RuntimeError):
+        logger.warning("本地 HUD 服务启动失败，Mower 将继续运行", exc_info=True)
+    else:
+        shutdown.own("local HUD server", hud_service.close, Phase.SERVER)
     ready_deadline = monotonic() + 15
     while not is_port_in_use(port):
         if shutdown.closing or monotonic() >= ready_deadline:

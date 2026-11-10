@@ -37,7 +37,7 @@ const editorDefinitions = [
   [
     'event-shop',
     '活动商店兑换',
-    'MAA 日常结束后兑换活动商店；有限商品兑换完毕后可切换刷理智方案。'
+    'MAA 日常结束后兑换当期 SS 活动商店；没有当期 SS 时跳过，有限商品兑换完毕后可切换刷理智方案。'
   ],
   ['rewards', 'MAA 领取奖励', '任务奖励随 MAA 日常领取，邮件、免费单抽与活动奖励分别勾选。'],
   [
@@ -156,6 +156,42 @@ export function getMaaRewardSelection(config) {
     checked,
     indeterminate: !checked && maaRewardFields.some((key) => Boolean(config[key]))
   }
+}
+
+// 有游戏日记录的日常任务；顺序与全部设置的日常任务相同。
+const dailyStatusRecords = [
+  ['skland', 'skland'],
+  ['mail', 'mail'],
+  ['event-sign-in', 'event_sign_in'],
+  ['report', 'report'],
+  ['visit', 'visit_friend'],
+  ['credit-fight', 'maa_credit_fight']
+]
+const dailyMaaRewardFields = maaRewardFields.filter((key) => key !== 'maa_mail')
+
+export function hasDailyStatusTasks(config) {
+  return (
+    dailyStatusRecords.some(([id]) => Boolean(config[taskSwitches[id]])) ||
+    dailyMaaRewardFields.some((key) => Boolean(config[key]))
+  )
+}
+
+// 只列出已勾选且有游戏日记录的任务；MAA 邮件奖励没有记录，不参与领取奖励的判断。
+export function getDailyStatusItems(config, records) {
+  const title = (id) => editorDefinitions.find(([entry]) => entry === id)[1]
+  const items = dailyStatusRecords
+    .filter(([id, record]) => Boolean(config[taskSwitches[id]]) && records[record])
+    .map(([id, record]) => ({ id, title: title(id), state: records[record] }))
+  const rewards = dailyMaaRewardFields
+    .filter((key) => Boolean(config[key]) && records[key])
+    .map((key) => records[key])
+  if (rewards.length)
+    items.push({
+      id: 'rewards',
+      title: title('rewards'),
+      state: rewards.every((state) => state === 'done') ? 'done' : 'pending'
+    })
+  return items
 }
 
 export function createTaskWorkflow(config) {

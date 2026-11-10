@@ -3,7 +3,6 @@ import { useMessage } from 'naive-ui'
 import { computed, inject, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   defaultIncomeSettings,
-  incomeFacilities,
   incomeMetrics,
   incomeRequest,
   incomeWorkspace,
@@ -44,7 +43,6 @@ let cachedInventoryOverrides = preferences.cachedInventoryOverrides
 let cachedInventoryBaseline = null
 let cachedInventoryValues = null
 let applyingPreferences = false
-let initializedDroneSnapshot = null
 const axios = inject('axios')
 const cacheLoading = ref(false)
 const cacheError = ref('')
@@ -183,37 +181,8 @@ let lastProgress = 0
 let exportGeneration = 0
 const silent = computed(() => state.running && seconds.value - lastProgress >= 15)
 const required = computed(() => (props.snapshot ? inventoryRequired(props.snapshot.plan) : false))
-const targets = computed(() =>
-  props.snapshot
-    ? incomeFacilities(props.snapshot.plan).map((f) => ({ label: f.label, value: f.roomId }))
-    : []
-)
-watch(
-  () => props.snapshot,
-  (snapshot) => {
-    if (!snapshot) return
-    const preferred = preferences.settings.droneRoom
-    applyingPreferences = true
-    try {
-      settings.droneRoom =
-        preferred === '' || targets.value.some((target) => target.value === preferred)
-          ? preferred
-          : defaultDroneRoom()
-      initializedDroneSnapshot = snapshot
-    } finally {
-      applyingPreferences = false
-    }
-  },
-  { immediate: true }
-)
-function defaultDroneRoom() {
-  const target = props.snapshot?.droneRoom
-  return targets.value.some((item) => item.value === target) ? target : ''
-}
 function persistPreferences() {
   if (applyingPreferences) return
-  if (props.snapshot && props.snapshot === initializedDroneSnapshot)
-    preferences.settings.droneRoom = settings.droneRoom
   if (cachedInventoryBaseline && settings.cachedInventory) {
     for (const { resource } of MOWER_INVENTORY_ITEMS) {
       const value = settings.cachedInventory[resource] ?? 0
@@ -223,10 +192,7 @@ function persistPreferences() {
     }
     cachedInventoryValues = { ...settings.cachedInventory }
   }
-  preferencesError.value = saveIncomePreferences(
-    { ...settings, droneRoom: preferences.settings.droneRoom },
-    cachedInventoryOverrides
-  )
+  preferencesError.value = saveIncomePreferences(settings, cachedInventoryOverrides)
     ? ''
     : '参数修改未能保存到本浏览器，当前窗口仍可使用。'
 }
@@ -239,11 +205,9 @@ function resetSettings() {
       cachedInventory: cachedInventoryBaseline ? { ...cachedInventoryBaseline } : null,
       cacheObservedAt: settings.cacheObservedAt,
       mowerWeights: settings.mowerWeights,
-      mowerAlgorithm: settings.mowerAlgorithm,
-      droneRoom: defaultDroneRoom()
+      mowerAlgorithm: settings.mowerAlgorithm
     }
     Object.assign(settings, defaultIncomeSettings(), current)
-    delete preferences.settings.droneRoom
     cachedInventoryOverrides = {}
     cachedInventoryValues = current.cachedInventory ? { ...current.cachedInventory } : null
   } finally {
@@ -383,6 +347,7 @@ async function start() {
     const runSettings = JSON.parse(JSON.stringify(settings))
     const production = incomeRequest(captured.plan, runSettings).options.simulationOptions
       .production
+    runSettings.droneRoom = production.droneRoomId ?? ''
     runSettings.expectationMode = production.expectationMode
     if (!production.expectationMode) runSettings.seed = production.seed
     validating.value = true
@@ -529,7 +494,7 @@ onBeforeUnmount(() => {
             </ul>
           </n-alert>
           <n-alert class="notice" type="info">
-            使用打开窗口时的排班，校验通过后开始演算。预热不计收益，结果为离线估算。
+            使用打开窗口时的排班，无人机加速跟随排班表中的高级设置，校验通过后开始演算。预热不计收益，结果为离线估算。
           </n-alert>
           <n-form
             :disabled="state.running || exporting || submitting || weightsBusy"
@@ -557,11 +522,6 @@ onBeforeUnmount(() => {
               演算共 {{ (settings.warmupDays ?? 0) + (settings.sampleDays ?? 0) }} 天，仅统计后
               {{ settings.sampleDays }} 天收益。
             </p>
-            <n-form-item label="无人机加速目标"
-              ><n-select
-                v-model:value="settings.droneRoom"
-                :options="[{ label: '不使用无人机', value: '' }, ...targets]"
-            /></n-form-item>
             <n-form-item label="理论期望模式">
               <n-switch
                 :value="settings.expectationMode && !hasTailor"
@@ -582,7 +542,7 @@ onBeforeUnmount(() => {
             <p>
               {{
                 settings.expectationMode && !hasTailor
-                  ? '按换班、心情、技能和资源事件快算，忽略页面操作时间；各项产出与材料消耗累计小数期望，无人机按配置间隔和阈值使用。初始心情和轮换阶段仍会影响结果。'
+                  ? '按换班、心情、技能和资源事件快算，忽略页面操作时间；各项产出与材料消耗累计小数期望，无人机按生成能力和当前目标分段计算，不受无人机库存、阈值及检查间隔限制。初始心情和轮换阶段仍会影响结果。'
                   : '按概率随机抽单；固定种子留空时每次随机生成，填写后使用指定种子。结果保留本次种子以供复现。'
               }}
             </p>
@@ -865,7 +825,40 @@ onBeforeUnmount(() => {
                     </tr>
                   </tbody>
                 </n-table>
-                <p v-if="state.result.stability.drones">
+                <p
+                  v-if="
+                    state.result.simulationReport?.production?.assumptions.droneAllocationModel ===
+                    'generated-capacity-v1'
+                  "
+                >
+                  统计期无人机能力：生成
+                  {{
+                    format(state.result.simulationReport.production.expected.droneGenerated)
+                  }}，有效分配
+                  {{
+                    format(state.result.simulationReport.production.expected.droneAllocated)
+                  }}，其中切产物
+                  {{
+                    format(
+                      state.result.simulationReport.production.expected.droneSwitchAllocated ?? 0
+                    )
+                  }}；损耗
+                  {{
+                    format(state.result.simulationReport.production.expected.droneLost ?? 0)
+                  }}，未利用
+                  {{
+                    format(state.result.simulationReport.production.expected.droneUnallocated ?? 0)
+                  }}；期末待结算切产物份额
+                  {{
+                    format(
+                      state.result.simulationReport.production.expected.pendingSwitchDrones ?? 0
+                    )
+                  }}
+                  架。以上是无人机等效数量，不代表实物库存。
+                  按当前主副表生效的目标分段分配；切产物提前使用的加速份额由后续生成能力优先结算，未结算部分不计收入。
+                  原材料、驻员和有效工作继续约束产出。
+                </p>
+                <p v-else-if="state.result.stability.drones">
                   无人机期初 {{ format(state.result.stability.drones.opening) }}，期末
                   {{ format(state.result.stability.drones.closing) }}， 差额
                   {{ format(state.result.stability.drones.change) }}；期间生成
