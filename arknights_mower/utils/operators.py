@@ -392,6 +392,8 @@ class Operators:
         self.displaced_dorms = []
         self.group_dorm = []
         self.idle_dorm_search_exhausted = False
+        self.idle_dorm_release_suspended = False
+        self.idle_dorm_release_observations = None
         self.idle_dorm_search_stopped_at = None
         self.dorm_mood_estimates = {}
         self.recall_recovery_rates = {}
@@ -562,8 +564,13 @@ class Operators:
         return default_plan, ext_config.merge_config(plan.config)
 
     def init_and_validate(self, update=False):
+        from arknights_mower.utils.backup_group_tasks import validate_group_task_names
         from arknights_mower.utils.backup_validation import validate_trade_order_targets
 
+        try:
+            validate_group_task_names(self.global_plan)
+        except ValueError as error:
+            return str(error)
         primary = self.global_plan["default_plan"]
         if error := validate_trade_order_targets(
             primary.plan, primary.products, label="主表"
@@ -1068,7 +1075,9 @@ class Operators:
         )
 
     def stop_idle_dorm_search(self, now=None):
-        """最低候选实读也已满时关闭共享搜索；重复读数不延长等待。"""
+        """合格候选已满时暂停普通清退，下一轮心情检测取得新观测后恢复。"""
+        self.idle_dorm_release_suspended = True
+        self.idle_dorm_release_observations = dict(self.room_observations)
         if not self.idle_dorm_search_exhausted:
             self.idle_dorm_search_exhausted = True
             self.idle_dorm_search_stopped_at = now or datetime.now()
@@ -1119,7 +1128,11 @@ class Operators:
         )
 
     def skip_idle_dorm_release(self, name):
-        return self.is_free_room_excluded(name) or self.is_full_dorm_fallback(name)
+        return (
+            getattr(self, "idle_dorm_release_suspended", False)
+            or self.is_free_room_excluded(name)
+            or self.is_full_dorm_fallback(name)
+        )
 
     def idle_rest_checked(self, name):
         """同批最低者也达到上限后，空闲期间不重复试住；不伪造缓存心情。"""
@@ -3537,9 +3550,7 @@ class Operators:
             ),
         )
 
-    def validate_backup_plans(
-        self, *, max_seconds=None, check_owned=True, refresh_roster=True
-    ):
+    def validate_backup_plans(self, *, max_seconds=None, check_owned=True):
         """独立检查可能的副表组合；可选耗时预算覆盖条件分析和组合检查。"""
         from arknights_mower.utils.backup_validation import (
             BackupValidationLimitExceeded,
@@ -3566,7 +3577,7 @@ class Operators:
                 "message": error,
             }
         if check_owned:
-            warnings = collect_roster_warnings(self.global_plan, refresh=refresh_roster)
+            warnings = collect_roster_warnings(self.global_plan)
 
         baseline = Operators(self.global_plan, runtime_conf=self.runtime_conf)
         validated = {baseline._schedule_validation_key()}

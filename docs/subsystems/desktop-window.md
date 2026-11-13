@@ -8,11 +8,49 @@ The entry selects the pywebview backend before choosing frameless behavior. WinF
 
 The bridge reports whether the title bar is enabled, whether movement uses the JavaScript bridge or native input, and whether resizing uses HTML grips or native edges. The frontend uses those capabilities instead of inferring behavior from the operating-system name. Protocol-v1 bridges without capabilities retain their existing frontend behavior.
 
+WinForms requests DWM rounded corners and the system border color only on Windows build 22000 or later. Earlier builds retain their normal compositor rendering without requesting unsupported attributes. A rejected optional attribute on a supported build does not prevent window setup.
+
 Cocoa keeps the system red, yellow and green window buttons, including native hover and zoom/fullscreen behavior. Their native size and spacing are preserved, with the native titlebar container inset from the left and aligned with the content in the shared 36-point title bar; resize and move notifications reapply that placement after AppKit finishes its layout pass. The Vue title bar reserves space on the left and omits duplicate HTML controls when the bridge reports native controls. In that mode, the title bar compensates for page zoom so its height and native-button reservation retain their logical size. GTK and Qt keep neutral minimize, maximize and close glyphs in their custom title bar; Linux desktop themes do not share one traffic-light convention. These HTML controls do not inherit the window manager's theme or configured button order.
 
 Managed instance windows close directly and leave the instance running under the multi-instance manager. They do not offer a separate tray or apply the standalone close preference. The manager remains responsible for reopening the window or stopping the instance.
 
 For standalone windows, Cocoa's native close request opens the same frontend close choice as an HTML close button. Cancelling or deferring that choice keeps the window and normal-size tracking active. A confirmed close or supervisor exit proceeds directly. Native requests received before the page is ready wait until the frontend installs its close listener and confirms readiness. The listener acknowledges each delivered close event synchronously; a missing listener after page reload or a failed dispatch retains the request for the next readiness confirmation or native close request, without polling. Closing the window prevents further delivery.
+
+## WebView2 response observation
+
+The desktop entry and offline preview register
+[`configure_response_observation`](../../arknights_mower/utils/webview_response.py)
+before starting pywebview. Its blocking `initialized` callback installs an
+EdgeChromium adapter after GUI selection and before native window creation.
+Other renderers retain their existing implementation.
+
+The adapter targets the pinned pywebview 6.2.1 backend. That backend subscribes to
+`WebResourceResponseReceived` during initialization even without Python response
+consumers. The adapter removes that subscription before the initial URL or HTML
+navigation when `window.events.response_received` is empty. Request observation,
+request-header changes, navigation, JavaScript bridging and downloads retain the
+upstream implementation. Screenshot requests retain their existing XHR transport
+and Blob URL cleanup.
+
+The response event forwards the existing event operations and synchronizes
+consumer additions and removals on the GUI thread. A registration completed
+before a new request enables observation for that response. GUI dispatch waits
+at most three seconds; failure undoes the handler change and raises an error,
+and a timed-out pending update is cancelled. A consumer added during an already
+in-flight request is not guaranteed that response, and no response is replayed.
+The adapter also checks consumers after blocking `request_sent` handlers return.
+Removing the last consumer disables native observation without requiring another
+request. Mower currently registers no response consumers.
+Adding one deliberately enables the native path associated with accumulation;
+such a change requires renewed memory validation.
+
+Each native window tracks its own subscription. Recreated GUI processes install
+the adapter again; multiple windows in one process reuse the class adapter with
+separate consumer state. Dependency-pin tests require review when pywebview is
+upgraded. Recheck the upstream initialization, URL/HTML loading and request
+callbacks, remove the adapter if upstream fixes the subscription, and repeat
+native memory and window-function acceptance before changing that pin. The
+adapter relies on those version-specific internals, not a general pywebview API.
 
 ## Native input ownership
 
@@ -65,7 +103,7 @@ A refused or timed-out hit-region update invalidates the frontend's acknowledgem
 From the repository root, run:
 
 ```bash
-python -m pytest arknights_mower/tests/window_state_tests.py arknights_mower/tests/window_frameless_tests.py arknights_mower/tests/window_regions_tests.py arknights_mower/tests/window_backend_tests.py arknights_mower/tests/window_shell_platform_tests.py arknights_mower/tests/cocoa_window_tests.py arknights_mower/tests/linux_window_tests.py arknights_mower/tests/webview_ui_tests.py arknights_mower/tests/desktop_process_tests.py
+python -m pytest arknights_mower/tests/window_state_tests.py arknights_mower/tests/window_frameless_tests.py arknights_mower/tests/window_regions_tests.py arknights_mower/tests/window_backend_tests.py arknights_mower/tests/window_shell_platform_tests.py arknights_mower/tests/cocoa_window_tests.py arknights_mower/tests/linux_window_tests.py arknights_mower/tests/webview_ui_tests.py arknights_mower/tests/desktop_process_tests.py arknights_mower/tests/webview_response_tests.py
 ```
 
 From `ui/`, run:

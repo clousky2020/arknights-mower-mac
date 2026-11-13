@@ -127,6 +127,7 @@ from arknights_mower.utils.log import log_parent_context, logger
 from arknights_mower.utils.maa_callback import (
     REPORT_REQUEST,
     MaaCallbackLog,
+    blackflow_boss_stop_reached,
     parse_details,
 )
 from arknights_mower.utils.maa_report import upload_report
@@ -5362,8 +5363,26 @@ class BaseSchedulerSolver(
         ``return_plan=True`` 返回差异而不把纠错任务塞进队列。
         ``explicit_slots`` 保留预演中已应用的副表显式驻员，优先于普通纠错。
         """
-        if read_rooms and self._read_agent_mood() is False:
-            return {} if return_plan else None
+        if read_rooms:
+            observations = getattr(self.op_data, "idle_dorm_release_observations", None)
+            if (
+                getattr(self.op_data, "idle_dorm_release_suspended", False)
+                and observations is None
+            ):
+                # 旧运行状态没有暂停时的观测版本，从当前版本等待后续新观测。
+                observations = dict(self.op_data.room_observations)
+                self.op_data.idle_dorm_release_observations = observations
+            if self._read_agent_mood() is False:
+                return {} if return_plan else None
+            if getattr(self.op_data, "idle_dorm_release_suspended", False) and any(
+                revision != observations.get(room)
+                for room, revision in self.op_data.room_observations.items()
+            ):
+                self.op_data.idle_dorm_release_suspended = False
+                self.op_data.idle_dorm_release_observations = None
+                self.op_data.refresh_idle_dorm_search(
+                    reason="心情检测已取得新的房间观测"
+                )
         if self._emergency_frozen():
             return {} if return_plan else None
         plan = self.op_data.plan
@@ -10797,6 +10816,7 @@ class BaseSchedulerSolver(
                         ):
                             continue
                     raise ValueError("原下班目标未完成，保留原任务并等待岗位释放")
+            # 回班预演附带的副表任务不能让原普通回班跳过恢复要求。
             if (
                 task.type == TaskTypes.SHIFT_ON
                 and not getattr(task, "initial_staffing", False)
@@ -10804,7 +10824,7 @@ class BaseSchedulerSolver(
                 and not getattr(task, "group_shift_expected", {})
                 and not getattr(task, "backup_shift_active", False)
                 and not getattr(task, "product_shift_locked", False)
-                and not explicit_slots
+                and not getattr(task, "backup_explicit_slots", ())
                 and not getattr(task, "exhaust_support", False)
                 and not getattr(task, "dorm_recovery_restore", ())
             ):
@@ -10892,7 +10912,9 @@ class BaseSchedulerSolver(
                             for queued in trial_solver.tasks
                         ]
                         return
+                    # 恢复完成前保留原回班意图，不提交预演中的副表安排。
                     task.time = max(task.time, deadline)
+                    return
             task.group_shift_transitions = {
                 group: resting
                 for group, resting in simulation.op_data.group_shift_state.items()
@@ -16099,10 +16121,8 @@ class BaseSchedulerSolver(
         choose_error=0,
         dorm_mood_candidates=None,
         recovery_padding=False,
-    ) -> None:
-        """
-        :param order: ArrangeOrder, 选择干员时右上角的排序功能
-        """
+    ) -> bool | None:
+        """选择并校验目标名单；无需换人且已放弃暂选时返回 False。"""
         max_swipe = 50
         if getattr(getattr(self, "task", None), "emergency_staffing", False):
             fast_mode = False
@@ -16563,15 +16583,28 @@ class BaseSchedulerSolver(
                         and (estimate := estimates.get(visible[0])) is not None
                         and estimate[0] >= 24
                     ):
-                        free_list = [
-                            name
-                            for name in retainable
-                            if name in free_list and name not in agents
-                        ][:free_num]
+                        self.op_data.stop_idle_dorm_search()
+                        resolved = agents.copy()
+                        for index, name in enumerate(resolved):
+                            current = self.op_data.get_current_operator(room, index)
+                            if (
+                                name == "Free"
+                                and current is not None
+                                and current.name in retainable
+                                and current.name in free_list
+                                and current.name not in resolved
+                            ):
+                                resolved[index] = current.name
+                        if resolved == self.op_data.get_current_room(room, True):
+                            agents[:] = resolved
+                            self._cancel_unchanged_dorm_selection()
+                            pending = getattr(self.task, "idle_dorm_search_names", {})
+                            pending.setdefault(room, set()).update(retainable)
+                            self.task.idle_dorm_search_names = pending
+                            logger.info("候选均已满心情，放弃暂选并保留原驻员")
+                            return False
+                        # 同房仍需换人时直接选当前页的合格候选，不再找回原住者。
                         screening = False
-                        previous_page = None
-                        right_swipe = self.swipe_left(right_swipe, last_special_filter)
-                        logger.info("选人页合格候选已是满条，保留实读满心情住客")
                         continue
                 selected.extend(selected_name)
                 if mood_fallback or idle_fallback:
@@ -16732,6 +16765,23 @@ class BaseSchedulerSolver(
                 if peer != name and peer in self.op_data.operators
             }
             logger.info(f"按心情升序补入{name}；读满后停止连续试住，个人上限仍强制离宿")
+
+    def _cancel_unchanged_dorm_selection(self):
+        """放弃未提交的暂选，确认返回房间后再由调用者核对实际驻员。"""
+        for _ in range(8):
+            self.recog.update()
+            scene = self.scene()
+            if scene in (Scene.INFRA_DETAILS, Scene.CTRLCENTER_ASSISTANT):
+                return
+            if scene == Scene.INFRA_ARRANGE_ORDER:
+                self.back(interval=0.5)
+            elif scene == Scene.INFRA_ARRANGE_CONFIRM:
+                self.tap((self.recog.w // 3, self.recog.h - 10), interval=0.5)
+            elif scene in self.waiting_scene:
+                self.sleep(0.5)
+            else:
+                raise AgentSelectionNotReady("放弃宿舍暂选时未确认房间界面")
+        raise AgentSelectionNotReady("放弃宿舍暂选后未在有限次数内返回房间")
 
     def reset_room_time(self, room):
         for _operator in self.op_data.operators.keys():
@@ -18188,6 +18238,7 @@ class BaseSchedulerSolver(
         while not finished:
             confirmation_pending = False
             selection_attempted = False
+            selection_changed = True
             final_observation = None
             room_revision = getattr(self.op_data, "room_observations", {}).get(room, 0)
             try:
@@ -18687,29 +18738,25 @@ class BaseSchedulerSolver(
                             )
                             self.task.run_order_restore_pending = True
                         selection_attempted = True
-                        if recovery_ordered:
+                        selection_changed = (
                             self.choose_agent(
                                 plan[room],
                                 room,
                                 fast_mode=choose_error <= 0,
-                                preserve_dorm_occupants=True,
+                                preserve_dorm_occupants=recovery_ordered,
                                 choose_error=choose_error,
                                 dorm_mood_candidates=dorm_mood_candidates,
                             )
-                        else:
-                            self.choose_agent(
-                                plan[room],
-                                room,
-                                fast_mode=choose_error <= 0,
-                                choose_error=choose_error,
-                                dorm_mood_candidates=dorm_mood_candidates,
-                            )
-                        confirmation_pending = True
-                        self._prepare_run_order_confirmation(room, plan[room])
-                        self.tap_confirm(room, new_plan)
+                            is not False
+                        )
+                        if selection_changed:
+                            confirmation_pending = True
+                            self._prepare_run_order_confirmation(room, plan[room])
+                            self.tap_confirm(room, new_plan)
                     if room.startswith("dorm") and not fia_arrangement:
-                        # 换人也会改变未移动住客的同住加成，最终阵容全部重新计时。
-                        self.op_data.invalidate_dorm_time(room)
+                        # 放弃暂选不改变同住加成，保留现有恢复计时。
+                        if selection_changed:
+                            self.op_data.invalidate_dorm_time(room)
                         read_time_index = self.op_data.get_refresh_index(
                             room,
                             plan[room],
@@ -18927,6 +18974,15 @@ class BaseSchedulerSolver(
         self._confirm_facility_arrangement_log(
             room, targets, observed, unconfirmed=unconfirmed
         )
+        if (
+            room.startswith("dorm")
+            and getattr(self.op_data, "idle_dorm_release_suspended", False)
+            and room in getattr(self.task, "idle_dorm_search_names", {})
+        ):
+            # 本次保留或补位自己的读回属于暂停收尾，不能用来立即解除暂停。
+            self.op_data.idle_dorm_release_observations = dict(
+                self.op_data.room_observations
+            )
         del plan[room]
 
     def _wait_for_room_entry_before_exit(self, room, *, deadline):
@@ -20021,13 +20077,19 @@ class BaseSchedulerSolver(
         return progress
 
     def _maa_blackflow_run(self, conf):
-        from arknights_mower.utils.maa_long_task import blackflow_start_run_key
+        from arknights_mower.utils.maa_long_task import (
+            blackflow_boss_run_key,
+            blackflow_preserved_run,
+            blackflow_start_run_key,
+        )
 
-        key = blackflow_start_run_key(conf)
-        progress = load_maa_blackflow_progress()
+        boss = blackflow_preserved_run(conf) == "boss"
+        key = (blackflow_boss_run_key if boss else blackflow_start_run_key)(conf)
+        progress = load_maa_blackflow_progress(boss=boss)
         if progress.get("key") != key:
             progress = {"key": key, "completed": False}
-            save_maa_blackflow_progress(progress)
+            save_maa_blackflow_progress(progress, boss=boss)
+        progress["kind"] = "boss" if boss else "opening"
         return progress
 
     def _record_maa_blackflow_callback(self, msg, details):
@@ -20038,13 +20100,22 @@ class BaseSchedulerSolver(
             or details["taskid"] != task[0]
             or details.get("taskchain") != "Roguelike"
             or msg != 20003
-            or details.get("what") != "BlackFlowStartRun"
         ):
             return
         inner = details.get("details")
-        if isinstance(inner, dict) and inner.get("status") == "completed":
+        if not isinstance(inner, dict):
+            return
+        boss = task[1].get("kind") == "boss"
+        if boss:
+            completed = blackflow_boss_stop_reached(details)
+        else:
+            completed = (
+                details.get("what") == "BlackFlowStartRun"
+                and inner.get("status") == "completed"
+            )
+        if completed:
             task[1]["completed"] = True
-            save_maa_blackflow_progress(task[1])
+            save_maa_blackflow_progress(task[1], boss=boss)
 
     def _maa_paradox_run(self, conf):
         from arknights_mower.utils.maa_copilot import queue_key
@@ -20986,14 +21057,16 @@ class BaseSchedulerSolver(
             except ValueError:
                 rg_sleep = False
             paradox = selected_long == "paradox"
+            from arknights_mower.utils.maa_long_task import blackflow_preserved_run
+
             if (
                 selected_long == "rogue"
                 and conf.maa_rg_theme == "BlackFlow"
-                and conf.rogue.mode == 30003
+                and blackflow_preserved_run(conf.rogue) is not None
                 and (manual or not rg_sleep)
             ):
                 blackflow_run = self._maa_blackflow_run(conf.rogue)
-                if blackflow_run["completed"]:
+                if blackflow_run.get("completed") is True:
                     selected_long = None
             if selected_long in ("copilot", "paradox") and (manual or not rg_sleep):
                 copilot_conf = conf.paradox if paradox else conf.copilot
@@ -21269,9 +21342,8 @@ class BaseSchedulerSolver(
                             if seed:
                                 rogue_params["start_with_seed"] = seed
                         if conf.maa_rg_theme == "BlackFlow":
-                            strategy = getattr(conf.rogue, "blackflow_strategy", "")
-                            if conf.rogue.mode == 0 and strategy:
-                                rogue_params["blackflow_strategy"] = strategy
+                            if conf.rogue.mode == 0:
+                                rogue_params["blackflow_strategy"] = "ending1"
                             if conf.rogue.mode == 30003:
                                 for key, default in (
                                     ("blackflow_start_animals", []),
@@ -21319,7 +21391,11 @@ class BaseSchedulerSolver(
                         if not large_task_start_allowed():
                             break
                         task_id = self.MAA.append_task("Roguelike", rogue_params)
-                        if blackflow_run is not None:
+                        if (
+                            blackflow_run is not None
+                            and type(task_id) is int
+                            and task_id > 0
+                        ):
                             self.maa_blackflow_task = (task_id, blackflow_run)
                     elif selected_long in ("copilot", "paradox"):
                         from arknights_mower.utils.maa_copilot import (
@@ -22639,7 +22715,7 @@ class BaseSchedulerSolver(
         log_status(
             f"已更新库存，识别 {item_count} 种物品"
             if item_count
-            else "已更新库存，两个分类均为空",
+            else "已更新库存，无需额外数量扫描",
             phase="completed",
         )
         self._auto_schedule_mastery_after_scan()

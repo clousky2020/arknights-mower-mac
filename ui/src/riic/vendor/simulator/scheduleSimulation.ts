@@ -196,7 +196,7 @@ export function simulateSchedule(schedule:CompiledSchedule,options:ScheduleSimul
  let hasActiveTemporalSkills=false,hasActiveContinuousWarmup=false
  const checkTemporalSkills=()=>{
   hasActiveTemporalSkills=[...entered.keys()].some(id=>getTemporalSkillBoundaries(id,{operatorRecords}).length>0)
-  hasActiveContinuousWarmup=hasActiveTemporalSkills&&(warmupModel==='continuous'||[...entered].some(([id,session])=>qualitySkillWarmupHours(id,{operatorRecords})>state.time-session.time))
+  hasActiveContinuousWarmup=hasActiveTemporalSkills&&warmupModel==='continuous'
  }
  const refreshSessions=(newEvents:RuntimeEvent[]=[])=>{
   const reset=new Set(newEvents.filter(e=>e.type==='fiammetta').map(e=>e.operators[1]))
@@ -210,7 +210,7 @@ export function simulateSchedule(schedule:CompiledSchedule,options:ScheduleSimul
   checkTemporalSkills()
  }
  refreshSessions()
- if([...entered.keys()].some(id=>qualitySkillWarmupHours(id,{operatorRecords})>0)||Object.keys(schedule.operators).some(id=>qualitySkillWarmupHours(id,{operatorRecords})>0))diagnostic('TRADE_QUALITY_WARMUP_MODEL','裁缝类订单概率采用线性近似：α／β分别在原工位连续工作 3／5 小时达到峰值；移动工位或离岗后重新计时。同类效果不叠加，取当前四赤金概率最高者；中间曲线和叠加机制未经实测核验。')
+ if([...entered.keys()].some(id=>qualitySkillWarmupHours(id,{operatorRecords})>0)||Object.keys(schedule.operators).some(id=>qualitySkillWarmupHours(id,{operatorRecords})>0))diagnostic('TRADE_QUALITY_WARMUP_MODEL',`裁缝类订单概率采用${warmupModel==='hourly'?'满整小时等幅递增':'连续线性'}近似：α／β分别在原工位连续工作 3／5 小时达到峰值；移动工位或离岗后重新计时。仅支持单名裁缝影响普通赤金订单概率；同站多名裁缝实际生效时不支持演算，不采用取最强或叠加近似。中间暖机曲线未经实测核验。`)
  const stats=new Map(Object.keys(state.morale).map(id=>[id,{operatorId:id,operatorName:isMowerDormFiller(id)?MOWER_DORM_FILLER_NAME:OPERATOR_MAP.get(id)?.name??id,mainWorkHours:0,substituteWorkHours:0,workHours:0,exhaustedHours:0,restHours:0,idleHours:0,permanentPrimaryOccupancyHours:0,workFraction:0,workRestRatio:null,initialMorale:initial[id]!,finalMorale:initial[id]!} as SimulatedOperator]))
  const roomStats=new Map(projectScheduleState(schedule,state).rooms.map(r=>[r.id,{roomId:r.id,roomType:r.type,averageEfficiencyPercent:0,efficiencyPercentHours:0,occupiedHours:0,teams:[]} as SimulatedRoom]))
  if(schedule.rooms.some(r=>r.type==='recycle'))roomStats.set('recycle',{roomId:'recycle',roomType:'recycle',averageEfficiencyPercent:0,efficiencyPercentHours:0,occupiedHours:0,teams:[]})
@@ -556,8 +556,8 @@ export function simulateSchedule(schedule:CompiledSchedule,options:ScheduleSimul
  const resourceWaits=pendingFailures.filter(task=>task.coordinationDependencyWait||task.executionFailure!.kind==='resource-wait')
  const unresolvedFailures=pendingFailures.filter(task=>!resourceWaits.includes(task))
  for(const task of resourceWaits)diagnostic('MOWER_PENDING_RESOURCE_WAIT',`统计结束仍有等待替班、床位或心情恢复的${task.type.displayValue}任务（${Object.keys(task.plan).join('、')}）：${task.executionFailure!.reason}；保留原任务和时间，收益按实际在岗情况计算`)
- for(const task of unresolvedFailures)diagnostic('MOWER_PENDING_TASK_FAILURE',`统计结束仍有未恢复的${task.type.displayValue}任务（${Object.keys(task.plan).join('、')}）：${task.executionFailure!.reason}；保留原任务和时间，本次收益演算未完整完成`)
- report.elapsedHours=state.time;report.success=!backupFailed&&!unresolvedFailures.length&&Math.abs(state.time-total)<EPS
+ for(const task of unresolvedFailures)diagnostic('MOWER_PENDING_TASK_FAILURE',`统计结束仍有未恢复的${task.type.displayValue}任务（${Object.keys(task.plan).join('、')}）：${task.executionFailure!.reason}；保留原任务和时间，收益按实际在岗情况计算`)
+ report.elapsedHours=state.time;report.success=!backupFailed&&Math.abs(state.time-total)<EPS
  if(report.success)production?.finalize(frameAt(0))
  report.operators=[...stats.values()].map(s=>({...s,initialMorale:initial[s.operatorId]??s.initialMorale,finalMorale:state.morale[s.operatorId]!,workFraction:report.observedHours?s.workHours/report.observedHours:0,workRestRatio:s.restHours>EPS?s.workHours/s.restHours:null}))
  report.rooms=[...roomStats.values()].map(r=>({...r,averageEfficiencyPercent:report.observedHours?r.efficiencyPercentHours/report.observedHours:0,teams:r.teams.map(t=>({...t,fraction:report.observedHours?t.hours/report.observedHours:0}))}))

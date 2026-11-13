@@ -249,3 +249,5 @@ openspec/
 
 # Generated compatibility entry for the resource publisher; shared source lives in data/.
 /ui/src/pages/basement_skill/skill.json
+
+.dsh-worktrees/

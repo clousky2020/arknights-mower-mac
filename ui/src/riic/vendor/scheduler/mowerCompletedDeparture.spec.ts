@@ -5,7 +5,7 @@ import { advanceRoster, createRosterRuntime, settleRoster, type RuntimeConfig } 
 import { getMowerSourceRuntime } from './mowerSourceRuntime'
 import { mowerCorrectionPlan, planMowerCorrection } from './mowerCorrection'
 import { mowerGroupRecoveryDeadline, mowerMoodLimitGroupReturn } from './mowerGroupRecovery'
-import { mowerHasMeasuredDormDeparture, projectMowerArrangements } from './mowerObservations'
+import { mowerHasMeasuredDormDeparture, mowerUpdateDetail, projectMowerArrangements } from './mowerObservations'
 import { MowerOperatorState } from './mowerOperatorState'
 import { MowerTask, MOWER_TASK_TYPES as T, toMowerMicros } from './mowerTaskQueue'
 
@@ -485,7 +485,7 @@ describe('mandatory full recovery releases read actual recovery before freeing t
 
 
 describe.each(['direct', 'queued'] as const)('exhaust refresh after measured full departure: %s', path => {
-  it.each(['idle-full', 'working', 'predicted'] as const)('preserves only completed idle evidence when another operator changes room: %s', mode => {
+  it.each(['idle-full', 'resting-full', 'resting-underfull', 'resting-predicted', 'resting-unknown', 'working', 'predicted'] as const)('preserves measured full recovery in resting and idle operators when another operator changes room: %s', mode => {
     const f = fixture(24, 24), op = f.source.data.operators.A!
     finish(f)
     expect(op.currentRoom).toBe('')
@@ -493,6 +493,12 @@ describe.each(['direct', 'queued'] as const)('exhaust refresh after measured ful
     advanceRoster(f.state, .5 / 3600, rates); finish(f)
     op.exhaustRequire = true
     f.state.config.mowerSourceRules!.refreshDrained = ['S']
+    if (mode.startsWith('resting-')) {
+      f.state.bedOccupants[room + '_3'] = 'A'; op.currentRoom = room; op.currentIndex = 3; op.depletionRate = -.4
+      if (mode === 'resting-underfull') op.mood = 23
+      if (mode === 'resting-predicted') op.moodIsPrediction = true
+      if (mode === 'resting-unknown') op.timeStampMicros = undefined
+    }
     if (mode === 'working') {
       f.state.occupants.room_1_1_0 = 'A'; op.currentRoom = 'room_1_1'; op.currentIndex = 0; op.depletionRate = 1
     }
@@ -505,7 +511,7 @@ describe.each(['direct', 'queued'] as const)('exhaust refresh after measured ful
     finish(f)
     expect(f.source.queue.tasks).not.toContain(exhaust)
     expect(f.source.data.operators.S!.currentRoom).toBe('')
-    if (mode === 'idle-full') expect(op.timeStampMicros).toBe(stamp)
+    if (mode === 'idle-full' || mode === 'resting-full') expect(op.timeStampMicros).toBe(stamp)
     else expect(op.timeStampMicros).toBeUndefined()
   })
 })
@@ -539,6 +545,27 @@ it('executes an advanced personal-limit release during a group recovery wait', (
   expect(mowerGroupRecoveryDeadline(f.source.data, 'g').timeMicros).toBeDefined()
   expect(f.source.data.operators.B!.isResting()).toBe(true)
   expect(f.source.data.groupShiftState.g).toBe(true)
+})
+
+it.each([false,true])('returns a group after its advanced personal-limit departure with predictive mood=%s',predictive=>{
+ const f=fixture(11.925,12),data=f.source.data,op=data.operators.A!
+ f.state.config.mowerPolicy!.predictiveMoodControl=predictive;data.policy.predictiveMoodControl=predictive
+ op.restMoodLimit=true;data.groupRecoveryFullMembers.g=['A','B']
+ f.task.strictMoodLimit=true;f.task.moodLimit=12
+ for(let step=0;step<8;step++){finish(f);advanceRoster(f.state,.5/3600,rates)}
+ expect(op.currentRoom).toBe('');expect(op.restMoodReleaseLimit).toBe(12)
+ expect(op.mood).toBe(11.925)
+ advanceRoster(f.state,2-f.state.time,rates)
+ getMowerSourceRuntime(f.state)
+ f.state.morale.B=24;mowerUpdateDetail(data,'B',24,room,4,true)
+ const task=new MowerTask({time:f.state.time,type:T.SHIFT_ON,plan:{room_1_1:['A'],room_1_2:['B']}})
+ task.backupShiftActive=true;f.source.queue.tasks=[task]
+ for(let step=0;step<8&&f.source.queue.tasks.includes(task);step++){finish(f);advanceRoster(f.state,.5/3600,rates)}
+ expect(task.executionFailure).toBeUndefined()
+ expect(f.source.queue.tasks).not.toContain(task)
+ expect(f.state.occupants.room_1_1_0).toBe('A');expect(f.state.occupants.room_1_2_0).toBe('B')
+ expect(data.groupIsResting('g')).toBe(false)
+ expect(task.timeMicros).toBe(toMowerMicros(2))
 })
 
 it.each([{ mood: 23.95, history: false, ready: true }, { mood: 23, history: false, ready: false }, { mood: 23.87, history: false, ready: false }, { mood: 23.87, history: true, ready: true }])('checks every full-rest member against its room allowance: $mood, history=$history', ({ mood, history, ready }) => {
