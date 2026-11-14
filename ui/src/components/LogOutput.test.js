@@ -2,9 +2,9 @@ import { readFileSync } from 'node:fs'
 import { parse } from '@vue/compiler-sfc'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { compile, createRenderer, h, nextTick, reactive, ssrContextKey } from 'vue'
-import { NPopover, NScrollbar } from 'naive-ui'
-import ArrowDown from '@vicons/ionicons5/es/ArrowDownOutline'
+import { NButton, NIcon, NPopover, NScrollbar } from 'naive-ui'
 import DetailChevron from '@vicons/ionicons5/es/ChevronDownOutline'
+import JumpToLatestButton from './JumpToLatestButton.vue'
 import LogOperator from './LogOperator.vue'
 import LogInventory from './LogInventory.vue'
 import LogItemToken from './LogItemToken.vue'
@@ -16,6 +16,16 @@ const instances = vi.hoisted(() => ({ operator: 0 }))
 vi.mock('naive-ui', async () => {
   const { defineComponent, h } = await import('vue')
   return {
+    NButton: defineComponent({
+      setup:
+        (_, { slots }) =>
+        () =>
+          h('button', [slots.icon?.(), slots.default?.()])
+    }),
+    NIcon: defineComponent({
+      props: ['component'],
+      setup: (props) => () => h(props.component)
+    }),
     NPopover: defineComponent({
       props: { show: Boolean },
       setup:
@@ -74,7 +84,16 @@ const clientOutput = {
   ...LogOutput,
   components: {
     NScrollbar,
-    ArrowDown,
+    JumpToLatestButton: {
+      ...JumpToLatestButton,
+      components: { NButton, NIcon },
+      ssrRender: undefined,
+      render: compile(
+        parse(readFileSync(new URL('./JumpToLatestButton.vue', import.meta.url), 'utf8')).descriptor
+          .template.content
+      ),
+      setup: (props, context) => ({ ...JumpToLatestButton.setup(props, context) })
+    },
     DetailChevron,
     LogOperator,
     TaskActionSubjects: clientSubjects,
@@ -3514,6 +3533,27 @@ describe('running log output', () => {
         .map(headingText)
     ).toEqual(['1号公招位', '1号公招位'])
     expect(page.rows().map(text)).toEqual(lines.map((line) => line.text))
+  })
+
+  it('keeps the hidden log viewport at its previous height when the checklist opens', async () => {
+    const page = mount({ showAlternateView: false }, { alternate: () => h('div', '今日任务') })
+    const root = page.all().find((entry) => hasClass(entry, 'log-output'))
+    const scrollbar = page.all().find((entry) => hasClass(entry, 'log-output__scroll'))
+    scrollbar.offsetHeight = 266
+    root.querySelector = (selector) => (selector === '.log-output__scroll' ? scrollbar : null)
+
+    page.props.showAlternateView = true
+    await nextTick()
+    expect(scrollbar.props.style).toEqual({ height: '266px' })
+
+    page.props.showAlternateView = false
+    await nextTick()
+    expect(scrollbar.props.style?.height).toBeUndefined()
+
+    scrollbar.offsetHeight = 320
+    page.props.showAlternateView = true
+    await nextTick()
+    expect(scrollbar.props.style).toEqual({ height: '320px' })
   })
 
   it.each([false, true])(

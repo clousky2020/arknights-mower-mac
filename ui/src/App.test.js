@@ -20,6 +20,8 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import App from './App.vue'
 import { configProfilesKey } from '@/composables/configProfiles'
 import { themeSelectionKey } from '@/composables/themeSelection'
+import { logViewMenuKey } from '@/stores/logWorkspace'
+import { windowMinimizedKey } from '@/window-shell/context.js'
 import { routes } from './routes'
 
 const state = vi.hoisted(() => ({
@@ -48,6 +50,7 @@ const state = vi.hoisted(() => ({
   shellMetadata: null,
   shellActive: false,
   shellConnected: null,
+  shellState: null,
   sidebarInitialize: vi.fn(async () => true),
   sidebarFlush: vi.fn(async () => {}),
   settingsDialogClose: null,
@@ -115,8 +118,9 @@ vi.mock('@/window-shell/adapter.js', () => ({
     metadata: state.shellMetadata,
     active: ref(state.shellActive),
     connected: state.shellConnected,
+    platform: ref('windows'),
     capabilities: ref({ enabled: true, move: 'bridge', resize: 'native' }),
-    state: { maximized: false },
+    state: state.shellState,
     initialize: vi.fn(),
     dispose: vi.fn()
   }),
@@ -254,6 +258,7 @@ describe('desktop page startup', () => {
     state.shellMetadata = { version: '' }
     state.shellActive = false
     state.shellConnected = ref(false)
+    state.shellState = ref({ maximized: false, minimized: false })
     state.route = reactive({ meta: {} })
     state.navigated = []
     state.settingsDialogClose = null
@@ -397,6 +402,44 @@ describe('desktop page startup', () => {
   it('shares the title-bar profile controller with settings actions', async () => {
     const component = await mount()
     expect(provide).toHaveBeenCalledWith(configProfilesKey, component.configProfiles)
+  })
+
+  it('dispatches View commands to the mounted log controls and applies the shared scale', async () => {
+    state.route.name = 'log'
+    const component = await mount()
+    const [, logMenu] = provide.mock.calls.find(([key]) => key === logViewMenuKey)
+    const toggle = vi.fn()
+    logMenu.value = {
+      options: ref([{ key: 'log-view-screenshot-toggle', checked: true }]),
+      toggle
+    }
+    expect(component.logViewOptions.value).toEqual(logMenu.value.options.value)
+    component.handleViewAction('log-view-screenshot-toggle')
+    expect(toggle).toHaveBeenCalledExactlyOnceWith('log-view-screenshot-toggle')
+    state.route.name = 'settings'
+    expect(component.logViewOptions.value).toEqual([])
+    state.route.name = 'log'
+    logMenu.value = null
+    expect(component.logViewOptions.value).toEqual([])
+
+    state.loaded.value = true
+    component.handleViewAction('zoom-in')
+    await nextTick()
+    expect(state.config.webview.scale).toBe(1.25)
+    expect(document.documentElement.style.zoom).toBe(1.25)
+    component.handleViewAction('actual-size')
+    await nextTick()
+    expect(document.documentElement.style.zoom).toBe(1)
+  })
+
+  it('provides the native minimized state to page components', async () => {
+    await mount()
+    const minimized = provide.mock.calls.find(([key]) => key === windowMinimizedKey)[1]
+    expect(minimized.value).toBe(false)
+    state.shellState.value = { maximized: false, minimized: true }
+    expect(minimized.value).toBe(true)
+    state.shellState.value = { maximized: true, minimized: false }
+    expect(minimized.value).toBe(false)
   })
 
   it.each([
@@ -1933,7 +1976,7 @@ describe('desktop page startup', () => {
   )
 
   it.each([false, true])(
-    'uses current installed resource dates in the brand (mobile %s)',
+    'uses active finite activity deadlines for installed resource colors (mobile %s)',
     async (mobile) => {
       const now = Date.now() / 1000
       state.resource.info.current_display = '当前资源'
@@ -1944,13 +1987,45 @@ describe('desktop page startup', () => {
       component.isMobileNav.value = mobile
       component.mobileMenuOpen.value = mobile
       const upcoming = await renderShell(component)
-      expect(upcoming).toContain('--resource-badge-hue:140')
+      expect(upcoming).not.toContain('sidebar-brand-resource--dated')
+      expect(upcoming).not.toContain('--resource-badge-hue:')
+      expect(upcoming).toContain('活动开始：')
       state.resource.info.current_metadata = {
         activity: { name: '昨日海', time: now - 172800, endTime: now - 86400 }
       }
       const ended = await renderShell(component)
-      expect(ended).toContain('--resource-badge-hue:0')
-      expect(ended).toContain('活动已结束')
+      expect(ended).not.toContain('sidebar-brand-resource--dated')
+      expect(ended).not.toContain('--resource-badge-hue:')
+      expect(ended).toContain('当前资源中没有未结束的活动')
+
+      const permanent = { name: '卫戍协议:规程', time: now - 60, endTime: 4092580799 }
+      const later = { name: '后关闭活动', time: now - 86400, endTime: now + 259200 }
+      state.resource.info.current_display = '卫戍协议:规程#1111'
+      state.resource.info.current_metadata = {
+        activity: permanent,
+        activities: [
+          permanent,
+          later,
+          { name: '先关闭活动', time: now - 86400, endTime: now + 86400 }
+        ]
+      }
+      const active = await renderShell(component)
+      expect(active).toContain('--resource-badge-hue:70')
+      expect(active).toContain('>卫戍协议:规程#1111</button>')
+      expect(active).toContain('活动「先关闭活动」作战关闭')
+      expect(active).toContain('活动「卫戍协议:规程」长期开放')
+      expect(active).not.toContain('2099')
+
+      state.resource.info.current_metadata = { activity: permanent, activities: [later] }
+      const next = await renderShell(component)
+      expect(next).toContain('--resource-badge-hue:105')
+      expect(next).not.toContain('先关闭活动')
+
+      state.resource.info.current_metadata = { activity: permanent, activities: [] }
+      const permanentOnly = await renderShell(component)
+      expect(permanentOnly).not.toContain('sidebar-brand-resource--dated')
+      expect(permanentOnly).not.toContain('--resource-badge-hue:')
+      expect(permanentOnly).toContain('活动「卫戍协议:规程」长期开放')
     }
   )
 

@@ -33,6 +33,9 @@
       :busy="windowShellBusy"
       :sidebar-collapsed="sidebarCollapsed || sidebarHidden"
       :sidebar-visible="sidebarVisible"
+      :log-view-options="logViewOptions"
+      :zoom-availability="zoomAvailability"
+      :zoom-shortcuts="zoomShortcuts"
       :show-sidebar-toggle="!isMobileNav"
       :mower-port="mowerPort"
       :emulator-name="emulatorName"
@@ -95,6 +98,7 @@
         <n-dialog-provider>
           <ConfigProfilesController :controller="configProfiles" />
           <SidebarEditor v-model:show="sidebarEditorOpen" :request="sidebarEditorRequest" />
+          <RunningLogLayoutDialog />
           <HelpDialog
             v-model:section="helpSection"
             :version="softwareVersion"
@@ -305,7 +309,10 @@ import HalloweenBackdrop from '@/components/HalloweenBackdrop.vue'
 import ConfigProfilesController from '@/components/ConfigProfilesController.vue'
 import SidebarUpdateChecks from '@/components/SidebarUpdateChecks.vue'
 import SidebarEditor from '@/components/SidebarEditor.vue'
+import RunningLogLayoutDialog from '@/components/RunningLogLayoutDialog.vue'
 import { useSidebarPreferences } from '@/composables/sidebarPreferences'
+import { interfaceZoomShortcuts, useInterfaceZoom } from '@/composables/interfaceZoom'
+import { logViewMenuKey } from '@/stores/logWorkspace'
 import { useResolvedTheme } from '@/composables/theme'
 import { themeSelectionKey, useThemeSelection } from '@/composables/themeSelection'
 import { provideHalloweenSeason } from '@/composables/halloween'
@@ -323,6 +330,7 @@ import {
   formatWindowTitle,
   formatEmulatorLabel
 } from '@/window-shell/adapter.js'
+import { windowMinimizedKey } from '@/window-shell/context.js'
 import { createSaveCoordinator } from '@/utils/configPersistence'
 import { configProfilesKey, createConfigProfiles } from '@/composables/configProfiles'
 import { readProcessActionStatus, submitProcessAction } from '@/utils/processAction'
@@ -362,6 +370,10 @@ const {
   capabilities: windowShellCapabilities,
   state: windowShellState
 } = windowShell
+provide(
+  windowMinimizedKey,
+  computed(() => windowShellState.value.minimized)
+)
 
 let disposeModalDrag = null
 
@@ -410,12 +422,23 @@ const fallbackAppMenu = computed(
 const appMenuVisible = computed(
   () => isMobileNav.value || sidebarHidden.value || !sidebarCollapsed.value
 )
+const logViewController = shallowRef(null)
+provide(logViewMenuKey, logViewController)
+const logViewOptions = computed(() =>
+  route.name === 'log' ? (logViewController.value?.options.value ?? []) : []
+)
 function handleViewAction(action) {
   if (action === 'toggle-sidebar') {
     if (isMobileNav.value) mobileMenuOpen.value = !mobileMenuOpen.value
     else sidebarHidden.value = !sidebarHidden.value
   } else if (action === 'edit-sidebar') {
     openSidebarEditor()
+  } else if (action === 'custom-log-layout') {
+    guiStore.openRunningLogLayoutDialog()
+  } else if (action?.startsWith('log-view-')) {
+    if (route.name === 'log') logViewController.value?.toggle(action)
+  } else {
+    changeZoom(action)
   }
 }
 const route = useRoute()
@@ -505,6 +528,21 @@ const {
   webview,
   adb
 } = storeToRefs(config_store)
+const loaded = inject('loaded')
+const { changeZoom, canZoomIn, canZoomOut, canResetZoom } = useInterfaceZoom(
+  webview,
+  windowShell.connected,
+  windowShell.platform,
+  loaded
+)
+const zoomAvailability = computed(() => ({
+  'zoom-in': canZoomIn.value,
+  'zoom-out': canZoomOut.value,
+  'actual-size': canResetZoom.value
+}))
+const zoomShortcuts = computed(() =>
+  windowShell.connected.value ? interfaceZoomShortcuts(windowShell.platform.value) : null
+)
 const theme = useResolvedTheme(themePreference)
 const setTheme = useThemeSelection(themePreference, theme)
 provide(themeSelectionKey, setTheme)
@@ -625,7 +663,10 @@ const appMenuProps = computed(() => ({
   profileState: configProfiles.state.value,
   profileWriteDisabled: configProfiles.writeDisabled.value,
   profileReadDisabled: configProfiles.readDisabled.value,
-  sidebarVisible: sidebarVisible.value
+  sidebarVisible: sidebarVisible.value,
+  logViewOptions: logViewOptions.value,
+  zoomAvailability: zoomAvailability.value,
+  zoomShortcuts: zoomShortcuts.value
 }))
 const appMenuListeners = {
   'connection-action': openDeviceConnection,
@@ -816,8 +857,6 @@ function actions_on_resize() {
     sidebarCollapsed.value = width < 850
   }
 }
-
-const loaded = inject('loaded')
 
 const renderedChangelog = ref('')
 let changelogRendered = false

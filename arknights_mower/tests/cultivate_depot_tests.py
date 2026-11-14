@@ -109,6 +109,11 @@ def test_other_account_credential_is_never_reused(syncer, monkeypatch):
                 "building": {"manufactures": [{"level": 3}]},
             },
         }
+        # 森空岛签名请求改传 headers_factory（#1912 后），桩需先执行工厂再返回，
+        # 与真实 request_with_retry 的行为保持一致。
+        get.side_effect = lambda method, url, **kwargs: (
+            kwargs["headers_factory"]() or get.return_value
+        )
         assert syncer.start() is True
 
     # 身份必须被换成当前账号的，而不是沿用残留的 cred-130
@@ -151,6 +156,11 @@ def test_missing_or_expired_cache_relogins_instead_of_using_blank_token(
                 "building": {"manufactures": [{"level": 3}]},
             },
         }
+        # 森空岛签名请求改传 headers_factory（#1912 后），桩需先执行工厂再返回，
+        # 与真实 request_with_retry 的行为保持一致。
+        get.side_effect = lambda method, url, **kwargs: (
+            kwargs["headers_factory"]() or get.return_value
+        )
         assert syncer.start() is True
 
     assert module.header["cred"] == "cred-fresh"

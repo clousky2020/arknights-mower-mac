@@ -10,9 +10,9 @@ import {
   watch
 } from 'vue'
 import { NScrollbar } from 'naive-ui'
-import ArrowDown from '@vicons/ionicons5/es/ArrowDownOutline'
 import DetailChevron from '@vicons/ionicons5/es/ChevronDownOutline'
 import logSheen from '@/assets/log/progress-sheen.svg?inline'
+import JumpToLatestButton from '@/components/JumpToLatestButton.vue'
 import LogOperator from '@/components/LogOperator.vue'
 import LogInventory from '@/components/LogInventory.vue'
 import LogItemToken from '@/components/LogItemToken.vue'
@@ -44,6 +44,15 @@ const props = defineProps({
 const MAX_BATCH_ANIMATION = 8
 
 const output = ref(null)
+const hiddenViewportHeight = ref(0)
+watch(
+  () => props.showAlternateView,
+  (show) => {
+    if (!show) return
+    const scrollbar = output.value?.querySelector('.log-output__scroll')
+    hiddenViewportHeight.value = scrollbar?.offsetHeight ?? 0
+  }
+)
 const { filters: sheenFilters, refresh: refreshSheen } = useLogSheen(output)
 const nowMs = ref(Date.now())
 const expandedDetails = ref(new Set())
@@ -757,7 +766,11 @@ function lineClasses(row) {
 </script>
 
 <template>
-  <div ref="output" class="log-output" :class="{ 'log-output--compact': compact }">
+  <div
+    ref="output"
+    class="log-output"
+    :class="{ 'log-output--compact': compact, 'log-output--alternate': showAlternateView }"
+  >
     <slot name="header" />
     <div class="log-output__body">
       <svg class="log-sheen-filter" width="0" height="0" aria-hidden="true" focusable="false">
@@ -850,10 +863,7 @@ function lineClasses(row) {
       <div
         v-if="!compact || running || $slots.title || items.some((item) => item.groupBar)"
         class="log-sticky"
-        :class="{
-          'log-sticky--titled': compact || $slots.title,
-          'log-sticky--alternate': showAlternateView
-        }"
+        :class="{ 'log-sticky--titled': compact || $slots.title }"
         :aria-hidden="$slots.title ? undefined : true"
       >
         <slot v-if="$slots.title" name="title" />
@@ -867,6 +877,7 @@ function lineClasses(row) {
       <n-scrollbar
         class="log-output__scroll"
         :class="{ 'log-output__scroll--hidden': showAlternateView }"
+        :style="showAlternateView ? { height: `${hiddenViewportHeight}px` } : undefined"
         :inert="showAlternateView || undefined"
         :x-scrollable="false"
         :container-style="{ overflowX: 'hidden', overscrollBehaviorX: 'none' }"
@@ -1560,15 +1571,11 @@ function lineClasses(row) {
           <p class="log-sr" role="status" aria-live="polite">{{ liveAnnouncement }}</p>
         </div>
       </n-scrollbar>
-      <button
+      <jump-to-latest-button
         v-if="showJumpToLatest && !showAlternateView"
-        type="button"
         class="log-jump-latest"
         @click="returnToLatest"
-      >
-        <ArrowDown aria-hidden="true" />
-        回到最新
-      </button>
+      />
       <div v-if="showAlternateView" class="log-output__alternate">
         <slot name="alternate" />
       </div>
@@ -1612,7 +1619,6 @@ function lineClasses(row) {
   --log-gutter: var(--log-compact-time-column, 64px);
 }
 
-/* 吸顶提示独占一小段高度，正文从渐隐带下方开始。 */
 .log-output__body {
   position: relative;
   display: grid;
@@ -1621,34 +1627,12 @@ function lineClasses(row) {
   min-height: 0;
 }
 
+.log-output--alternate .log-output__body {
+  flex-basis: auto;
+}
+
 .log-jump-latest {
-  position: absolute;
   z-index: 2;
-  inset-inline-end: 16px;
-  bottom: 12px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 30px;
-  padding: 0 10px;
-  border: var(--log-hairline, 1px) solid var(--mower-divider);
-  border-radius: 7px;
-  background: var(--mower-surface);
-  color: var(--mower-text);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .log-jump-latest:hover {
-    background: color-mix(in srgb, var(--mower-surface), var(--mower-text) 6%);
-  }
-}
-
-.log-jump-latest:active {
-  background: color-mix(in srgb, var(--mower-surface), var(--mower-text) 10%);
-  transition-duration: var(--log-press-time, 60ms);
 }
 
 .log-jump-latest:focus-visible {
@@ -1656,30 +1640,8 @@ function lineClasses(row) {
   outline-offset: 2px;
 }
 
-.log-jump-latest svg {
-  width: 13px;
-  height: 13px;
-}
-
 .log-output--compact .log-jump-latest {
   min-height: 44px;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .log-jump-latest {
-    animation: log-jump-in var(--log-feedback-time, 120ms) ease-out;
-    transition: background-color var(--log-feedback-time, 120ms) var(--log-feedback-ease, ease-out);
-  }
-
-  .log-jump-latest:focus-visible {
-    animation: none;
-  }
-}
-
-@keyframes log-jump-in {
-  from {
-    opacity: 0;
-  }
 }
 
 .log-output__body > :deep(.log-output__scroll),
@@ -1690,6 +1652,9 @@ function lineClasses(row) {
 }
 
 .log-output__body > :deep(.log-output__scroll--hidden) {
+  position: absolute;
+  inset-inline: 0;
+  inset-block-start: 0;
   visibility: hidden;
 }
 
@@ -1723,19 +1688,6 @@ function lineClasses(row) {
   letter-spacing: 0.06em;
   pointer-events: none;
   user-select: none;
-}
-
-.log-sticky:not(.log-sticky--alternate)::before {
-  content: '';
-  position: absolute;
-  z-index: -1;
-  inset-inline: 0;
-  inset-block-end: 0;
-  height: 12px;
-  background: color-mix(in srgb, var(--mower-surface) 55%, transparent);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  mask-image: linear-gradient(transparent, #000 40%, transparent);
 }
 
 .log-sticky__label {
@@ -1807,10 +1759,11 @@ function lineClasses(row) {
 }
 
 .log-detail-toggle {
+  --log-detail-toggle-height: 16px;
   display: inline-grid;
   place-items: center;
   inline-size: var(--log-detail-toggle-width);
-  block-size: 16px;
+  block-size: var(--log-detail-toggle-height);
   margin-inline-start: var(--log-detail-toggle-gap);
   padding: 0;
   border: 0;
@@ -1818,7 +1771,8 @@ function lineClasses(row) {
   background: none;
   color: var(--log-muted-ink);
   cursor: pointer;
-  vertical-align: middle;
+  font-size: inherit;
+  vertical-align: calc(0.4em - var(--log-detail-toggle-height) / 2);
   user-select: none;
   touch-action: manipulation;
 }
