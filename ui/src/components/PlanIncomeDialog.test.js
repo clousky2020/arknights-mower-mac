@@ -174,7 +174,7 @@ it('restores defaults without changing shared settings or the retained result', 
     expectationMode: true,
     operatorMode: 'cache',
     inventorySource: 'cache',
-    weightMode: 'mower',
+    weightMode: 'sanity',
     cachedInventory: { gold: 10 },
     productionWeights: { exp: 1 },
     mowerAlgorithm: 2
@@ -301,15 +301,23 @@ it.each(['primary', 'active-backup', 'maintenance-backup'])(
     expect(input.settings).not.toHaveProperty('seed')
   }
 )
-it('saves the selected shared algorithm and preserves recycling efficiency', async () => {
+it.each([
+  [0, 0.2],
+  [3, 0.4]
+])('saves shared algorithm %s and uses its weights in the worker', async (algorithm, order) => {
+  await page.readCache()
   await page.readWeights()
   io.client.put.mockImplementation(async (_, value) => ({ data: value }))
-  await page.selectAlgorithm(0)
+  await page.selectAlgorithm(algorithm)
   expect(io.client.put.mock.calls[0][1]).toEqual({
-    base_algorithm: 0,
-    ratios: { experience: 1, gold: 0.8, order: 0.2, efficiency: 1.7 }
+    base_algorithm: algorithm,
+    ratios: { experience: 1, gold: 0.8, order, efficiency: 1.7 }
   })
-  expect(page.settings.mowerWeights.exp).toBe(1)
+  io.client.get.mockResolvedValueOnce({ data: io.client.put.mock.calls[0][1] })
+  await page.start()
+  const sent = workers[0].postMessage.mock.calls[0][0]
+  expect(sent.settings.mowerAlgorithm).toBe(algorithm)
+  expect(sent.settings.mowerWeights).toMatchObject({ exp: 1, gold: 0.8, orders: order })
 })
 it('retains the settings request failure as the cause of the displayed error', async () => {
   const failure = new Error('offline')
@@ -429,8 +437,20 @@ const success = () => ({
 it('restores the last result with its original plan image after reopening with a different schedule', async () => {
   await page.readCache()
   await page.start()
-  workers[0].onmessage({ data: { type: 'complete', result: success() } })
+  const result = {
+    ...success(),
+    dormRecovery: {
+      model: 'neutral-filler-recovery-v1',
+      daily: 240,
+      total: 6720,
+      rooms: [],
+      partial: false,
+      warnings: []
+    }
+  }
+  workers[0].onmessage({ data: { type: 'complete', result } })
   const saved = saveIncomeArchive.mock.calls.at(-1)[0]
+  expect(saved.result.dormRecovery).toEqual(result.dormRecovery)
   expect(saved.input.plan).toEqual(props.snapshot.plan)
   expect(saved.snapshot.image).toBe(props.snapshot.image)
   io.cleanup()
@@ -449,6 +469,7 @@ it('restores the last result with its original plan image after reopening with a
   page.settings.sampleDays = 7
   await page.restoreResult()
   await page.exportImage()
+  expect(page.state.result.dormRecovery).toEqual(result.dormRecovery)
   expect(page.settings.sampleDays).toBe(7)
   expect(page.activeTab.value).toBe('results')
   expect(renderIncomeImage.mock.calls.at(-1)).toEqual([
@@ -698,4 +719,83 @@ it('shows roster warnings without blocking or archiving them', async () => {
   expect(io.warning).toHaveBeenCalledWith('未持有干员', { duration: 0, closable: true })
   expect(workers).toHaveLength(1)
   expect(saveIncomeArchive).not.toHaveBeenCalled()
+})
+
+it('reads fresh sanity values before running and freezes them with the completed result', async () => {
+  await page.readCache()
+  page.settings.weightMode = 'sanity'
+  io.client.get.mockResolvedValueOnce({
+    data: {
+      ...valuation(),
+      prices: { 中级作战记录: 4, 赤金: 2, 合成玉: 0.9, 源石碎片: 2.5 },
+      lmd_sanity: 0.0036,
+      income_unit_values: { yellow_certificate: 0, green_certificate: 0, credit: 0 }
+    }
+  })
+  await page.start()
+  const input = workers[0].postMessage.mock.calls[0][0]
+  expect(input.settings.sanityValuation.unitValues).toMatchObject({
+    exp: 0.004,
+    gold: 2,
+    fragment: 2.5,
+    recruitment: 0,
+    clue: 0
+  })
+  workers[0].onmessage({ data: { type: 'complete', result: success() } })
+  page.applySavedValues({ ...valuation(), prices: { 赤金: 99, 源石碎片: 9 }, lmd_sanity: 1 })
+  expect(page.state.input.settings.sanityValuation.unitValues.gold).toBe(2)
+  expect(page.state.input.settings.sanityValuation.unitValues.fragment).toBe(2.5)
+  expect(
+    saveIncomeArchive.mock.calls.at(-1)[0].input.settings.sanityValuation.unitValues.gold
+  ).toBe(2)
+  expect(
+    saveIncomeArchive.mock.calls.at(-1)[0].input.settings.sanityValuation.unitValues.fragment
+  ).toBe(2.5)
+  reopenDialog()
+  expect(page.settings.weightMode).toBe('sanity')
+  expect(page.settings.sanityValuation).toBeNull()
+})
+it('prevents a run during price saving and after a failed sanity settings read', async () => {
+  await page.readCache()
+  page.settings.weightMode = 'sanity'
+  page.valuesBusy.value = true
+  await page.start()
+  expect(workers).toHaveLength(0)
+  page.valuesBusy.value = false
+  io.client.get.mockRejectedValueOnce(new Error('offline'))
+  await page.start()
+  expect(workers).toHaveLength(0)
+  expect(page.state.error).toContain('读取失败')
+})
+
+it('refreshes Skland potential estimates before freezing a run and rejects a failed cache read', async () => {
+  let potential = 5
+  const values = {
+    ...valuation(),
+    prices: { 合成玉: 0.9225 },
+    income_options: { potential_preset: 'skland' }
+  }
+  io.client.get.mockImplementation(async (url) => ({
+    data: url.includes('income-cache')
+      ? {
+          ...cache(),
+          recruitment: [3, 4, 5, 6].map((stars) => ({ stars, owned: true, potential }))
+        }
+      : values
+  }))
+  await page.readCache()
+  await page.readWeights()
+  expect(page.settings.sanityValuation.certificateModel.rewards[5].yellow).toBe(5)
+  potential = 6
+  await page.start()
+  const input = workers[0].postMessage.mock.calls[0][0]
+  expect(input.settings.sanityValuation.certificateModel.rewards[5].yellow).toBe(13)
+  workers[0].onmessage({ data: { type: 'complete', result: success() } })
+  io.client.get.mockImplementation(async (url) => {
+    if (url.includes('income-cache')) throw new Error('offline')
+    return { data: values }
+  })
+  await page.start()
+  expect(workers).toHaveLength(1)
+  expect(page.state.error).toContain('缓存读取失败')
 })

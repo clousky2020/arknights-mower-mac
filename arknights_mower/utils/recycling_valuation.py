@@ -16,6 +16,7 @@ BASE_ALGORITHMS = {
     0: {"experience": 1.0, "gold": 0.8, "order": 0.2},
     1: {"experience": 1.0, "gold": 0.8, "order": 733 / 2990},
     2: {"experience": 0.9568, "gold": 0.76544, "order": 0.23456},
+    3: {"experience": 1.0, "gold": 0.8, "order": 0.4},
 }
 DEFAULT_RATIOS = {**BASE_ALGORITHMS[2], "efficiency": 1.0}
 MAX_IMPORT_BYTES = 2 * 1024 * 1024
@@ -50,7 +51,7 @@ def default_valuation():
 
 
 def validate_base_algorithm(algorithm, ratios):
-    if type(algorithm) is not int or algorithm not in (-1, 0, 1, 2):
+    if type(algorithm) is not int or algorithm not in (-1, 0, 1, 2, 3):
         raise ValueError("请选择有效的基报收益算法")
     if algorithm != -1 and any(
         ratios[key] != value for key, value in BASE_ALGORITHMS[algorithm].items()
@@ -72,6 +73,58 @@ def validate_ratios(values):
         if key == "experience" and value < 0.000001:
             raise ValueError("经验书价值比例必须不小于 0.000001")
     return dict(values)
+
+
+def validate_income_value(value, *, optional=False, minimum=0):
+    if optional and value is None:
+        return value
+    if (
+        type(value) not in (int, float)
+        or not math.isfinite(value)
+        or not minimum <= value <= 1000000
+    ):
+        raise ValueError("理智价值必须是有效范围内的有限数值")
+    return value
+
+
+def validate_income_value_updates(prices, unit_values, known_prices, options=None):
+    allowed_options = {
+        "potential_preset": {"default", "skland", "full"},
+        "yellow_preset": {"vouchers", "royal_token"},
+    }
+    if options is not None:
+        if (
+            not isinstance(options, dict)
+            or not options.keys() <= allowed_options.keys()
+        ):
+            raise ValueError("请选择有效的理智估值预设")
+        for key, option in options.items():
+            if option is not None and (
+                not isinstance(option, str) or option not in allowed_options[key]
+            ):
+                raise ValueError("请选择有效的理智估值预设")
+    for values, allowed, optional in (
+        (prices, known_prices, False),
+        (
+            unit_values,
+            {
+                "fragment",
+                "recycle",
+                "recruitment_certificates",
+                "yellow_certificate",
+                "green_certificate",
+                "credit",
+                "credit_daily_limit",
+            },
+            True,
+        ),
+    ):
+        if values is None:
+            continue
+        if not isinstance(values, dict) or not values.keys() <= allowed:
+            raise ValueError("请选择已有材料或支持的产出项目")
+        for value in values.values():
+            validate_income_value(value, optional=optional)
 
 
 def import_yituliu_values(content):
@@ -161,7 +214,7 @@ def import_yituliu_values(content):
                 if (
                     (canonical or name) in key_mapping
                     and key_mapping[canonical or name][3] != "MATERIAL"
-                    and item_id != "4001"
+                    and item_id not in {"4001", "3141"}
                 ):
                     continue
                 if item_id in by_id and by_id[item_id] != name:

@@ -6,7 +6,9 @@ import { incomeFailureMessage } from './incomeDiagnostics'
 import { incomeOrderDistribution } from './incomeOrders'
 import { createRecruitmentObservation } from './incomeRecruitment'
 import { createClueObservation } from './incomeClues'
+import { createDormRecoveryObservation } from './incomeDormRecovery'
 import { incomeStability } from './incomeStability'
+import { calculateIncomeSanity } from './incomeSanity'
 import { buildTimelineData } from './vendor/workbench/timeline/timelineModel'
 import { MOWER_FIAMMETTA_INITIAL_MORALE } from './vendor/scheduler/mowerInitialMorale'
 import {
@@ -19,6 +21,7 @@ import {
 export function calculateIncome(plan, settings, onProgress) {
   const { workspace, options } = incomeRequest(plan, settings)
   const recruitment = createRecruitmentObservation(settings.warmupDays * 24)
+  const dormRecovery = createDormRecoveryObservation(settings.warmupDays * 24)
   const clues = createClueObservation(
     settings.warmupDays * 24,
     options.simulationOptions.operatorInventory
@@ -26,6 +29,7 @@ export function calculateIncome(plan, settings, onProgress) {
   options.simulationOptions.observeInterval = (config, start, end, workHours) => {
     recruitment.observe(config, start, end)
     clues.observe(config, start, end, workHours)
+    dormRecovery.observe(config, start, end)
   }
   const result = runCalculationBridge(workspace, options, (p) =>
     onProgress?.({
@@ -65,6 +69,16 @@ export function calculateIncome(plan, settings, onProgress) {
     expected || production.assumptions.outputMode === 'potential'
       ? result.report.summary.orderLmd - manufacturingCosts.lmdConsumed
       : ((production.sample.net.lmd ?? 0) - (production.sample.external?.lmd ?? 0)) / days
+  const summary = {
+    ...result.report.summary,
+    netLmd,
+    recruitmentCount: recruitment.result(!!expected).completed / days,
+    clueCount: clues.result(!!expected).completed / days,
+    ...manufacturingCosts,
+    recycleCount: (expected?.recycleCount ?? production.recycle?.sampleCompletedItems ?? 0) / days
+  }
+  if (settings.weightMode === 'sanity')
+    summary.sanity = calculateIncomeSanity(summary, settings.sanityValuation, simulation)
   return {
     success: true,
     stability: incomeStability(simulation),
@@ -95,16 +109,8 @@ export function calculateIncome(plan, settings, onProgress) {
       )
     ],
     clueExchangeMode: 'always-on',
-    summary: {
-      ...result.report.summary,
-      netLmd,
-      recruitmentCount: recruitment.result(!!expected).completed / days,
-      clueCount: clues.result(!!expected).completed / days,
-      ...manufacturingCosts,
-      recycleCount:
-        (expected?.recycleCount ?? simulation.production?.recycle?.sampleCompletedItems ?? 0) /
-        (simulation.observedHours / 24)
-    },
+    dormRecovery: dormRecovery.result(simulation.observedHours),
+    summary,
     diagnostics,
     observedHours: simulation.observedHours,
     rooms: simulation.rooms.map((r) => ({
