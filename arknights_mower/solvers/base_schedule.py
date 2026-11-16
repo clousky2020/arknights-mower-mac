@@ -393,7 +393,7 @@ def _stop_if_scheduled_trainee(
         return
     from arknights_mower.utils.mastery_support_data import trainee_schedule_conflict
 
-    reason = trainee_schedule_conflict(trainee)
+    reason = trainee_schedule_conflict(trainee, allow_replacements=False)
     if reason is None:
         return
     message = (
@@ -1348,6 +1348,17 @@ class BaseSchedulerSolver(
                     ]
                     logger.debug("普通下班目标已实际入住，完成原请求：%s", task)
                     continue
+            if failure and (trainee := getattr(task, "mastery_trainee_wait", None)):
+                from arknights_mower.utils.mastery_schedule import (
+                    trainee_runtime_conflict,
+                )
+
+                if trainee_runtime_conflict(self, trainee):
+                    continue
+                del task.execution_failure
+                del task.mastery_trainee_wait
+                task.execution_retained = True
+                continue
             if failure and (waiting := getattr(task, "mastery_mood_wait", None)):
                 from arknights_mower.utils.mastery_mood import (
                     support_mood_context,
@@ -1373,7 +1384,8 @@ class BaseSchedulerSolver(
                     for required in waiting.get("alternatives", ())
                 )
                 if (
-                    not changed
+                    not config.conf.assistant_follows_schedule
+                    and not changed
                     and shortages
                     and not observation_pending
                     and not replacement_ready
@@ -5225,6 +5237,13 @@ class BaseSchedulerSolver(
         scan_complete = False
         incomplete_reason = "未观测到满心情卡牌"
         unreadable_names = set()
+        station_filter = None
+        idle_only = not workshop and not mastery
+        scan_names = set(agent_list)
+        if idle_only:
+            scan_names.difference_update(
+                name for name, op in self.op_data.operators.items() if op.current_room
+            )
         finish_mood_calculation()
         try:
             self.enter_room(room, max_attempts=1)
@@ -5242,6 +5261,8 @@ class BaseSchedulerSolver(
             # 返回基建时取消此页，实际驻员不变。
             self.tap((self.recog.w * 0.38, self.recog.h * 0.95), interval=0.5)
             self.swipe_left(1, "ALL")
+            station_filter = self.agent_station_filter()
+            self.agent_station_filter("未进驻" if idle_only else "全部")
             self.switch_arrange_order("心情", room, True)
             previous = None
             observation = None
@@ -5290,11 +5311,11 @@ class BaseSchedulerSolver(
                         # 绿色之前已观测但不可读的卡牌不被默认值覆盖。
                         estimates.update(
                             (candidate, (24, observed_at, False))
-                            for candidate in agent_list
+                            for candidate in scan_names
                             if candidate not in observed_names
                         )
                         if getattr(self.op_data, "mood_calculation_enabled", False):
-                            for candidate in agent_list:
+                            for candidate in scan_names:
                                 if (
                                     candidate not in observed_names
                                     and candidate not in protected
@@ -5305,7 +5326,7 @@ class BaseSchedulerSolver(
                         full_card = True
                         scan_complete = True
                         logger.info(
-                            "心情升序遇到绿色笑脸，停止翻页，其余干员按 24 预估"
+                            "心情升序遇到绿色笑脸，停止翻页，其余筛选范围内干员按 24 预估"
                         )
                         break
                 if full_card or page_index == 19 or monotonic() >= deadline:
@@ -5338,7 +5359,11 @@ class BaseSchedulerSolver(
                     incomplete_reason,
                 )
             self._recovery_plan_dirty = True
-            self.back_to_infrastructure()
+            try:
+                if station_filter is not None:
+                    self.agent_station_filter(station_filter)
+            finally:
+                self.back_to_infrastructure()
 
     def _observed_group_return_plan(self):
         """完整在岗观测生成回班意图，实际组状态仍由任务确认提交。"""
@@ -13540,11 +13565,26 @@ class BaseSchedulerSolver(
         self, target_product: str, confirm_after: datetime | None = None
     ):
         product = MANUFACTURE_PRODUCTS[target_product]
+        self._select_manufacture_recipe(product, confirm_after=confirm_after)
+
+    def _select_manufacture_recipe(self, product, *, confirm_after=None, count=None):
+        """复用制造配方与双确认流程；双芯片只下达已核算的份数。"""
         self._tap_product_point((1680, 500))
         self._wait_product_resource("manufacture_product_select")
         self._tap_product_point(product.category)
         self._tap_product_point(product.recipe)
         self._wait_product_resource("manufacture_product_change_confirm")
+        if count is not None:
+            if not 1 <= count <= 99:
+                raise ValueError("双芯片制造份数无效")
+            for _ in range(count - 1):
+                self._tap_product_point((1300, 305), interval=0.2)
+            self.recog.update()
+            selected = self._read_manufacture_queue_count()
+            if selected != count:
+                raise RecognizeError(
+                    f"双芯片制造份数未确认：期望{count}，读到{selected or '未知'}"
+                )
         self._tap_product_point((1425, 895))
         self._wait_product_resource("manufacture_product_change_confirm", present=False)
 
@@ -13554,15 +13594,25 @@ class BaseSchedulerSolver(
             remaining = (confirm_after - datetime.now()).total_seconds()
             if remaining > 0:
                 logger.info("在制造计划取消确认页等待%.1f秒后确认", remaining)
-                self.sleep(remaining)
+                if count is None:
+                    self.sleep(remaining)
+                else:
+                    while remaining > 0:
+                        if self.find_next_task(datetime.now()) is not None:
+                            raise ProductSwitchDeferred(
+                                "双芯片切产物让出到期任务", ready_at=confirm_after
+                            )
+                        self.sleep(min(remaining, 1))
+                        remaining = (confirm_after - datetime.now()).total_seconds()
                 self.recog.update()
                 self._wait_product_resource("manufacture_product_cancel_confirm")
         self._tap_product_point((1440, 742))
         self._wait_product_resource("manufacture_product_cancel_confirm", present=False)
 
-        self._fill_manufacture_queue(
-            material_limited=target_product in {"orirock", "orirock_device"}
-        )
+        if count is None:
+            self._fill_manufacture_queue(
+                material_limited=product.name.startswith("源石碎片")
+            )
 
     def _fill_manufacture_queue(self, *, material_limited=False):
         # 新配方默认只排一份；MAX 和数量确认都需要画面读数验证。
@@ -13665,18 +13715,22 @@ class BaseSchedulerSolver(
             wait = max(0, remaining - count * DRONE_SECONDS)
         return count, wait
 
-    def _survey_manufacture_switch(self, room: str, target_product: str) -> dict:
+    def _survey_manufacture_switch(
+        self, room: str, target_product: str, *, growth_chip=False
+    ) -> dict:
         """只读取一个制造站，为批量计划收集快照，不消耗无人机。"""
         self._open_manufacture_product_detail(room)
         current_product = self.read_manufacture_product()
         self._cache_facility_state(room, "manufacture", current_product)
-        self._start_product_switch_log(room, target_product, current_product)
+        if not growth_chip:
+            self._start_product_switch_log(room, target_product, current_product)
         observation = {
             "room": room,
             "facility": "manufacture",
             "target_product": target_product,
             "current_product": current_product,
             "needs_switch": current_product != target_product,
+            **({"growth_chip": True} if growth_chip else {}),
         }
         if not observation["needs_switch"]:
             return observation
@@ -13728,11 +13782,14 @@ class BaseSchedulerSolver(
             if getattr(setting, "grandet_mode", True)
             else DRONE_SECONDS
         )
+        if growth_chip:
+            max_loss_seconds = 30
         drone_count, wait_seconds = self._product_switch_drone_plan(
             total_seconds, unit_seconds, max_loss_seconds
         )
         natural_only = (
-            (getattr(setting, "grandet_mode", True))
+            not growth_chip
+            and (getattr(setting, "grandet_mode", True))
             and not getattr(setting, "use_drones_when_leaving_orirock", True)
             and current_product in {"orirock", "orirock_device"}
             and target_product not in {"orirock", "orirock_device"}
@@ -13932,6 +13989,8 @@ class BaseSchedulerSolver(
             if getattr(setting, "grandet_mode", True)
             else DRONE_SECONDS
         )
+        if observation.get("growth_chip"):
+            max_loss_seconds = 30
         unit_seconds = MANUFACTURE_PRODUCTS[current_product].unit_seconds
         drone_count, wait_seconds = self._product_switch_drone_plan(
             remaining, unit_seconds, max_loss_seconds
@@ -20277,6 +20336,12 @@ class BaseSchedulerSolver(
     def on_maa_callback(self, msg, details, arg, *, observation_run=None):
         """MAA 回调入口：累积掉落统计、代发上报请求、输出可读日志行。"""
         d = parse_details(details)
+        from arknights_mower.solvers.growth import record_growth_callback
+
+        record_growth_callback(self, msg, d, observation_run)
+        from arknights_mower.utils.maa_catalyst import record_callback
+
+        record_callback(self, msg, d, observation_run)
         observe_maa_callback(self, msg, d, generation=observation_run)
         logger.debug("MAA 回调 %s %s", msg, d, extra={"log_group": "maa-integration"})
         try:
@@ -20428,6 +20493,10 @@ class BaseSchedulerSolver(
                 or not all(isinstance(task, dict) for task in tasks.values())
             ):
                 raise ValueError("MAA 活动导航必须是非空任务定义对象")
+            if getattr(config.conf, "maa_growth_enable", False):
+                from arknights_mower.utils.growth_execution import merge_growth_tasks
+
+                tasks = merge_growth_tasks(tasks)
             write_json(ota_tasks_path, tasks)
             logger.info(
                 "MAA 活动关卡导航下载完成，等待资源加载确认",
@@ -20442,6 +20511,17 @@ class BaseSchedulerSolver(
             save_exception(e)
 
         cached = read_json(ota_tasks_path, None)
+        if (
+            isinstance(cached, dict)
+            and cached
+            and getattr(config.conf, "maa_growth_enable", False)
+        ):
+            from arknights_mower.utils.growth_execution import merge_growth_tasks
+
+            guarded = merge_growth_tasks(cached)
+            if guarded != cached:
+                write_json(ota_tasks_path, guarded)
+            return guarded
         return cached if isinstance(cached, dict) and cached else None
 
     def initialize_maa(self):
@@ -20479,6 +20559,20 @@ class BaseSchedulerSolver(
             navigation = self.update_maa_navigation(
                 pathlib.Path(resolve_config_path(config.conf.maa_path))
             )
+            if getattr(config.conf, "maa_growth_enable", False):
+                from arknights_mower.utils.growth_execution import merge_growth_tasks
+
+                navigation = merge_growth_tasks(navigation or {})
+                from arknights_mower.utils.maa_runtime import navigation_cache_path
+                from arknights_mower.utils.update_runtime import write_json
+
+                write_json(
+                    navigation_cache_path(
+                        pathlib.Path(resolve_config_path(config.conf.maa_path)),
+                        android=True,
+                    ),
+                    navigation,
+                )
             if navigation is not None:
                 from arknights_mower.utils.maa_resource_update import (
                     load_android_maa_navigation,
@@ -22849,20 +22943,30 @@ class BaseSchedulerSolver(
         ) and not getattr(room, "collected", False):
             return
         current = getattr(self, "task", None)
-        mood_waiting = {
+        waiting_starts = {
             str(task.mastery_mood_wait["plan_id"])
             for task in getattr(self, "tasks", [])
             if task.type == TaskTypes.SKILL_UPGRADE
             and getattr(task, "execution_failure", None)
             and getattr(task, "mastery_mood_wait", None)
         }
+        waiting_starts.update(
+            str(task.plan_key)
+            for task in getattr(self, "tasks", [])
+            if task.type == TaskTypes.SKILL_UPGRADE
+            and getattr(task, "execution_failure", None)
+            and getattr(task, "mastery_trainee_wait", None)
+        )
         if any(
             task is not current
             and task.type in (TaskTypes.SKILL_UPGRADE, TaskTypes.SWAP_SUPPORT)
             and not (
                 task.type == TaskTypes.SKILL_UPGRADE
                 and getattr(task, "execution_failure", None)
-                and getattr(task, "mastery_mood_wait", None)
+                and (
+                    getattr(task, "mastery_mood_wait", None)
+                    or getattr(task, "mastery_trainee_wait", None)
+                )
             )
             for task in getattr(self, "tasks", [])
         ):
@@ -22877,7 +22981,7 @@ class BaseSchedulerSolver(
             plans = [waiting]
         protection_notified = False
         for plan in plans:
-            if plan["status"] != "idle" or str(plan["id"]) in mood_waiting:
+            if plan["status"] != "idle" or str(plan["id"]) in waiting_starts:
                 continue
             key = (plan["char_id"], plan["skill_index"])
             entry = confirmed.get(key)
@@ -22947,6 +23051,9 @@ class BaseSchedulerSolver(
         try:
             end_time = datetime.now() + timedelta(seconds=remaining_time)
             while datetime.now() < end_time:
+                if config.software_update_shutdown_requested():
+                    config.stop_mower.set()
+                    raise MowerExit
                 if cancelled is not None and cancelled():
                     break
                 if round_end:
@@ -22960,6 +23067,8 @@ class BaseSchedulerSolver(
                     rapidocr.release_idle_local_model()
                     release_idle_memory = False
                 csleep(min(1, (end_time - datetime.now()).total_seconds()))
+            if config.software_update_shutdown_requested():
+                config.stop_mower.set()
             if config.stop_mower.is_set():
                 raise MowerExit
             if round_end:
@@ -23049,6 +23158,9 @@ class BaseSchedulerSolver(
         )
 
         discard_completed_mastery_tasks(self)
+        from arknights_mower.solvers.growth import run_growth
+
+        run_growth(self)
         self._refresh_workshop_inventory()
         self._refresh_observed_recovery_tasks()
         if any(getattr(task, "execution_failure", None) for task in self.tasks):

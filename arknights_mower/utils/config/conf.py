@@ -870,6 +870,8 @@ class RIICPart(ConfModel):
     "协助位跟随排班（专精时协助位不固定，由排班系统管理）"
     enable_mastery: bool = True
     "全自动专精全局开关：OFF 时禁用全部训练室动作/通知/守卫，仅保留仓库材料扫描"
+    maa_growth_enable: bool = False
+    "MAA 干员培养：成品材料齐全时执行精英化及基础技能升级"
     mastery_consecutive_skills: bool = False
     "同干员技能接续训练"
     save_mastery_screenshots: bool = False
@@ -1012,6 +1014,20 @@ class AIAgentPart(ConfModel):
     "自定义模型名称"
     ai_deepseek_model: str = "deepseek-flash"
     "DeepSeek 模型 ID"
+    ai_context_tokens: int = Field(default=256000, ge=8192, le=4000000, strict=True)
+    "自定义模型上下文长度，单位 token"
+    ai_deepseek_context_tokens: int = Field(
+        default=1000000, ge=8192, le=4000000, strict=True
+    )
+    "DeepSeek 上下文长度，单位 token"
+
+    @property
+    def resolved_ai_context_tokens(self) -> int:
+        return (
+            self.ai_deepseek_context_tokens
+            if self.ai_type == "deepseek"
+            else self.ai_context_tokens
+        )
 
     @model_validator(mode="before")
     @classmethod
@@ -1417,6 +1433,7 @@ class Conf(
     def has_maa_tasks(self) -> bool:
         return (
             self.has_maa_daily_tasks
+            or self.maa_growth_enable
             or self.RG
             or self.SSS
             or self.RCL

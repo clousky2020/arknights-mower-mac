@@ -149,7 +149,8 @@ function formatCount(value) {
         <div v-else class="gp-empty gp-overview__empty">
           <p class="gp-empty__title">队列还是空的</p>
           <p class="gp-muted">
-            选择干员并设置养成目标；开启全自动专精/合成后，会在扫描仓库任务结束后自动训练技能，精英化与模组升级仍需手动完成。
+            选择干员并设置养成目标；全自动专精/合成负责训练和备料，MAA
+            干员培养负责材料齐全后的精英化与基础技能升级。晋升后继续提升等级及模组仍需手动完成。
           </p>
           <div class="gp-empty__actions">
             <n-button size="small" type="primary" @click="emit('add-target')"
@@ -326,7 +327,13 @@ function formatCount(value) {
           </div>
         </header>
 
-        <div v-if="recommended.length" class="gp-overview__cards">
+        <div
+          v-if="recommended.length"
+          class="gp-overview__cards"
+          role="region"
+          aria-labelledby="growth-pick-title"
+          tabindex="0"
+        >
           <GrowthOperatorCard
             v-for="(card, index) in recommended"
             :key="card.operator.char_id"
@@ -744,8 +751,17 @@ function formatCount(value) {
 
 .gp-overview__cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(min(100%, 220px), 1fr);
   gap: 10px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  padding: 4px;
+  margin: -4px;
+}
+
+.gp-overview__cards > * {
+  scroll-snap-align: start;
 }
 
 .gp-overview__pick-empty {
@@ -763,9 +779,6 @@ function formatCount(value) {
 }
 
 @media (max-width: 720px) {
-  .gp-overview__cards {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
   .gp-overview__readiness-value {
     font-size: 44px;
   }

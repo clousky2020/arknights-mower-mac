@@ -34,7 +34,8 @@ CONF_GROUPS = {
         "account custom_smtp_server mail_attach_error_screenshot mail_enable mail_subject notification_level pass_code recipient timezone_offset".split()
     ),
     "assistant": set(
-        "ai_api_protocol ai_base_url ai_custom_key ai_deepseek_model ai_key ai_model ai_type".split()
+        "ai_api_protocol ai_base_url ai_context_tokens ai_custom_key ai_deepseek_context_tokens "
+        "ai_deepseek_model ai_key ai_model ai_type".split()
     ),
     "appearance": {"theme", "webview"},
     "maintenance": set(
@@ -42,7 +43,7 @@ CONF_GROUPS = {
     ),
     "rescue_plan": {"automatic_rescue_enable"},
     "base": set(
-        "assistant_follows_schedule dorm_isolation enable_mastery favorite fia_fool fia_threshold free_blacklist free_room group_mood_gap_exclusions group_mood_gap_max_extra_wait_hours group_mood_gap_threshold_minutes group_rest_in_full_on_mood_gap group_resting_thresholds mastery_consecutive_skills merge_interval product_switching rescue_threshold resting_threshold right_side_room_order save_mastery_screenshots swap_contact_train test_mood_calculation version_update_resting_threshold version_update_threshold_advance_hours".split()
+        "assistant_follows_schedule dorm_isolation enable_mastery maa_growth_enable favorite fia_fool fia_threshold free_blacklist free_room group_mood_gap_exclusions group_mood_gap_max_extra_wait_hours group_mood_gap_threshold_minutes group_rest_in_full_on_mood_gap group_resting_thresholds mastery_consecutive_skills merge_interval product_switching rescue_threshold resting_threshold right_side_room_order save_mastery_screenshots swap_contact_train test_mood_calculation version_update_resting_threshold version_update_threshold_advance_hours".split()
     ),
     "runorder": {
         "run_order_delay",
