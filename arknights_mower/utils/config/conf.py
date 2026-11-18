@@ -86,6 +86,8 @@ class CluePart(ConfModel):
     "线索搜集"
     leifeng_mode: int = 1
     "雷锋模式"
+    clue_message_board_enable: bool = True
+    "在线索流程和购物中进入会客室信息板领取信用"
     maa_mall_enable: bool = True
     "信用商店购物开关"
     maa_mall_mode: Literal["maa", "mower"] = "mower"
@@ -209,7 +211,22 @@ class RogueRecruitConf(ConfModel):
     use_support: bool = False
 
 
+class LongTaskWindow(ConfModel):
+    start: Annotated[str, Field(pattern=r"^(?:[01]?[0-9]|2[0-3]):[0-5][0-9]$")]
+    end: Annotated[str, Field(pattern=r"^(?:[01]?[0-9]|2[0-3]):[0-5][0-9]$")]
+
+
 class LongTaskPart(ConfModel):
+    maa_long_task_extra_windows: list[LongTaskWindow] = Field(default_factory=list)
+
+    class GarrisonConf(ConfModel):
+        mode: Literal["medals", "matches"] = "medals"
+        match_limit: int = Field(default=1, ge=0, strict=True)
+        target_wins: Literal[3, 6] = 3
+        run_id: str = Field(default="", max_length=128)
+
+    garrison: GarrisonConf = Field(default_factory=GarrisonConf)
+
     class ParadoxQueueItem(ConfModel):
         id: str = Field(pattern=r"^[a-f0-9]{64}$")
 
@@ -1389,6 +1406,10 @@ class Conf(
         return self.maa_rg_enable == 1 and self.maa_long_task_type == "sf"
 
     @property
+    def GARRISON(self):
+        return self.maa_rg_enable == 1 and self.maa_long_task_type == "garrison"
+
+    @property
     def RCL(self):
         return self.maa_rg_enable == 1 and self.maa_long_task_type == "rcl"
 
@@ -1411,7 +1432,8 @@ class Conf(
     @property
     def should_defer_clue_credit(self) -> bool:
         return bool(
-            self.clue_credit_on_demand
+            self.clue_message_board_enable
+            and self.clue_credit_on_demand
             and self.should_run_mower_mall
             and self.visit_friend_enable
             and self.visit_friend_mode == "mower"

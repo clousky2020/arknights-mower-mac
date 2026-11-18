@@ -73,3 +73,18 @@ describe('MAA task completion status', () => {
     expect(state.client.get).toHaveBeenCalledTimes(2)
   })
 })
+
+it('shows the last garrison error while waiting for the next eligible window', async () => {
+  props.kind = 'garrison'
+  state.client.get.mockResolvedValue({
+    data: {
+      garrison: { completed: false, failed: false, count: 2, total: 31, message: '棋子身份未确认' }
+    }
+  })
+  await nextTick()
+  await component.refresh()
+  expect(component.status_text.value).toBe('待执行')
+  expect(component.detail.value.count).toBe(2)
+  expect(component.detail.value.message).toBe('棋子身份未确认')
+  expect(component.failed.value).toBe(false)
+})

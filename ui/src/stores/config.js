@@ -30,6 +30,7 @@ export const useConfigStore = defineStore('config', () => {
   }
   const drone_interval = ref(4)
   const enable_party = ref(true)
+  const clue_message_board_enable = ref(true)
   const leifeng_mode = ref(true)
   const free_blacklist = ref([])
   const maa_adb_path = ref('')
@@ -139,6 +140,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_mall_ignore_blacklist_when_full = ref(false)
   const maa_mall_only_buy_discount = ref(false)
   const maa_mall_reserve_max_credit = ref(false)
+  const maa_long_task_extra_windows = ref([])
   const maa_rg_sleep_min = ref('00:00')
   const maa_rg_sleep_max = ref('00:00')
   const maa_credit_fight = ref(true)
@@ -149,6 +151,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_rcl_theme = ref('Tales')
   const rcl = ref({})
   const rogue = ref({})
+  const garrison = ref({ mode: 'medals', match_limit: 1, target_wins: 3, run_id: '' })
   const sss = ref({ type: 1, ec: 1, scripts: [], run_id: '' })
   const paradox = ref({ scripts: [], run_id: '' })
   const copilot = ref({
@@ -206,7 +209,6 @@ export const useConfigStore = defineStore('config', () => {
   const ra_timeout = ref(30)
   const sf_target = ref('结局A')
   const touch_method = ref('scrcpy')
-  const touch_fallback = ref(false)
   const free_room = ref(false)
   const dorm_isolation = ref([])
   const merge_interval = ref(10)
@@ -538,6 +540,7 @@ export const useConfigStore = defineStore('config', () => {
       drone_room.value = response.data.drone_room
       drone_interval.value = response.data.drone_interval
       enable_party.value = response.data.enable_party != 0
+      clue_message_board_enable.value = response.data.clue_message_board_enable ?? true
       leifeng_mode.value = response.data.leifeng_mode != 0
       free_blacklist.value =
         response.data.free_blacklist == '' ? [] : response.data.free_blacklist.split(',')
@@ -619,6 +622,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_mall_ignore_blacklist_when_full.value = false
       maa_mall_only_buy_discount.value = false
       maa_mall_reserve_max_credit.value = false
+      maa_long_task_extra_windows.value = response.data.maa_long_task_extra_windows ?? []
       maa_rg_sleep_max.value = response.data.maa_rg_sleep_max
       maa_rg_sleep_min.value = response.data.maa_rg_sleep_min
       maa_credit_fight.value = response.data.maa_credit_fight
@@ -629,6 +633,13 @@ export const useConfigStore = defineStore('config', () => {
       maa_rcl_theme.value = response.data.maa_rcl_theme
       rcl.value = response.data.rcl
       rogue.value = response.data.rogue
+      garrison.value = {
+        mode: 'medals',
+        match_limit: 1,
+        target_wins: 3,
+        run_id: '',
+        ...response.data.garrison
+      }
       sss.value = { scripts: [], run_id: '', ...response.data.sss }
       paradox.value = { scripts: [], run_id: '', ...(response.data.paradox ?? {}) }
       copilot.value = {
@@ -766,6 +777,7 @@ export const useConfigStore = defineStore('config', () => {
       right_side_room_order: [...right_side_room_order.value],
       drone_interval: drone_interval.value,
       enable_party: enable_party.value ? 1 : 0,
+      clue_message_board_enable: clue_message_board_enable.value,
       leifeng_mode: leifeng_mode.value ? 1 : 0,
       free_blacklist: free_blacklist.value.join(','),
       maa_adb_path: maa_adb_path.value,
@@ -846,6 +858,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_mall_ignore_blacklist_when_full: false,
       maa_mall_only_buy_discount: false,
       maa_mall_reserve_max_credit: false,
+      maa_long_task_extra_windows: maa_long_task_extra_windows.value,
       maa_rg_sleep_max: maa_rg_sleep_max.value,
       maa_rg_sleep_min: maa_rg_sleep_min.value,
       maa_credit_fight: maa_credit_fight.value,
@@ -856,6 +869,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_rcl_theme: maa_rcl_theme.value,
       rcl: rcl.value,
       rogue: rogue.value,
+      garrison: garrison.value,
       sss: sss.value,
       copilot: copilot.value,
       paradox: paradox.value,
@@ -902,7 +916,6 @@ export const useConfigStore = defineStore('config', () => {
         target: sf_target.value
       },
       touch_method: touch_method.value,
-      touch_fallback: touch_fallback.value,
       free_room: free_room.value,
       dorm_isolation: dorm_isolation.value,
       merge_interval: merge_interval.value,
@@ -1165,6 +1178,7 @@ export const useConfigStore = defineStore('config', () => {
     swap_right_side_facilities,
     drone_interval,
     enable_party,
+    clue_message_board_enable,
     leifeng_mode,
     free_blacklist,
     maa_adb_path,
@@ -1261,6 +1275,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_mall_ignore_blacklist_when_full,
     maa_mall_only_buy_discount,
     maa_mall_reserve_max_credit,
+    maa_long_task_extra_windows,
     maa_rg_sleep_min,
     maa_rg_sleep_max,
     maa_credit_fight,
@@ -1271,6 +1286,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_rcl_theme,
     rcl,
     rogue,
+    garrison,
     sss,
     copilot,
     paradox,
@@ -1317,7 +1333,6 @@ export const useConfigStore = defineStore('config', () => {
     ra_timeout,
     sf_target,
     touch_method,
-    touch_fallback,
     free_room,
     dorm_isolation,
     merge_interval,

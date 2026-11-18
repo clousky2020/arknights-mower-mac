@@ -8,6 +8,7 @@ from arknights_mower.utils import config
 from arknights_mower.utils.activity_observations import activity_observation
 from arknights_mower.utils.csleep import MowerExit
 from arknights_mower.utils.datetime import get_server_time
+from arknights_mower.utils.long_task_windows import long_task_window
 from arknights_mower.utils.scheduler_task import (
     TaskScope,
     TaskTypes,
@@ -70,23 +71,24 @@ def run_long_task_if_dorm_pending(scheduler):
     conf = config.conf
     if not any(
         getattr(conf, flag, False)
-        for flag in ("RG", "COPILOT", "PARADOX", "SSS", "RCL", "RA", "SF")
+        for flag in ("RG", "COPILOT", "PARADOX", "SSS", "RCL", "RA", "SF", "GARRISON")
     ):
         return False
     now = datetime.now()
-    try:
-        start = datetime.strptime(conf.maa_rg_sleep_min, "%H:%M").time()
-        end = datetime.strptime(conf.maa_rg_sleep_max, "%H:%M").time()
-        sleeping = (
-            now.time() > start or now.time() < end
-            if end < start
-            else start < now.time() < end
+    cutoff, opening = long_task_window(conf, now)
+    if cutoff <= now:
+        return False
+    garrison = conf.GARRISON
+    window = long_task_deadline(scheduler, cutoff) - now
+    if garrison:
+        from arknights_mower.solvers.garrison.runner import (
+            eligible_progress,
+            run_garrison,
         )
-    except ValueError:
-        sleeping = False
-    if sleeping or long_task_deadline(
-        scheduler, now + timedelta(hours=24)
-    ) - now < timedelta(minutes=9):
+
+        if eligible_progress(conf, window.total_seconds(), scheduler, opening) is None:
+            return False
+    elif window < timedelta(minutes=9):
         return False
     # 清退可以延期，但上一单结束后缺少的订单读取必须先完成。
     if not scheduler._queue_missing_run_order_reads():
@@ -98,10 +100,10 @@ def run_long_task_if_dorm_pending(scheduler):
         for task in scheduler.tasks
     ):
         return False
+    if garrison:
+        return run_garrison(scheduler)
     now = datetime.now()
-    if long_task_deadline(scheduler, now + timedelta(hours=24)) - now < timedelta(
-        minutes=9
-    ):
+    if long_task_deadline(scheduler, cutoff) - now < timedelta(minutes=9):
         return False
     scheduler.maa_plan_solver([])
     return True

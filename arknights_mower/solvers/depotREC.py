@@ -4,6 +4,8 @@ import os
 import pickle
 import re
 from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
 from time import monotonic
 
 import cv2
@@ -19,7 +21,7 @@ from ..utils.image import loadimg
 from ..utils.log import logger
 from ..utils.path import get_path
 from ..utils.recognize import Recognizer, Scene
-from ..utils.resource_pkg import resource_pkg_path
+from ..utils.resource_pkg import resource_pkg_path, resource_ui_path
 
 # 向下x变大 = 0
 # 向右y变大 = 0
@@ -42,6 +44,58 @@ def 导入_数字模板():
 def 提取特征点(模板):
     模板 = 模板[40:173, 40:173]
     return vision_np.hog(模板)
+
+
+_COLOR_ICON_MASK = np.ones((133, 133), dtype=np.uint8)
+# 屏蔽右下角数量区域，给模板的八像素位移留出余量。
+_COLOR_ICON_MASK[97:, 72:] = 0
+
+
+@lru_cache(maxsize=2)
+def _color_templates(directory, classes):
+    templates = []
+    for name in classes:
+        path = directory / f"{name}.webp"
+        if not path.is_file():
+            continue
+        try:
+            icon = loadimg(path)
+        except (OSError, cv2.error):
+            continue
+        if icon is not None:
+            icon = cv2.resize(icon, (213, 213))
+            templates.append((name, icon[40:173, 40:173]))
+    return templates
+
+
+def _refine_item_color(item, predicted, classes):
+    if classes is None:
+        return predicted
+    directory = resource_ui_path("depot")
+    if directory is None:
+        root = Path(__rootdir__).parent / "ui"
+        directory = (
+            root / ("public" if (root / "public/depot").is_dir() else "dist") / "depot"
+        )
+    templates = _color_templates(directory, tuple(classes))
+    if not any(name == predicted for name, _ in templates):
+        return predicted
+    region = item[32:181, 32:181]
+    scores = []
+    for name, template in templates:
+        result = cv2.matchTemplate(
+            region, template, cv2.TM_CCORR_NORMED, mask=_COLOR_ICON_MASK
+        )
+        score = cv2.minMaxLoc(result)[1]
+        if np.isfinite(score):
+            scores.append((score, name))
+    scores.sort(reverse=True)
+    if len(scores) < 2 or scores[0][0] < 0.98:
+        return predicted
+    # 同图标的周年与感谢庆典凭证保留原模型结果，不用名称排序打破并列。
+    if scores[0][0] - scores[1][0] < 0.025:
+        return predicted
+    return scores[0][1]
 
 
 def 识别空物品(物品灰):
@@ -174,6 +228,7 @@ class depotREC(SceneGraphSolver):
             knn模型["classes"],
         )
 
+        predicted_label = _refine_item_color(物品, predicted_label, knn模型["classes"])
         if depot.is_skland_only_item(predicted_label):
             return [predicted_label, None]
         数字区域 = 物品灰[160:210, 30:210]
@@ -381,10 +436,10 @@ class depotREC(SceneGraphSolver):
     def _category_frames(self):
         deadline = monotonic() + self.CATEGORY_SCAN_TIMEOUT
 
-        def move(start, movement):
+        def move(start, movement, *, retry):
             if monotonic() >= deadline:
                 raise _DepotScanIncomplete
-            self.swipe_noinertia(start, movement, duration=400, capture=True)
+            self.swipe_noinertia(start, movement, retry=retry, capture=True)
             if (
                 not self._wait_for_depot_ready()
                 or not self._category_selected(self._category_x)
@@ -394,25 +449,28 @@ class depotREC(SceneGraphSolver):
             return self.recog.img.copy()
 
         frame = self.recog.img
-        for _ in range(self.CATEGORY_SWIPE_LIMIT):
-            after = move((400, 900), (702, 0))
-            if self._same_depot_view(frame, after):
-                frame = after
-                break
-            frame = after
-        else:
-            raise _DepotScanIncomplete
-
         offset = 0
-        yield offset, frame
-        for _ in range(self.CATEGORY_SWIPE_LIMIT):
-            after = move((1600, 900), (-702, 0))
-            if self._same_depot_view(frame, after):
-                return
-            offset += self._depot_scroll_distance(frame, after)
-            frame = after
-            yield offset, frame
-        raise _DepotScanIncomplete
+        for start, direction in (((400, 900), 1), ((1600, 900), -1)):
+            retry = False
+            for _ in range(self.CATEGORY_SWIPE_LIMIT):
+                distance = (234 if retry else 702) * direction
+                after = move(start, (distance, 0), retry=retry)
+                if self._same_depot_view(frame, after):
+                    if retry:
+                        frame = after
+                        break
+                    # 未推进时只复核一列，避免前一次手势延迟生效后跳过新列。
+                    retry = True
+                    continue
+                retry = False
+                if direction < 0:
+                    offset += self._depot_scroll_distance(frame, after)
+                    yield offset, after
+                frame = after
+            else:
+                raise _DepotScanIncomplete
+            if direction > 0:
+                yield offset, frame
 
     def 分类扫描(self, knn模型: vision_np.Knn1Model):
         seen_columns = set()

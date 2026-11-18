@@ -196,7 +196,7 @@ class InstanceController(ManagerTools):
                 or any(c not in "0123456789abcdef" for c in pending["id"])
             ):
                 raise ValueError("实例启动记录格式不正确，请检查管理器运行目录")
-            if runtime.process_alive(pending["pid"]):
+            if runtime.registered_process_alive(pending):
                 records.append(pending)
             else:
                 file.unlink(missing_ok=True)
@@ -1219,12 +1219,14 @@ class InstanceController(ManagerTools):
                     id=launch_id,
                     pid=process.pid,
                     kind="instance",
+                    executable=command[0],
                     space=instance["path"],
                     data_dir=env.get("MOWER_DATA_DIR", ""),
                     managed=True,
                     ready=False,
                     port=settings["port"],
                 )
+                pending.update(runtime.process_identity(process.pid))
                 key = hashlib.sha256(
                     instance_key(instance["path"]).encode()
                 ).hexdigest()

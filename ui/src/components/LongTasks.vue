@@ -7,9 +7,11 @@ const config_store = useConfigStore()
 const {
   maa_rg_enable,
   maa_long_task_type,
+  maa_long_task_extra_windows,
   maa_rg_sleep_min,
   maa_rg_sleep_max,
   maa_rcl_theme,
+  garrison,
   rcl
 } = storeToRefs(config_store)
 const longTaskEnabled = computed({
@@ -17,6 +19,37 @@ const longTaskEnabled = computed({
   set: (value) => (maa_rg_enable.value = value)
 })
 
+const timeWindows = computed({
+  get: () => [
+    { start: maa_rg_sleep_max.value, end: maa_rg_sleep_min.value },
+    ...maa_long_task_extra_windows.value
+  ],
+  set: ([first, ...extra]) => {
+    maa_rg_sleep_max.value = first.start
+    maa_rg_sleep_min.value = first.end
+    maa_long_task_extra_windows.value = extra
+  }
+})
+
+function addTimeWindow(index) {
+  return { ...timeWindows.value[Math.max(0, index - 1)] }
+}
+
+function updateTimeWindow(index, field, value) {
+  if (value !== null) {
+    timeWindows.value = timeWindows.value.map((window, i) =>
+      i === index ? { ...window, [field]: value } : window
+    )
+  }
+}
+
+const garrisonGoal = computed({
+  get: () => (garrison.value.mode === 'matches' ? 'matches' : garrison.value.target_wins),
+  set: (value) => {
+    garrison.value.mode = value === 'matches' ? 'matches' : 'medals'
+    if (value !== 'matches') garrison.value.target_wins = value
+  }
+})
 const mobile = inject('mobile')
 
 const maa_long_task_options = [
@@ -26,7 +59,8 @@ const maa_long_task_options = [
   { label: '保全派驻 (MAA)', value: 'sss' },
   { label: '生息演算 (MAA)', value: 'rcl' },
   { label: '生息演算', value: 'ra' },
-  { label: '隐秘战线', value: 'sf' }
+  { label: '隐秘战线', value: 'sf' },
+  { label: '卫戍协议 · 个人极速模拟', value: 'garrison' }
 ]
 
 const tool_options = [
@@ -73,25 +107,36 @@ watch(
         />
       </n-form-item>
       <div class="long-task-time-container">
-        <div class="long-task-times">
-          <n-form-item label-placement="top">
-            <template #label>
-              开始时间
-              <help-text label="大型任务时段说明">
-                <div>开始与结束时间设置为相同值时全天开启。</div>
-                <div>若结束时间早于开始时间，则表示开启至次日。例如：</div>
-                <ul>
-                  <li>23:00开始、8:00结束：表示从23:00至次日8:00执行大型任务；</li>
-                  <li>10:00开始、14:00结束：表示从10:00至当日14:00执行大型任务。</li>
-                </ul>
-              </help-text>
-            </template>
-            <n-time-picker format="H:mm" v-model:formatted-value="maa_rg_sleep_max" />
-          </n-form-item>
-          <n-form-item label="停止时间" label-placement="top">
-            <n-time-picker format="H:mm" v-model:formatted-value="maa_rg_sleep_min" />
-          </n-form-item>
-        </div>
+        <n-dynamic-input v-model:value="timeWindows" :min="1" :on-create="addTimeWindow">
+          <template #default="{ value, index }">
+            <div class="long-task-times">
+              <n-form-item label-placement="top">
+                <template #label>
+                  开始时间
+                  <help-text v-if="index === 0" label="大型任务时段说明">
+                    <div>
+                      每天在任一执行时段内运行。开始与停止时间相同表示全天开启，停止时间早于开始时间表示跨午夜。
+                    </div>
+                  </help-text>
+                </template>
+                <n-time-picker
+                  format="H:mm"
+                  :formatted-value="value.start"
+                  :aria-label="`第${index + 1}段开始时间`"
+                  @update:formatted-value="updateTimeWindow(index, 'start', $event)"
+                />
+              </n-form-item>
+              <n-form-item label="停止时间" label-placement="top">
+                <n-time-picker
+                  format="H:mm"
+                  :formatted-value="value.end"
+                  :aria-label="`第${index + 1}段停止时间`"
+                  @update:formatted-value="updateTimeWindow(index, 'end', $event)"
+                />
+              </n-form-item>
+            </div>
+          </template>
+        </n-dynamic-input>
       </div>
     </n-form>
     <template v-if="maa_long_task_type == 'rcl'">
@@ -175,6 +220,56 @@ watch(
     <maa-sss v-else-if="maa_long_task_type == 'sss'" />
     <reclamation-algorithm v-else-if="maa_long_task_type == 'ra'" />
     <secret-front v-else-if="maa_long_task_type == 'sf'" />
+    <template v-else-if="maa_long_task_type == 'garrison'">
+      <n-form-item label="刷取目标">
+        <n-select
+          v-model:value="garrisonGoal"
+          :options="[
+            { label: '三胜 · 金章', value: 3 },
+            { label: '六胜 · 彩章', value: 6 },
+            { label: '刷等级', value: 'matches' }
+          ]"
+          aria-label="刷取目标"
+        />
+      </n-form-item>
+      <n-form-item v-if="garrison.mode === 'matches'" label="刷取局数（0 为不限）">
+        <n-input-number
+          :value="garrison.match_limit"
+          :min="0"
+          :precision="0"
+          aria-label="刷取局数"
+          @update:value="
+            (value) => {
+              if (value !== null) garrison.match_limit = value
+            }
+          "
+        />
+      </n-form-item>
+      <n-p>
+        开局前可在游戏的「选配助战」里借用自己缺少的干员。商店优先购买的前六名依次为塔露拉、史尔特尔、耀骑士临光、逻各斯、克莱门莎、锏。
+      </n-p>
+      <details>
+        <summary>查看其余助战推荐（按购买优先级）</summary>
+        <n-p>
+          帕拉斯、真言、蕾缪安、烛煌、艾丽妮、薇薇安娜、维娜·维多利亚、乌尔比安、棘刺、怒潮凛冬、圣聆初雪、迷迭香、鸿雪、贝洛内、佩佩、隐德来希、冻河、酒神。
+        </n-p>
+      </details>
+      <n-p
+        >个人极速模拟使用预设编队。首次运行从
+        <a
+          href="https://github.com/UnknownGlyph/GarrisonFarm"
+          target="_blank"
+          rel="noopener noreferrer"
+          >GarrisonFarm</a
+        >
+        下载对局脚本和布局。新局需要至少 12 分钟空档。已保存的对局有 9
+        分钟空档即可重连，基建任务到期时退出游戏。</n-p
+      >
+      <maa-task-status kind="garrison" :settings="garrison" />
+      <n-button @click="garrison.run_id = String(Date.now())">{{
+        garrison.mode === 'matches' ? '重新计数并继续' : '重新核对并继续'
+      }}</n-button>
+    </template>
   </n-card>
 </template>
 
@@ -188,6 +283,7 @@ watch(
 }
 
 .long-task-times {
+  width: 100%;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;

@@ -59,6 +59,8 @@ from arknights_mower.solvers.record import (
     load_maa_copilot_progress,
     load_maa_paradox_progress,
     load_maa_sss_progress,
+    maa_event_shop_completed,
+    mark_maa_event_shop_complete,
     save_agent_action,
     save_current_state,
     save_exception,
@@ -124,6 +126,7 @@ from arknights_mower.utils.email import maa_template, send_message, task_templat
 from arknights_mower.utils.graph import SceneGraphSolver
 from arknights_mower.utils.image import cropimg, loadres, thres2
 from arknights_mower.utils.log import log_parent_context, logger
+from arknights_mower.utils.long_task_windows import long_task_window
 from arknights_mower.utils.maa_callback import (
     REPORT_REQUEST,
     MaaCallbackLog,
@@ -12882,6 +12885,10 @@ class BaseSchedulerSolver(
                 if scene == Scene.INFRA_DETAILS:
                     logger.debug("INFRA_DETAILS", extra={"log_group": "clue"})
                     if ctm.task == "message_board":
+                        if not config.conf.clue_message_board_enable:
+                            self._prepare_clue_room()
+                            ctm.complete("message_board")
+                            continue
                         if self._clue_credit_enabled():
                             if get_server_weekday() == 6:
                                 logger.info(
@@ -14576,8 +14583,6 @@ class BaseSchedulerSolver(
             (item["available_drones"] for item in accelerated_manufacture),
             default=planned_drones,
         )
-        if available == 201:
-            raise RecognizeError("无人机数量识别异常")
         logger.info(
             f"制造站批量切产物计划共需至多{planned_drones}架无人机，"
             f"当前可用{available}架"
@@ -14626,8 +14631,6 @@ class BaseSchedulerSolver(
                 (item["available_drones"] for item in accelerated_manufacture),
                 default=planned_drones,
             )
-            if available == 201:
-                raise RecognizeError("无人机数量识别异常")
             insufficient_drones = planned_drones > available
             if insufficient_drones:
                 rooms = [item["room"] for item in accelerated_manufacture]
@@ -14862,8 +14865,7 @@ class BaseSchedulerSolver(
                 if not_customize:
                     drone_count = self.digit_reader.get_drone(self.recog.gray)
                     logger.info(f"当前无人机数量为：{drone_count}")
-                    # 200 为识别错误
-                    if drone_count < self.drone_count_limit or drone_count == 201:
+                    if drone_count < self.drone_count_limit:
                         logger.info(f"无人机数量小于{self.drone_count_limit}->停止")
                         break
                 accelerate = self.find("bill_accelerate")
@@ -20035,6 +20037,7 @@ class BaseSchedulerSolver(
         from arknights_mower.utils.device.io_budget import device_io_budget
         from arknights_mower.utils.maa_event_shop import (
             select_shop,
+            shop_identity,
             shop_params,
             switch_after_shop,
         )
@@ -20048,12 +20051,7 @@ class BaseSchedulerSolver(
                 return True
             return False
 
-        if defer_for_refresh():
-            return False
-        if (
-            config.stop_maa.is_set()
-            or (deadline() - datetime.now()).total_seconds() <= 300
-        ):
+        if config.stop_maa.is_set():
             return
         with backup_lock:
             settings = config.conf.maa_event_shop.model_copy(deep=True)
@@ -20061,23 +20059,31 @@ class BaseSchedulerSolver(
                 return
             manager = get_weekly_plan_manager()
             shop = select_shop(manager, manager._current_server_timestamp())
+            if shop is None:
+                logger.info(
+                    "没有符合当前理智周计划的当期 SS 活动，跳过商店兑换",
+                    extra={"log_group": "maa-integration"},
+                )
+                return
+            activity_key = shop_identity(shop)
+            if maa_event_shop_completed(*activity_key):
+                logger.debug(
+                    "活动「%s」的商店兑换已完成，跳过本次兑换", shop["activity"]
+                )
+                return
+            source = manager.get_active_plan_key()
             task = {
                 "settings": settings.model_dump(),
-                "activity": shop["activity"] if shop else None,
-                "source": manager.get_active_plan_key(),
-                "target": manager.get_activity_fallbacks().get(
-                    manager.get_active_plan_key(), ""
-                ),
+                "source": source,
+                "target": manager.get_activity_fallbacks().get(source, ""),
                 "revision": manager.get_active_plan_revision(),
                 "finite_done": False,
                 "completed": False,
                 "finished": False,
             }
-        if shop is None:
-            logger.info(
-                "没有符合当前理智周计划的当期 SS 活动，跳过商店兑换",
-                extra={"log_group": "maa-integration"},
-            )
+        if defer_for_refresh():
+            return False
+        if (deadline() - datetime.now()).total_seconds() <= 300:
             return
         self.release_maa()
         navigation_end = monotonic() + min(
@@ -20117,10 +20123,10 @@ class BaseSchedulerSolver(
             if (
                 manager.get_active_plan_revision() != task["revision"]
                 or current_shop is None
-                or current_shop["activity"] != task["activity"]
+                or shop_identity(current_shop) != activity_key
             ):
                 logger.info(
-                    "理智周计划已更改，跳过本次活动商店兑换",
+                    "理智周计划或当期活动已更改，跳过本次活动商店兑换",
                     extra={"log_group": "maa-integration"},
                 )
                 return
@@ -20151,7 +20157,15 @@ class BaseSchedulerSolver(
             if not config.stop_maa.is_set():
                 # Close the native handle before applying a configuration change.
                 self.release_maa()
+                if not (task["finite_done"] and task["completed"]):
+                    return
                 with backup_lock:
+                    mark_maa_event_shop_complete(*activity_key)
+                    logger.info(
+                        "活动「%s」的商店已遇到无限商品，已记录兑换完成",
+                        shop["activity"],
+                        extra={"log_group": "maa-integration"},
+                    )
                     if switch_after_shop(task, config.conf.maa_event_shop, manager):
                         logger.info(
                             "活动商店有限商品已兑换完毕，刷理智方案从 %s 切换为 %s",
@@ -20965,6 +20979,7 @@ class BaseSchedulerSolver(
         manual=False,
         long_task=None,
         mall_action=None,
+        outer_idle_loop=False,
     ):
         """清日常"""
         copilot_run = None
@@ -21191,21 +21206,17 @@ class BaseSchedulerSolver(
                     None,
                 )
             )
+            now = datetime.now()
+            cutoff, _ = long_task_window(conf, now)
+            if not manual:
+                long_limit = min(long_limit, cutoff)
+                if cutoff - now < timedelta(minutes=9):
+                    selected_long = None
             running_long_task = True
             if selected_long and (refresh := self._maa_refresh_deadline()) is not None:
                 return defer_refresh(refresh)
             if selected_long and deadline() - datetime.now() < timedelta(seconds=30):
                 selected_long = None
-            now_time = datetime.now().time()
-            try:
-                min_time = datetime.strptime(conf.maa_rg_sleep_min, "%H:%M").time()
-                max_time = datetime.strptime(conf.maa_rg_sleep_max, "%H:%M").time()
-                if max_time < min_time:
-                    rg_sleep = now_time > min_time or now_time < max_time
-                else:
-                    rg_sleep = min_time < now_time < max_time
-            except ValueError:
-                rg_sleep = False
             paradox = selected_long == "paradox"
             from arknights_mower.utils.maa_long_task import blackflow_preserved_run
 
@@ -21213,19 +21224,18 @@ class BaseSchedulerSolver(
                 selected_long == "rogue"
                 and conf.maa_rg_theme == "BlackFlow"
                 and blackflow_preserved_run(conf.rogue) is not None
-                and (manual or not rg_sleep)
             ):
                 blackflow_run = self._maa_blackflow_run(conf.rogue)
                 if blackflow_run.get("completed") is True:
                     selected_long = None
-            if selected_long in ("copilot", "paradox") and (manual or not rg_sleep):
+            if selected_long in ("copilot", "paradox"):
                 copilot_conf = conf.paradox if paradox else conf.copilot
                 copilot_run = (
                     self._maa_paradox_run(copilot_conf)
                     if paradox
                     else self._maa_copilot_run(copilot_conf)
                 )
-            if selected_long == "sss" and (manual or not rg_sleep):
+            if selected_long == "sss":
                 sss_run = self._maa_sss_run(conf.sss)
             if (
                 selected_long in ("rogue", "rcl")
@@ -21239,7 +21249,7 @@ class BaseSchedulerSolver(
                     and not copilot_run["failed"]
                     and copilot_run["next"] < len(copilot_conf.scripts)
                 )
-            ) and (manual or not rg_sleep):
+            ):
                 logger.info(
                     "准备开始 MAA 大型任务", extra={"log_group": "maa-integration"}
                 )
@@ -21666,7 +21676,7 @@ class BaseSchedulerSolver(
                 if refresh_deferred:
                     return False
 
-            elif manual or not rg_sleep:
+            elif not outer_idle_loop:
                 if selected_long == "ra":
                     self.back_to_index()
                     ra_solver = ReclamationAlgorithm(self.device, self.recog)
@@ -21758,14 +21768,15 @@ class BaseSchedulerSolver(
                 large_task_started = False
             running_long_task = False
             self.recog.last_scene = None
-            self.rest_until_next_task()
+            if not outer_idle_loop:
+                self.rest_until_next_task()
         else:
             # 空闲唤醒故障交回设备恢复，不能作为 MAA 任务故障报告。
             battle_inventory_active.clear()
             if large_task_started:
                 resume_dorm_releases(self)
                 large_task_started = False
-            if not manual:
+            if not manual and not outer_idle_loop:
                 self.rest_until_next_task()
         finally:
             if large_task_started:
@@ -23139,7 +23150,7 @@ class BaseSchedulerSolver(
             scheduling(self.tasks, op_data=self.op_data)
 
     def rest_until_next_task(self):
-        """完成本轮任务后休息到 `tasks[0].time`，是调度器唯一的「任务间空闲」收尾。
+        """完成本轮任务后，休息到下个可派发任务或大型任务时段开始。
 
         发休息通知、累计任务计数、并真正睡到下个任务。
         maa_plan_solver / mower_plan_solver / __main__ 主循环此前各自复制了
@@ -23173,7 +23184,13 @@ class BaseSchedulerSolver(
         if first is None:
             self._stop_after_round()
             return
-        remaining_time = (first.time - datetime.now()).total_seconds()
+        now = datetime.now()
+        wake_at = first.time
+        if config.conf.maa_rg_enable:
+            _, opening = long_task_window(config.conf, now)
+            if opening is not None:
+                wake_at = min(wake_at, opening)
+        remaining_time = (wake_at - now).total_seconds()
         if remaining_time <= 0:
             return
         for pending in self.tasks:
@@ -23195,18 +23212,26 @@ class BaseSchedulerSolver(
             base_scheduler=self,
         )
         self._stop_after_round(body)
-        presentation = build_task_presentation(first, getattr(self, "op_data", None))
+        window_opens_first = wake_at < first.time
+        presentation = (
+            {}
+            if window_opens_first
+            else build_task_presentation(first, getattr(self, "op_data", None))
+        )
         forecast_now = datetime.now()
-        display_remaining = max(0, (first.time - forecast_now).total_seconds())
-        next_time = first.time.strftime(
-            "%m-%d %H:%M:%S" if first.time.date() != forecast_now.date() else "%H:%M:%S"
+        display_remaining = max(0, (wake_at - forecast_now).total_seconds())
+        next_time = wake_at.strftime(
+            "%m-%d %H:%M:%S" if wake_at.date() != forecast_now.date() else "%H:%M:%S"
         )
         header = f"休息 {format_wait_duration(display_remaining)}，至 {next_time}"
         agents = []
-        if presentation["title"]:
+        if window_opens_first:
+            header += "，随后进入大型任务执行时段"
+        elif presentation["title"]:
             header += f"，随后执行「{presentation['title']}」"
         if (
-            first.type == TaskTypes.EXHAUST_OFF
+            not window_opens_first
+            and first.type == TaskTypes.EXHAUST_OFF
             and not presentation["rooms"]
             and isinstance(first.meta_data, str)
             and first.meta_data
@@ -23216,7 +23241,9 @@ class BaseSchedulerSolver(
                 f"[[operator:{name}]]" for name in agents
             )
         logger.info(
-            format_task_log_message(presentation, header),
+            header
+            if window_opens_first
+            else format_task_log_message(presentation, header),
             extra={
                 "log_agents": agents,
                 "log_task": {
@@ -23228,14 +23255,15 @@ class BaseSchedulerSolver(
         )
         send_message(
             body,
-            f"休息 {format_time(remaining_time)}，到{first.format(timezone_offset).time.strftime('%H:%M:%S')}开始工作",
+            f"休息 {format_time(remaining_time)}，到{(wake_at + timedelta(hours=timezone_offset)).strftime('%H:%M:%S')}开始工作",
             body_is_html=True,
         )
-        if remaining_time > 0:
-            self._idle_sleep(remaining_time, round_end=True)
-            if config.maintenance_recheck.is_set():
-                return
-            self.check_current_focus()
+        if window_opens_first:
+            remaining_time = max(0, (wake_at - datetime.now()).total_seconds())
+        self._idle_sleep(remaining_time, round_end=True)
+        if config.maintenance_recheck.is_set():
+            return
+        self.check_current_focus()
 
     def _get_idle_action(self, remaining_time=0):
         if (
