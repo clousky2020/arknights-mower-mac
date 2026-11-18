@@ -21183,6 +21183,7 @@ class BaseSchedulerSolver(
                             ("PARADOX", "paradox"),
                             ("SSS", "sss"),
                             ("RCL", "rcl"),
+                            ("SPA", "spa"),
                             ("RA", "ra"),
                             ("SF", "sf"),
                         )
@@ -21228,7 +21229,7 @@ class BaseSchedulerSolver(
             if selected_long == "sss" and (manual or not rg_sleep):
                 sss_run = self._maa_sss_run(conf.sss)
             if (
-                selected_long in ("rogue", "rcl")
+                selected_long in ("rogue", "rcl", "spa")
                 or (
                     sss_run is not None
                     and not sss_run["failed"]
@@ -21254,7 +21255,18 @@ class BaseSchedulerSolver(
                     self.release_maa()
                     if not paradox:
                         self.initialize_maa()
-                    if selected_long not in ("sss", "rcl"):
+                    if selected_long == "spa":
+                        from arknights_mower.solvers.navigation import (
+                            navigate_to_spa,
+                        )
+
+                        if not navigate_to_spa(self):
+                            logger.warning(
+                                "未确认卫戍协议小游戏页面，跳过本次 MAA 大型任务",
+                                extra={"log_group": "maa-integration"},
+                            )
+                            break
+                    elif selected_long not in ("sss", "rcl"):
                         from arknights_mower.utils.device.io_budget import (
                             device_io_budget,
                         )
@@ -21616,6 +21628,14 @@ class BaseSchedulerSolver(
                         if not large_task_start_allowed():
                             break
                         self.MAA.append_task("Reclamation", rcl_params)
+                    elif selected_long == "spa":
+                        spa_params = {
+                            "task_names": ["MiniGame@SPA@Begin"],
+                            "params": {},
+                        }
+                        if not large_task_start_allowed():
+                            break
+                        self.MAA.append_task("Custom", spa_params)
                     if not large_task_start_allowed():
                         self.maa_stop()
                         break

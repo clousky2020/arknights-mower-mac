@@ -1207,3 +1207,84 @@ class NavigationSolver(SceneGraphSolver, BaseMixin):
             f"[AUTO] done ok={len(summary['ok'])} failed={len(summary['failed'])}"
         )
         return summary
+
+
+# 卫戍协议小游戏入口：终端待办列表的入口位置随活动排版变化，写死坐标不可靠。
+# 以 OCR 特征词为主、截图模板匹配为兜底，在原生分辨率帧上动态定位。
+_SPA_PAGE_MARKERS = (
+    "协议数据库",
+    "PROTOCOLDATABASE",
+    "极速模拟",
+    "独立模拟",
+    "功勋兑换处",
+    "成就统计",
+)
+_SPA_ENTRY_WORDS = (("卫戍协议", "卫成协议"), ("规程",))
+_SPA_ENTRY_RES = "navigation/spa/entry"
+_SPA_PAGE_RES = "navigation/spa/protocol_database"
+_SPA_TEMPLATE_SCORE = 0.9
+_ENTRY_MIN_X = 1400
+
+
+def _spa_read_ocr(solver):
+    """当前帧的 OCR 结果，只保留置信度足够的条目；引擎未就绪返回空列表。"""
+    if not rapidocr.engine:
+        return []
+    solver.recog.update()
+    result, _ = rapidocr.engine(
+        solver.recog.img, use_det=True, use_cls=False, use_rec=True
+    )
+    return [item for item in result or [] if float(item[2]) >= 0.8]
+
+
+def spa_page_ready(solver) -> bool:
+    """当前帧是否为卫戍协议小游戏主界面。"""
+    texts = [str(item[1]) for item in _spa_read_ocr(solver)]
+    if sum(1 for m in _SPA_PAGE_MARKERS if any(m in t for t in texts)) >= 2:
+        return True
+    # OCR 引擎缺失或特征词识别失败时，用主界面的协议数据库招牌兜底。
+    return solver.find(_SPA_PAGE_RES, score=_SPA_TEMPLATE_SCORE) is not None
+
+
+def _spa_scope_center(scope) -> tuple[int, int]:
+    return (
+        int((scope[0][0] + scope[1][0]) / 2),
+        int((scope[0][1] + scope[1][1]) / 2),
+    )
+
+
+def find_spa_entry(solver):
+    """在终端待办列表里定位卫戍协议入口，返回中心坐标或 None。"""
+    for words in _SPA_ENTRY_WORDS:
+        centers = []
+        for item in _spa_read_ocr(solver):
+            box, text = item[0], str(item[1])
+            if not any(word in text for word in words):
+                continue
+            center = tuple(int(sum(p[i] for p in box) / len(box)) for i in (0, 1))
+            if center[0] > _ENTRY_MIN_X:
+                centers.append(center)
+        if centers:
+            return min(centers, key=lambda point: point[1])
+    # OCR 找不到时，用右侧入口卡片模板兜底。
+    scope = solver.find(_SPA_ENTRY_RES, score=_SPA_TEMPLATE_SCORE)
+    return _spa_scope_center(scope) if scope is not None else None
+
+
+def navigate_to_spa(solver, *, attempts=3) -> bool:
+    """从当前页面进入卫戍协议小游戏主界面，返回是否成功。"""
+    if spa_page_ready(solver):
+        return True
+    solver.recog.reset_after_external_control()
+    solver.scene_graph_navigation(Scene.TERMINAL_MAIN)
+    if solver.scene() != Scene.TERMINAL_MAIN:
+        return False
+    point = find_spa_entry(solver)
+    if point is None:
+        return False
+    solver.tap_and_detect_page_move(point, "卫戍协议", record_step=False)
+    for _ in range(attempts):
+        if spa_page_ready(solver):
+            return True
+        solver.sleep(0.5)
+    return False

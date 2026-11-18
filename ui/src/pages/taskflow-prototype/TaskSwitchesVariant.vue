@@ -113,7 +113,7 @@ function engine(task) {
   if (runner) return draft.values[task.id][runner.key] === 'maa' ? 'MAA' : 'Mower'
   if (task.id === 'long') {
     const mode = draft.values.long.maa_long_task_type
-    return ['rogue', 'sss', 'rcl'].includes(mode) ? 'MAA' : 'Mower'
+    return ['rogue', 'sss', 'rcl', 'spa'].includes(mode) ? 'MAA' : 'Mower'
   }
   return task.engine
 }
