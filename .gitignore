@@ -251,3 +251,5 @@ openspec/
 /ui/src/pages/basement_skill/skill.json
 
 .dsh-worktrees/
+.mnemon/
+.codeartsdoer/
