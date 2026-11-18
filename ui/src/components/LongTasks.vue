@@ -25,7 +25,6 @@ const maa_long_task_options = [
   { label: '悖论模拟 (MAA)', value: 'paradox' },
   { label: '保全派驻 (MAA)', value: 'sss' },
   { label: '生息演算 (MAA)', value: 'rcl' },
-  { label: '卫戍协议 (MAA)', value: 'spa' },
   { label: '生息演算', value: 'ra' },
   { label: '隐秘战线', value: 'sf' }
 ]

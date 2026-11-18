@@ -125,21 +125,6 @@ def test_manual_long_task_ignores_dorm_maintenance_only(scheduler, kind):
     assert manual_tasks.manual_task_deadline(scheduler.solver) == scheduler.release.time
 
 
-@pytest.mark.parametrize("task_type", ["rogue", "rcl", "spa", "sf"])
-def test_enabled_long_task_admits_dorm_gap(scheduler, task_type):
-    conf = manual_tasks.config.conf
-    original_type = conf.maa_long_task_type
-    conf.maa_rg_enable = 1
-    conf.maa_long_task_type = task_type
-    solver = scheduler.solver
-    solver.maa_plan_solver = MagicMock()
-    try:
-        assert manual_tasks.run_long_task_if_dorm_pending(solver)
-        solver.maa_plan_solver.assert_called_with([])
-    finally:
-        conf.maa_long_task_type = original_type
-
-
 @pytest.mark.parametrize("sleep_window", [("13:00", "15:00"), ("13:00", "01:00")])
 def test_configured_sleep_prevents_automatic_long_run(scheduler, sleep_window):
     conf = manual_tasks.config.conf

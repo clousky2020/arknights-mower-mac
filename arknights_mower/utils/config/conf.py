@@ -1393,10 +1393,6 @@ class Conf(
         return self.maa_rg_enable == 1 and self.maa_long_task_type == "rcl"
 
     @property
-    def SPA(self):
-        return self.maa_rg_enable == 1 and self.maa_long_task_type == "spa"
-
-    @property
     def should_run_maa_stage_plan(self) -> bool:
         return bool(self.stage_plan_enable and self.stage_plan_runner == "maa")
 
@@ -1463,7 +1459,6 @@ class Conf(
             or self.RG
             or self.SSS
             or self.RCL
-            or self.SPA
             or self.COPILOT
             or self.PARADOX
         )

@@ -70,7 +70,7 @@ def run_long_task_if_dorm_pending(scheduler):
     conf = config.conf
     if not any(
         getattr(conf, flag, False)
-        for flag in ("RG", "COPILOT", "PARADOX", "SSS", "RCL", "SPA", "RA", "SF")
+        for flag in ("RG", "COPILOT", "PARADOX", "SSS", "RCL", "RA", "SF")
     ):
         return False
     now = datetime.now()
