@@ -706,10 +706,18 @@ class Device:
         """Send Android pointer events on the current device while a drag is held."""
         if kind not in {"DOWN", "MOVE", "UP"} or not points:
             raise ValueError("无效的触控事件")
-        command = "; ".join(
-            f"input motionevent {kind} {int(x)} {int(y)}" for x, y in points
-        )
-        self._input_once(lambda: self.client.run(command), transport="adb")
+        # AVD 上每条 ADB input 命令都要在设备端启动一次进程，点太多会撞上会话超时。
+        # 分批发送；DOWN 状态跨命令保留，因此切批不会中断按住的手势。
+        batch_size = 4
+        commands = [
+            "; ".join(
+                f"input motionevent {kind} {int(x)} {int(y)}"
+                for x, y in points[start : start + batch_size]
+            )
+            for start in range(0, len(points), batch_size)
+        ]
+        for command in commands:
+            self._input_once(lambda cmd=command: self.client.run(cmd), transport="adb")
 
     def send_text(self, text: str) -> None:
         """send a text"""

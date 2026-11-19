@@ -18,6 +18,7 @@ from arknights_mower.utils import config
 from arknights_mower.utils.config.conf import Conf
 from arknights_mower.utils.config.device_profile import PresetId
 from arknights_mower.utils.device.application import DeviceControl, LegacyDeviceAdapter
+from arknights_mower.utils.device.device import Device
 from arknights_mower.utils.device.io_budget import device_io_budget
 from arknights_mower.utils.device.maatouch.core import Client as MaaTouchClient
 from arknights_mower.utils.device.preflight import PreflightError
@@ -1402,6 +1403,81 @@ class TouchTests(unittest.TestCase):
         self.assertFalse(self.control.start().ok)
         self.assertEqual(self.factory.call_count, 1)
         self.assertEqual(self.backend.closed, 1)
+
+
+class MotionEventsTests(unittest.TestCase):
+    """多指事件必须分批发送，且失败后不得继续后续批次。"""
+
+    def make_device(self, run=None):
+        device = object.__new__(Device)
+        sent = []
+        transports = []
+
+        def send(command):
+            sent.append(command)
+            if run is not None:
+                run(len(sent))
+
+        device.client = SimpleNamespace(run=send)
+
+        def input_once(operation, transport=None):
+            transports.append(transport)
+            return operation()
+
+        device._input_once = input_once
+        return device, sent, transports
+
+    @staticmethod
+    def command(kind, points):
+        return "; ".join(f"input motionevent {kind} {x} {y}" for x, y in points)
+
+    def test_twelve_points_are_split_into_three_adb_commands(self):
+        points = [(x, x + 1) for x in range(0, 24, 2)]
+        device, sent, transports = self.make_device()
+
+        device.motion_events("MOVE", points)
+
+        self.assertEqual(
+            sent,
+            [
+                self.command("MOVE", batch)
+                for batch in (points[0:4], points[4:8], points[8:12])
+            ],
+        )
+        self.assertEqual(transports, ["adb", "adb", "adb"])
+
+    def test_short_sequence_stays_one_command(self):
+        points = [(10, 20), (30, 40)]
+        device, sent, transports = self.make_device()
+
+        device.motion_events("MOVE", points)
+
+        self.assertEqual(sent, [self.command("MOVE", points)])
+        self.assertEqual(transports, ["adb"])
+
+    def test_invalid_kind_sends_nothing(self):
+        device, sent, transports = self.make_device()
+
+        with self.assertRaises(ValueError):
+            device.motion_events("HOLD", [(1, 2)])
+
+        self.assertEqual(sent, [])
+        self.assertEqual(transports, [])
+
+    def test_failure_stops_remaining_batches(self):
+        points = [(x, x) for x in range(12)]
+
+        def fail_second_batch(count):
+            if count == 2:
+                raise OSError("timed out")
+
+        device, sent, transports = self.make_device(run=fail_second_batch)
+
+        with self.assertRaises(OSError):
+            device.motion_events("MOVE", points)
+
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(transports, ["adb", "adb"])
 
 
 if __name__ == "__main__":
