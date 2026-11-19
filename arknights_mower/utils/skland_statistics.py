@@ -19,7 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from arknights_mower.utils.csv_utils import EmptyDataError, read_csv_rows
+from arknights_mower.utils.csv_utils import (
+    EmptyDataError,
+    probe_encoding,
+    read_csv_rows,
+)
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.skland_log import (
     mask_account as mask_account_text,
@@ -281,17 +285,24 @@ def read_sign_in_state(
 
 
 def _read_rows(target: Path) -> tuple[list[list[str]], str]:
-    """优先按 GBK 读取，兼容被 Excel 另存为 UTF-8 的文件。"""
-    for encoding in ("gbk", "utf-8-sig"):
-        try:
-            return read_csv_rows(target, header=False, encoding=encoding), encoding
-        except (FileNotFoundError, EmptyDataError):
-            return [], encoding
-        except UnicodeDecodeError:
-            continue
-        except csv.Error as error:
-            raise OSError("skland.csv 格式无法解析") from error
-    raise OSError("skland.csv 编码无法识别")
+    """探测文件实际编码后读取，兼容 GBK 与被 Excel 另存为 UTF-8 的文件。
+
+    探测返回的编码必须与读取一致，后续追加行也按该编码写入；若按候选
+    顺序逐个试读，宽松的本地读取器可能在 GBK 尝试下用 UTF-8 解码成功，
+    返回与实际解码不符的编码标签，造成读写编码错配。
+    """
+    try:
+        encoding = probe_encoding(target, "gbk")
+    except FileNotFoundError:
+        return [], "gbk"
+    except UnicodeDecodeError as error:
+        raise OSError("skland.csv 编码无法识别") from error
+    try:
+        return read_csv_rows(target, header=False, encoding=encoding), encoding
+    except (FileNotFoundError, EmptyDataError):
+        return [], encoding
+    except csv.Error as error:
+        raise OSError("skland.csv 格式无法解析") from error
 
 
 def build_pairs(

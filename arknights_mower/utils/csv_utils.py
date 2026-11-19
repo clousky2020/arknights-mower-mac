@@ -22,13 +22,13 @@ def _read_csv_text(path, encoding):
     """按 UTF-8 BOM / UTF-8 / GBK 顺序解码 CSV 文本。
 
     Windows 导出的 UTF-8 BOM 文件用 GBK 解码不会报错，只会让首列名残留
-    BOM 字节，因此必须先检测 BOM；其余情况优先尝试 UTF-8，再回退到 GBK。
+    BOM 字节，因此候选顺序固定先试 UTF-8，再回退到 GBK。BOM 只作为解码
+    顺序提示而不强制：签到记录等文件会以 GBK 追加写入 UTF-8 BOM 文件，
+    此时整份文件需要回退到 GBK 才能完整解码。
     调用方传入其它编码（如 UTF-16）时先按该编码解码。
     """
     with open(path, "rb") as f:
         raw = f.read()
-    if raw.startswith(b"\xef\xbb\xbf"):
-        return raw.decode("utf-8-sig")
     if encoding in (None, "utf-8", "utf-8-sig", "gbk"):
         candidates = ["utf-8-sig", "utf-8", "gbk"]
     else:
@@ -40,6 +40,37 @@ def _read_csv_text(path, encoding):
         except UnicodeDecodeError as exc:
             last_exc = exc
     raise last_exc
+
+
+def probe_encoding(path, encoding="utf-8"):
+    """探测 CSV 文件实际可用的解码编码。
+
+    调用方指定的编码严格优先，失败后按 utf-8-sig、utf-8、gbk 依次回退，
+    返回第一个能完整解码的编码名，供调用方按同一编码读写，避免读取与
+    追加编码不一致造成混合编码文件。
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    candidates = [encoding, "utf-8-sig", "utf-8", "gbk"] if encoding else [
+        "utf-8-sig",
+        "utf-8",
+        "gbk",
+    ]
+    seen = set()
+    ordered = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    for candidate in ordered:
+        try:
+            raw.decode(candidate)
+            return candidate
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError(
+        "csv_utils", raw, 0, len(raw), "无法按任何已知编码解码"
+    )
 
 
 def read_csv_rows(path, encoding="utf-8", header="infer"):

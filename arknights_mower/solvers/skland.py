@@ -126,7 +126,7 @@ class SKLand:
             try:
                 login_token = log(account)
                 self._log_secrets.add(login_token)
-                self.save_param(get_cred_by_token(login_token), account)
+                self.save_param(get_cred_by_token(login_token), account.account)
                 failure = "读取森空岛签到角色失败，请检查网络连接后重试"
                 targets = self._sign_targets(account)
             except MowerExit:
