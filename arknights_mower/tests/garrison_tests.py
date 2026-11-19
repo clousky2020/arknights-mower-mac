@@ -2,6 +2,7 @@
 
 import copy
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,18 @@ def frame(name):
             24
         )
     return Frame(image, texts, screen, quick)
+
+
+def replay_unchanged_lobby(monkeypatch, worker, lobby):
+    elapsed = 0
+
+    def advance(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+
+    monkeypatch.setattr(solver.time, "monotonic", lambda: elapsed)
+    worker.capture = Mock(return_value=lobby)
+    worker.sleep = advance
 
 
 @pytest.mark.parametrize(
@@ -89,22 +102,27 @@ def test_progress_round_trip_and_unknown_win_rejected(income_db):
 
 
 @pytest.mark.parametrize(
-    "saved", [{"round": 3}, {"phase": "active"}, {"phase": "starting", "round": 3}]
+    "saved",
+    [{"round": 3}, {"phase": "active", "round": 3}, {"phase": "starting", "round": 3}],
 )
-def test_saved_match_does_not_start_another_match(saved):
+def test_saved_match_does_not_start_another_match(saved, monkeypatch):
     device = Mock()
     s = solver.GarrisonSolver(device, Mock(), {"match": saved}, Mock())
+    lobby = frame("lobby")
+    replay_unchanged_lobby(monkeypatch, s, lobby)
     with pytest.raises(model.GarrisonError):
-        s.start_or_resume(frame("lobby"))
+        s.start_or_resume(lobby)
+    assert s.capture.call_count > 1
     device.tap.assert_not_called()
 
 
-def test_unconfirmed_start_uses_personal_lobby_and_preserves_counts():
-    p = {"match": {"phase": "starting"}, "wins": {"band_amiya": 3}, "matches_played": 2}
+@pytest.mark.parametrize("phase", ["active", "starting"])
+def test_saved_phase_uses_personal_lobby_and_preserves_counts(phase):
+    p = {"match": {"phase": phase}, "wins": {"band_amiya": 3}, "matches_played": 2}
     initial = copy.deepcopy(p)
     lobby, mode, info = frame("lobby"), frame("mode"), frame("info")
     s = solver.GarrisonSolver(Mock(), Mock(), p, Mock(), vision=Mock())
-    s.vision.frame.side_effect = [mode, info]
+    s.vision.frame.side_effect = ([lobby] if phase == "active" else []) + [mode, info]
     s.remaining = Mock(return_value=720)
     s.click = Mock()
     assert s.start_or_resume(lobby) is info
@@ -115,10 +133,22 @@ def test_unconfirmed_start_uses_personal_lobby_and_preserves_counts():
     assert p == {**initial, "match": {"phase": "active"}}
 
 
+def test_reconnect_takes_priority_on_active_lobby_recheck():
+    lobby, reconnect, prep = frame("lobby"), frame("left"), frame("prep")
+    worker = solver.GarrisonSolver(
+        Mock(), Mock(), {"match": {"phase": "active"}}, Mock()
+    )
+    worker.capture = Mock(side_effect=[reconnect, prep])
+    worker.click = Mock()
+    assert worker.start_or_resume(lobby) is prep
+    worker.click.assert_called_once_with(reconnect.find("断线重连").center)
+    worker.save.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "observation", ["missing_quick", "missing_solo", "abandon", "ambiguous_selection"]
 )
-def test_uncertain_personal_lobby_preserves_unconfirmed_start(observation):
+def test_uncertain_personal_lobby_preserves_unconfirmed_start(observation, monkeypatch):
     lobby = frame("lobby")
     if observation == "missing_quick":
         lobby.texts.remove(lobby.find("^极速模拟$"))
@@ -130,7 +160,7 @@ def test_uncertain_personal_lobby_preserves_unconfirmed_start(observation):
         lobby.image[:] = 30
     p = {"match": {"phase": "starting"}}
     s = solver.GarrisonSolver(Mock(), Mock(), p, Mock())
-    s.wait = Mock(return_value=lobby)
+    replay_unchanged_lobby(monkeypatch, s, lobby)
     with pytest.raises(model.GarrisonError):
         s.start_or_resume(lobby)
     assert p == {"match": {"phase": "starting"}}
@@ -153,7 +183,7 @@ def test_resume_clicks_reconnect_and_preserves_progress(match):
 
 
 @pytest.mark.parametrize("highlight", ["joint", "both", "neither", "missing_label"])
-def test_reconnect_requires_positive_personal_selection(highlight):
+def test_reconnect_requires_positive_personal_selection(highlight, monkeypatch):
     lobby = frame("left")
     label = lobby.find("^个人模拟$")
     x, y, w, h = label.x, label.y, label.width, label.height
@@ -165,7 +195,8 @@ def test_reconnect_requires_positive_personal_selection(highlight):
         lobby.texts.remove(label)
     progress = {"match": {"round": 3}}
     s = solver.GarrisonSolver(Mock(), Mock(), progress, Mock())
-    with pytest.raises(model.GarrisonError, match="未确认已选中个人模拟"):
+    replay_unchanged_lobby(monkeypatch, s, lobby)
+    with pytest.raises(model.GarrisonError, match="复核后仍未确认大厅模式或对局入口"):
         s.start_or_resume(lobby)
     s.device.tap.assert_not_called()
     s.save.assert_not_called()
@@ -308,6 +339,37 @@ def test_squad_intro_can_outlast_unknown_screen_timeout(monkeypatch, interrupted
     game.pick_squad.assert_called_once()
 
 
+@pytest.mark.parametrize("outcome", ["settles", "deadline", "timeout"])
+def test_battle_loading_waits_for_confirmed_settlement(monkeypatch, outcome):
+    loading = Frame(None, [], "unknown", False)
+    battle = Frame(None, [], "battle", True)
+    result = Frame(None, [Text("返回主页", 0, 0, 80, 40)], "result", False)
+    worker = solver.GarrisonSolver(
+        Mock(), Mock(), {"match": {"phase": "active"}}, Mock(), match_limit=1
+    )
+    worker._quick_confirmed = True
+    replay_unchanged_lobby(monkeypatch, worker, loading)
+    worker._end = 10 if outcome == "deadline" else 100
+    worker.capture.side_effect = lambda: (
+        result if outcome == "settles" and solver.time.monotonic() >= 24 else loading
+    )
+    archived = Mock()
+    monkeypatch.setattr(solver, "save_screenshot_frame", archived)
+    if outcome == "settles":
+        worker.play(Mock(), battle)
+        archived.assert_called_once_with(result.image, "garrison_result")
+        worker.device.tap.assert_called_once_with(result.find("返回主页").center)
+        assert worker.progress["matches_played"] == 1
+    else:
+        with pytest.raises(
+            solver.GarrisonYield if outcome == "deadline" else model.GarrisonError
+        ):
+            worker.play(Mock(), battle)
+        assert worker.progress == {"match": {"phase": "active"}}
+        archived.assert_not_called()
+        worker.device.tap.assert_not_called()
+
+
 def test_real_deadline_preempts_before_input(monkeypatch):
     now = datetime.now()
     clock = Mock()
@@ -436,6 +498,66 @@ def test_choose_strategy_from_count_even_with_unreadable_name(
     assert s.progress["wins"] == {}
 
 
+@pytest.mark.parametrize(
+    ("known", "banner", "expected", "partial"),
+    [
+        (3, "", 3, False),
+        (0, "已通过模拟3次", 3, False),
+        (0, "已通过模拟3次", 3, True),
+        (0, "", 0, False),
+    ],
+)
+def test_strategy_uses_first_readable_count_and_preserves_wins(
+    known, banner, expected, partial
+):
+    p = {"wins": {"band_amiya": known}}
+    worker = solver.GarrisonSolver(Mock(), Mock(), p, Mock())
+    worker.sleep = Mock()
+    panel = [(1550, 480, "初始生命值"), (1610, 560, "阿米娅")]
+    final = panel + ([(1540, 215, banner)] if banner else [])
+    game = Mock()
+    readings = [panel + [(1540, 215, "已通过模拟")], []] if partial else []
+    game.ocr.side_effect = [*readings, final]
+    action = worker.read_strategy_action(
+        game, {"阿米娅": "band_amiya", "其他策略": "other"}
+    )
+    assert game.shot.call_count == len(readings) + 1
+    assert action == ("skip" if expected >= 3 else "play")
+    assert p["wins"]["band_amiya"] == expected
+
+
+@pytest.mark.parametrize("deadline", [1, 30])
+def test_unreadable_strategy_releases_card_or_device(monkeypatch, deadline):
+    worker = solver.GarrisonSolver(Mock(), Mock(), {"wins": {"band_amiya": 3}}, Mock())
+    replay_unchanged_lobby(monkeypatch, worker, frame("lobby"))
+    worker._end = deadline
+    game = Mock()
+    game.ocr.return_value = [(1550, 480, "初始生命值"), (1550, 225, "已通过模拟")]
+    if deadline == 1:
+        with pytest.raises(solver.GarrisonYield):
+            worker.read_strategy_action(game, {})
+    else:
+        assert worker.read_strategy_action(game, {}) is None
+    assert game.shot.call_count > 1
+    assert worker.progress["wins"] == {"band_amiya": 3}
+    worker.device.tap.assert_not_called()
+    worker.save.assert_not_called()
+
+
+@pytest.mark.parametrize("screen", ["choice", "confirm-ready"])
+def test_reconnect_recognizes_quick_simulation_prompt(screen):
+    worker = solver.GarrisonSolver(
+        Mock(), Mock(), {"match": {"phase": "active"}}, Mock(), vision=Mock()
+    )
+    worker.click = Mock()
+    prompt = Frame(None, [], screen, False)
+    worker.vision.frame.return_value = prompt
+    assert worker.start_or_resume(frame("left")) is prompt
+    assert not worker.can_dispatch_frame(prompt)
+    worker.vision.frame.return_value = replace(prompt, quick=True)
+    assert worker.can_dispatch_frame(worker.capture())
+
+
 @pytest.mark.parametrize("target", [3, 6])
 def test_last_confirmed_medal_stops_scan_and_future_dispatch(
     target, income_db, monkeypatch
@@ -516,6 +638,26 @@ def test_match_budget_rechecked_after_navigation_before_saving_new_match(progres
     assert [call.args[1] for call in s.text_click.call_args_list] == ["^极速模拟$"]
     s.save.assert_not_called()
     assert s.progress == before
+
+
+def test_start_waits_for_mode_and_button_before_saving(monkeypatch):
+    mode = frame("mode")
+    start = mode.find("^开始模拟$")
+    missing_mode = replace(mode, quick=False)
+    missing_button = replace(mode, texts=[t for t in mode.texts if t != start])
+    info = frame("info")
+    events = []
+    worker = solver.GarrisonSolver(
+        Mock(), Mock(), {}, lambda progress: events.append(dict(progress))
+    )
+    replay_unchanged_lobby(monkeypatch, worker, missing_mode)
+    worker.capture.side_effect = [missing_button, mode, info]
+    worker.device.tap.side_effect = events.append
+
+    assert worker.start_or_resume(missing_mode) is info
+
+    assert worker.capture.call_count == 3
+    assert events == [{"match": {"phase": "starting"}}, start.center]
 
 
 def test_observed_quick_match_is_saved_for_reconnect():
@@ -620,11 +762,9 @@ def test_unlimited_matches_can_use_completed_strategy_and_continue_past_200(
     progress = model.prepare_progress(conf, {})
     progress.update(matches_played=200, attempts=200, match={"phase": "active"})
     s = solver.GarrisonSolver(Mock(), Mock(), progress, Mock(), match_limit=0)
-    assert (
-        s.strategy_action([(0, 220, "已通过模拟⑥次"), (0, 480, "初始生命值")], {})
-        == "play"
-    )
-    assert s.strategy_action([], {}) is None
+    game = Mock()
+    game.ocr.return_value = [(0, 220, "已通过模拟⑥次"), (0, 480, "初始生命值")]
+    assert s.read_strategy_action(game, {}) == "play"
     result = Frame(None, [Text("返回主页", 100, 200, 50, 50)], "result", False)
     s._quick_confirmed = True
     s.click = Mock()
@@ -638,7 +778,101 @@ def test_unlimited_matches_can_use_completed_strategy_and_continue_past_200(
     assert (detail["count"], detail["total"], detail["completed"]) == (201, 0, False)
 
 
-def test_timeout_replay_requires_exact_message_and_button_and_limits_repeat():
+@pytest.mark.parametrize("screen", ["info", "choice"])
+def test_rechecks_missing_gameplay_control_before_tapping(monkeypatch, screen):
+    progress = {"match": {"phase": "active"}}
+    worker = solver.GarrisonSolver(Mock(), Mock(), progress, Mock(), match_limit=1)
+    worker._quick_confirmed = True
+    initial, ready = (
+        (frame("info"), frame("info"))
+        if screen == "info"
+        else (Frame(None, [], "choice", False), Frame(None, [], "choice", False))
+    )
+    result = Frame(None, [Text("返回主页", 100, 200, 50, 50)], "result", False)
+    if screen == "info":
+        target = ready.find("[准淮]备就绪|^确认$").center
+        initial.texts = [t for t in initial.texts if t.center != target]
+        after_click = [frame("prep"), result]
+    else:
+        initial.texts = [Text("精准", 405, 450, 80, 40, 0.5)]
+        ready.texts = [Text("精准", 405, 450, 80, 40)]
+        target = (475, 540)
+        after_click = [result]
+    other = Frame(None, ready.texts, "detail", False)
+    replay_unchanged_lobby(monkeypatch, worker, initial)
+    worker.capture.side_effect = [initial, other, ready, *after_click]
+    monkeypatch.setattr(solver, "save_screenshot_frame", Mock())
+    game = Mock()
+    game.Board.return_value.prep_done = False
+
+    worker.play(game, initial)
+
+    assert [call.args[0] for call in worker.device.tap.call_args_list] == [
+        target,
+        result.find("返回主页").center,
+    ]
+    assert worker.capture.call_count == 3 + len(after_click)
+    assert progress["matches_played"] == 1
+
+
+def test_missing_quick_mode_evidence_defers_gameplay_input(monkeypatch):
+    info, prep = frame("info"), frame("prep")
+    partial = replace(info, quick=False)
+    unknown = Frame(None, [], "unknown", False)
+    result = Frame(None, [Text("返回主页", 100, 200, 50, 50)], "result", False)
+    worker = solver.GarrisonSolver(
+        Mock(),
+        Mock(),
+        {"match": {"phase": "active"}},
+        Mock(),
+        match_limit=1,
+        vision=Mock(),
+    )
+    worker.sleep = Mock()
+    frames = iter([unknown, partial, info, prep, result])
+
+    def recognize(_):
+        observed = next(frames)
+        if observed is info:
+            worker.device.tap.assert_not_called()
+        return observed
+
+    worker.vision.frame.side_effect = recognize
+    game = Mock()
+    game.Board.return_value.prep_done = False
+    monkeypatch.setattr(solver, "save_screenshot_frame", Mock())
+
+    worker.play(game, partial)
+
+    assert worker.vision.frame.call_count == 5
+    assert worker.device.tap.call_args_list[0].args == (
+        info.find("[准淮]备就绪|^确认$").center,
+    )
+    assert worker.progress["matches_played"] == 1
+
+
+@pytest.mark.parametrize("deadline", [0.5, 20])
+def test_unreadable_info_keeps_match_when_observation_ends(monkeypatch, deadline):
+    progress = {"match": {"phase": "active"}, "wins": {"band_amiya": 3}}
+    worker = solver.GarrisonSolver(Mock(), Mock(), progress, Mock())
+    worker._quick_confirmed = True
+    initial = Frame(None, [Text("确认本局信息", 800, 100, 200, 50)], "info", True)
+    replay_unchanged_lobby(monkeypatch, worker, initial)
+    worker._end = deadline
+    error = solver.GarrisonYield if deadline < 8 else model.GarrisonError
+
+    with pytest.raises(error):
+        worker.play(Mock(), initial)
+
+    assert worker.capture.call_count > 1
+    worker.device.tap.assert_not_called()
+    worker.save.assert_not_called()
+    assert progress == {"match": {"phase": "active"}, "wins": {"band_amiya": 3}}
+
+
+def test_timeout_replay_requires_exact_message_and_button_and_limits_repeat(
+    monkeypatch,
+):
     message = Text("出现超时异常，战斗将重新进行", 685, 456, 550, 49)
     confirm = Text("确认", 930, 700, 93, 56)
     observed = frame("prep")
@@ -667,6 +901,8 @@ def test_timeout_replay_requires_exact_message_and_button_and_limits_repeat():
 
     observed.texts = [message, Text("确认", 150, 100, 60, 40)]
     s.click.reset_mock()
+    del s.wait
+    replay_unchanged_lobby(monkeypatch, s, observed)
     with pytest.raises(model.GarrisonError, match="未识别到按钮"):
         s.play(game, observed)
     s.click.assert_not_called()
@@ -722,6 +958,83 @@ def theme_panel(name, applied=True):
     return Frame(None, texts, screen, quick)
 
 
+@pytest.mark.parametrize("appears", [True, False])
+def test_waits_for_theme_icon_in_the_lobby(monkeypatch, appears):
+    from arknights_mower.solvers.garrison import theme
+
+    lobby = frame("left")
+    lobby.texts.remove(lobby.find("^更换主题$"))
+    worker = solver.GarrisonSolver(
+        Mock(), Mock(), {"match": {"phase": "active"}}, Mock()
+    )
+    replay_unchanged_lobby(monkeypatch, worker, lobby)
+    worker.click = Mock()
+    worker.recog.template_match.return_value = (0.2, None)
+    if appears:
+        panel = theme_panel(theme.DEFAULT_THEME)
+        worker.capture.side_effect = [lobby, panel, lobby, panel]
+        worker.recog.template_match.side_effect = [
+            (0.2, None),
+            (0.3, None),
+            (0.99, None),
+        ]
+        assert theme.open_equipped(worker, lobby) is panel
+        worker.click.assert_called_once_with((523, 960))
+    else:
+        with pytest.raises(model.GarrisonError, match="更换主题按钮"):
+            theme.open_equipped(worker, lobby)
+        assert worker.capture.call_count > 1
+        worker.click.assert_not_called()
+    assert worker.progress == {"match": {"phase": "active"}}
+
+
+def test_theme_icon_wait_yields_at_the_task_deadline(monkeypatch):
+    from arknights_mower.solvers.garrison import theme
+    from arknights_mower.utils.image import loadres
+    from arknights_mower.utils.recognize import Recognizer
+
+    lobby = frame("left")
+    gray = np.zeros(lobby.image.shape[:2], np.uint8)
+    # 入场动画中，扳手尚未升到可以点击的位置。
+    icon = loadres("garrison/change_theme", gray=True)
+    gray[1010 : 1010 + icon.shape[0], 495 : 495 + icon.shape[1]] = icon
+    recog = SimpleNamespace(gray=gray)
+    recog.template_match = Recognizer.template_match.__get__(recog)
+    worker = solver.GarrisonSolver(
+        Mock(), recog, {"match": {"phase": "active"}}, Mock()
+    )
+    replay_unchanged_lobby(monkeypatch, worker, lobby)
+    worker._end = 0.5
+    with pytest.raises(solver.GarrisonYield):
+        theme.open_equipped(worker, lobby)
+    assert worker.capture.call_count > 1
+    worker.device.tap.assert_not_called()
+    worker.save.assert_not_called()
+    assert worker.progress == {"match": {"phase": "active"}}
+
+    gray[932 : 932 + icon.shape[0], 495 : 495 + icon.shape[1]] = icon
+    worker._end = 12
+    panel = theme_panel(theme.DEFAULT_THEME)
+    worker.capture.return_value = panel
+    assert theme.open_equipped(worker, lobby) is panel
+    worker.device.tap.assert_called_once_with((523, 960))
+
+
+def test_waits_for_personal_highlight_before_clicking_reconnect():
+    ready = frame("left")
+    fading = frame("left")
+    fading.image[:] = 30
+    worker = solver.GarrisonSolver(
+        Mock(), Mock(), {"match": {"phase": "active"}}, Mock()
+    )
+    playing = frame("prep")
+    worker.capture = Mock(side_effect=[fading, ready, playing])
+    worker.sleep = Mock()
+    worker.click = Mock()
+    assert worker.start_or_resume(fading) is playing
+    worker.click.assert_called_once_with(ready.find("断线重连").center)
+
+
 @pytest.mark.parametrize(
     "original", ["卫戍协议终端", "乌萨斯齐心团", "“全能的”可露希尔"]
 )
@@ -747,6 +1060,7 @@ def test_theme_switch_and_restore_require_observed_equipped_label(original):
     s = solver.GarrisonSolver(
         Mock(), Mock(), {}, lambda p: events.append(("saved", dict(p)))
     )
+    s.recog.template_match.return_value = (0.99, ((495, 932), (551, 990)))
     s.click = lambda point: events.append(("tap", point))
 
     def wait(check, timeout=8):
@@ -767,7 +1081,7 @@ def test_theme_switch_and_restore_require_observed_equipped_label(original):
         assert events.count(("tap", (1590, 999))) == 2
         assert events[-1] == ("saved", {})
     else:
-        assert events == [("tap", lobby.find("^更换主题$").center), ("tap", (65, 58))]
+        assert events == [("tap", (523, 960)), ("tap", (65, 58))]
 
 
 @pytest.mark.parametrize(
@@ -786,6 +1100,28 @@ def test_equipped_theme_requires_complete_title_on_one_line(part):
     panel.texts = [t for t in panel.texts if not (t.x < 930 and t.y >= 927)]
     panel.texts.extend([Text("“全能的”", 58, 940, 180, 66), part])
     assert theme.equipped(panel) is None
+
+
+def test_theme_rechecks_equipped_title_and_missing_card(monkeypatch):
+    from arknights_mower.solvers.garrison import theme
+
+    name = "乌萨斯齐心团"
+    panel = theme_panel(theme.DEFAULT_THEME)
+    partial = replace(panel, texts=[t for t in panel.texts if t.x > 930])
+    no_card = replace(panel, texts=[t for t in panel.texts if t.text != name])
+    preview, applied = theme_panel(name, False), theme_panel(name)
+    worker = solver.GarrisonSolver(Mock(), Mock(), {}, Mock())
+    replay_unchanged_lobby(monkeypatch, worker, partial)
+    worker.capture.side_effect = [partial, panel, no_card, panel, preview, applied]
+
+    assert theme.open_equipped(worker, partial) is panel
+    worker.device.tap.assert_not_called()
+    theme.apply(worker, no_card, name)
+
+    assert [call.args[0] for call in worker.device.tap.call_args_list] == [
+        panel.find(name).center,
+        preview.find("设置主题").center,
+    ]
 
 
 def test_deferred_theme_restoration_after_final_settlement_does_not_play(
@@ -832,7 +1168,9 @@ def test_deferred_theme_restoration_after_final_settlement_does_not_play(
     )
 
 
-def test_unreadable_original_theme_preserves_record_for_next_window(income_db):
+def test_unreadable_original_theme_preserves_record_for_next_window(
+    income_db, monkeypatch
+):
     conf = Conf()
     progress = model.prepare_progress(conf, {})
     progress["original_theme"] = "“全能的”可露希尔"
@@ -840,7 +1178,7 @@ def test_unreadable_original_theme_preserves_record_for_next_window(income_db):
     record.save_garrison_progress(progress)
     bad = theme_panel("卫戍协议终端")
     bad.texts = [t for t in bad.texts if "可露希尔" not in t.text]
-    s.capture = Mock(return_value=bad)
+    replay_unchanged_lobby(monkeypatch, s, bad)
     with pytest.raises(model.GarrisonError, match="恢复卫戍协议主题"):
         s.restore_theme()
     s.device.tap.assert_not_called()

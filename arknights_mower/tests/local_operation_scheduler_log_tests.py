@@ -155,6 +155,25 @@ def test_threshold_run_and_recheck(local, caplog):
         assert any(m.startswith(prefix) for m in debug), prefix
 
 
+def test_selected_date_does_not_limit_runs_by_sanity_snapshot(
+    local, caplog, monkeypatch
+):
+    local.plan("1-7", ap=0, threshold=100)
+    base_schedule.config.conf.medicine_use_all_date = "2026-11-24"
+    monkeypatch.setattr(
+        "arknights_mower.utils.datetime.get_server_time", lambda: datetime(2026, 11, 24)
+    )
+
+    dispatch(local, caplog)
+
+    base_schedule.PlayerInfoClient.assert_not_called()
+    kwargs = local.operation.return_value.run.call_args.kwargs
+    assert kwargs["simulated_current_ap"] is None
+    assert kwargs["target_total_runs"] is None
+    assert kwargs["sanity_threshold"] is None
+    assert local.solver.local_operation_followup_time is None
+
+
 def test_stage_skip_reasons(local, caplog):
     local.plan("CE-6", "1-7", ap=30)
     assert dispatch(local, caplog) == [
@@ -211,7 +230,13 @@ def test_reselected_stage_without_cost(local, caplog):
     local.plan("1-7", ap=90)
     # 打完 1-7 后，库存规则放出没有体力消耗数据的 X-1。
     local.solver.mower_stage_plan = MagicMock(
-        side_effect=[["1-7"], ["1-7"], ["X-1"], [], ["1-7"]]
+        side_effect=[
+            (["1-7"], None),
+            (["1-7"], None),
+            (["X-1"], None),
+            ([], None),
+            (["1-7"], None),
+        ]
     )
     assert dispatch(local, caplog) == [
         ("INFO", "开始刷理智：1-7"),

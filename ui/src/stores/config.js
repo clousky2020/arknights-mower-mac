@@ -1,3 +1,4 @@
+import { isRelayPage } from '@/utils/instanceToken'
 import axios from 'axios'
 import { normalizePerformanceMode, performanceProfile } from '@/utils/performanceProfile'
 import { defineStore } from 'pinia'
@@ -53,6 +54,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_restore_theme_enable = ref(false)
   const maa_restore_theme = ref('')
   const medicine_expire_days = ref(0)
+  const medicine_use_all_date = ref(null)
   const maa_report_to_yituliu = ref(false)
   const maa_yituliu_id = ref('')
   const maa_report_to_penguin = ref(false)
@@ -61,6 +63,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_weekly_plan = ref([])
   const maa_weekly_plan_options = ref([])
   const maa_weekly_plan_active = ref('')
+  const filterStageByAvailability = ref(true)
   const maa_weekly_plan_activity_fallbacks = ref({})
   const maa_weekly_plan_activity_switch_times = ref({})
   const maa_weekly_plan_activity_end_times = ref({})
@@ -200,7 +203,8 @@ export const useConfigStore = defineStore('config', () => {
   const recruit_auto_5 = ref('hand')
   const webview = ref({ scale: 1.0 })
   const runtime_platform = ref('')
-  const manager_owned_device = ref(false)
+  const manager_owned_device = ref(isRelayPage())
+  const web_access_editable = ref(false)
   const manager_inherited_settings = ref([])
   const extra_settings_visible = ref(false)
   const shop_collect_enable = ref(true)
@@ -517,6 +521,7 @@ export const useConfigStore = defineStore('config', () => {
       device_profile.value = response.data.device ?? null
       runtime_platform.value = response.data.runtime_platform || ''
       manager_owned_device.value = response.data.manager_owned_device === true
+      web_access_editable.value = response.data.web_access_editable === true
       manager_inherited_settings.value = Array.isArray(response.data.manager_inherited_settings)
         ? response.data.manager_inherited_settings.filter((key) => typeof key === 'string')
         : []
@@ -573,6 +578,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_rg_enable.value = response.data.maa_rg_enable == 1
       maa_long_task_type.value = response.data.maa_long_task_type
       medicine_expire_days.value = response.data.medicine_expire_days
+      medicine_use_all_date.value = response.data.medicine_use_all_date ?? null
       maa_report_to_yituliu.value = response.data.maa_report_to_yituliu ?? false
       maa_yituliu_id.value = response.data.maa_yituliu_id ?? ''
       maa_report_to_penguin.value = response.data.maa_report_to_penguin ?? false
@@ -802,6 +808,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_rg_enable: maa_rg_enable.value ? 1 : 0,
       maa_long_task_type: maa_long_task_type.value,
       medicine_expire_days: medicine_expire_days.value,
+      medicine_use_all_date: medicine_use_all_date.value,
       maa_report_to_yituliu: maa_report_to_yituliu.value,
       maa_yituliu_id: maa_yituliu_id.value,
       maa_report_to_penguin: maa_report_to_penguin.value,
@@ -1114,7 +1121,7 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   function save_web_access({ port, token }) {
-    if (manager_owned_device.value || runtime_platform.value === 'android') {
+    if (!web_access_editable.value) {
       return Promise.reject(new Error('请通过启动此实例的管理器修改端口和 Token'))
     }
     if (!Number.isInteger(port) || port < 0 || port > 65535 || typeof token !== 'string') {
@@ -1203,6 +1210,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_rg_enable,
     maa_long_task_type,
     medicine_expire_days,
+    medicine_use_all_date,
     maa_report_to_yituliu,
     maa_yituliu_id,
     maa_report_to_penguin,
@@ -1210,6 +1218,7 @@ export const useConfigStore = defineStore('config', () => {
     ap_fallback,
     maa_weekly_plan,
     maa_weekly_plan_options,
+    filterStageByAvailability,
     maa_weekly_plan_active,
     maa_weekly_plan_activity_fallbacks,
     maa_weekly_plan_activity_switch_times,
@@ -1325,6 +1334,7 @@ export const useConfigStore = defineStore('config', () => {
     webview,
     runtime_platform,
     manager_owned_device,
+    web_access_editable,
     manager_inherited_settings,
     extra_settings_visible,
     shop_collect_enable,

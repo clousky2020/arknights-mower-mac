@@ -1,3 +1,4 @@
+import { defaultSettingsFavorites, validSettingsFavorites } from '../src/task-workflow/model'
 import axios, { AxiosError } from 'axios'
 import screenshot from './screenshot.svg?raw'
 import { DEFAULT_BASELINE_CONFIG, DEFAULT_VIEW_PREFS } from '../src/utils/depot_inventory.js'
@@ -62,6 +63,7 @@ export function createPreviewConfiguration(config, theme = 'light') {
     },
     ai_type: config.ai_type || 'deepseek',
     runtime_platform: 'windows',
+    web_access_editable: true,
     adb: '127.0.0.1:16384',
     simulator: { name: 'MuMu12', index: 0 },
     maa_weekly_plan_active: '默认',
@@ -484,6 +486,7 @@ export function createPreviewData(config) {
       software_version_language: 'en',
       watermark_visible: true,
       task_settings_layout: 'checklist',
+      task_settings_favorites: [...defaultSettingsFavorites],
       base_report_mode: previewReportMode(),
       halloween_mode: 'auto',
       task_queue_display: 'portraits',
@@ -611,6 +614,7 @@ export function createPreviewAdapter(data, requests = []) {
     return activate(config, id, incoming, selected)
   }
   let logBackground = null
+  let growthChipFarming = null
   // 养成规划示例数据按需加载，其他预览页面不必创建这部分示例对象。
   let growthAdapter = null
   let growthLoading = null
@@ -643,7 +647,6 @@ export function createPreviewAdapter(data, requests = []) {
       target === '/workshop-status' ||
       target === '/workshop-auto-config' ||
       target.startsWith('/workshop-operators') ||
-      target === '/growth-chip-farming' ||
       target === '/operator'
     )
   }
@@ -853,6 +856,7 @@ export function createPreviewAdapter(data, requests = []) {
       '/weekly-plans': () => ({
         plans: ['默认'],
         active: '默认',
+        growth_chip_farming: growthChipFarming === null ? {} : { 默认: growthChipFarming },
         inventory_config: { enabled: false, limit_rules: [], ratio_rules: [] }
       }),
       '/getwatermark': () => '离线预览 · 示例数据',
@@ -904,7 +908,12 @@ export function createPreviewAdapter(data, requests = []) {
     if (path.startsWith('/config-profiles') && method !== 'GET' && data.status === 'running')
       fail(config, '请先停止 Mower 后操作示例配置', 423)
     if (method === 'GET' && reads[path]) result = reads[path]()
-    else if (
+    else if (method === 'POST' && path === '/growth-chip-farming') {
+      const { plan_key, enabled, filter_stage_by_availability } = body || {}
+      if (plan_key !== '默认') fail(config, '请选择要设置芯片刷取的周计划', 400)
+      growthChipFarming = enabled ? filter_stage_by_availability : null
+      result = { plan_key, enabled }
+    } else if (
       method === 'GET' &&
       previewFramePaths.has(path.slice('/screenshots/'.length)) &&
       path.startsWith('/screenshots/')
@@ -1019,6 +1028,7 @@ export function createPreviewAdapter(data, requests = []) {
         Object.keys(changes).length === 0 ||
         Object.entries(changes).some(([key, value]) => {
           if (key === 'running_log_layout') return !isValidRunningLogLayout(value)
+          if (key === 'task_settings_favorites') return !validSettingsFavorites(value)
           return !Object.hasOwn(choices, key) || !choices[key].includes(value)
         }) ||
         (Object.hasOwn(body, 'watermark_confirmation') && body.watermark_visible !== false) ||

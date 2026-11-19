@@ -104,6 +104,7 @@ describe('workshop config autosave', () => {
     store = app.runWithContext(() => useConfigStore())
     for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
     expect(store.medicine_expire_days).toBe(0)
+    expect(store.medicine_use_all_date).toBeNull()
     expect(store).not.toHaveProperty('expiring_medicine_on_weekend')
     expect(store.build_config()).not.toHaveProperty('expiring_medicine_on_weekend')
     expect(store.build_config()).not.toHaveProperty('exipring_medicine_on_weekend')
@@ -114,6 +115,14 @@ describe('workshop config autosave', () => {
     store.medicine_expire_days = 3
     await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(1))
     expect(axios.patch.mock.calls[0][1]).toEqual({ medicine_expire_days: 3 })
+    await store.flush_config_saves()
+    store.medicine_use_all_date = '2026-11-24'
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(2))
+    expect(axios.patch.mock.calls[1][1]).toEqual({ medicine_use_all_date: '2026-11-24' })
+    await store.flush_config_saves()
+    store.medicine_use_all_date = null
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(3))
+    expect(axios.patch.mock.calls[2][1]).toEqual({ medicine_use_all_date: null })
     loaded.value = false
   })
 
@@ -730,6 +739,7 @@ describe('standalone web access settings', () => {
     for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
     store.webview = { port: 58000, token: '', scale: 1, tray: true }
     store.runtime_platform = 'darwin'
+    store.web_access_editable = true
     axios.patch.mockResolvedValue({ data: {} })
     loaded.value = true
     await nextTick()
@@ -784,10 +794,9 @@ describe('standalone web access settings', () => {
     expect(axios.patch).not.toHaveBeenCalled()
   })
 
-  it.each(['managed', 'android'])('does not submit desktop access edits for %s', async (mode) => {
+  it('does not submit edits when the instance reports read-only access settings', async () => {
     await setup()
-    if (mode === 'managed') store.manager_owned_device = true
-    else store.runtime_platform = 'android'
+    store.web_access_editable = false
     await expect(store.save_web_access({ port: 58010, token: 'synthetic' })).rejects.toThrow(
       '管理器'
     )

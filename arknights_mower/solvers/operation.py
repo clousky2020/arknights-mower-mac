@@ -18,6 +18,7 @@ from arknights_mower.solvers.record import (
 from arknights_mower.utils import config
 from arknights_mower.utils import typealias as tp
 from arknights_mower.utils.csleep import MowerExit
+from arknights_mower.utils.datetime import is_game_date
 from arknights_mower.utils.device.recovery import DeviceRecoveryError
 from arknights_mower.utils.graph import SceneGraphSolver
 from arknights_mower.utils.image import cropimg, thres2
@@ -42,12 +43,14 @@ class OperationSolver(SceneGraphSolver):
         ap_cost: int | None = None,
         sanity_threshold: int | None = None,
         stage_duration_seconds: int | None = None,
+        inventory_limit_rules=None,
     ):
         battle_inventory_active.set()
         try:
             logger.info("Start: 代理作战")
             logger.debug("start operation solver")
             self.stage_id = stage_id
+            self.inventory_limit_rules = inventory_limit_rules
             self.next_task_time = next_task_time or stop_time
             self.target_total_runs = target_total_runs
             # Seeded once from SKLand before entering operation; after that we only
@@ -211,7 +214,9 @@ class OperationSolver(SceneGraphSolver):
                 if self._inventory_limit_reached():
                     self.stopped_by_inventory = True
                     break
-                if self.target_total_runs is None:
+                if self.target_total_runs is None and not is_game_date(
+                    getattr(config.conf, "medicine_use_all_date", None)
+                ):
                     logger.debug(
                         "stop operation loop because target_total_runs is not limited | stage_id=%s",
                         self.stage_id,
@@ -249,12 +254,15 @@ class OperationSolver(SceneGraphSolver):
             battle_inventory_active.clear()
 
     def _inventory_limit_reached(self):
-        if not config.conf.maa_stage_inventory_enable or not self.stage_id:
+        rules = self.inventory_limit_rules
+        if rules is None:
+            if not config.conf.maa_stage_inventory_enable:
+                return False
+            rules = config.conf.maa_stage_limit_rules
+        if not self.stage_id:
             return False
         inventory, _ = load_inventory_snapshot()
-        return stage_limit_status(
-            self.stage_id, config.conf.maa_stage_limit_rules, inventory
-        )[1]
+        return stage_limit_status(self.stage_id, rules, inventory)[1]
 
     def _record_batch_drops(self):
         if self.current_batch_inventory_recorded:
@@ -533,6 +541,10 @@ class OperationSolver(SceneGraphSolver):
             self.tap_element("double_confirm/main", x_rate=1)
             return True
         elif scene == Scene.OPERATOR_RECOVER_POTION:
+            if is_game_date(getattr(config.conf, "medicine_use_all_date", None)):
+                logger.info("使用理智药")
+                self.tap((1635, 865))
+                return
             use_medicine = config.conf.medicine_expire_days > 0
             if use_medicine:
                 img = cropimg(self.recog.img, ((1015, 515), (1170, 560)))

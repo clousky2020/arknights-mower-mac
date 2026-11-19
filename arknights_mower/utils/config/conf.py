@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -9,6 +10,7 @@ from pydantic import (
     Field,
     StrictBool,
     TypeAdapter,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -22,6 +24,7 @@ from arknights_mower.utils.config.device_profile import (
     profile_from_legacy,
     updated_legacy_profile_fields,
 )
+from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.performance import (
     PERFORMANCE_PRESETS,
     default_performance_mode,
@@ -563,6 +566,12 @@ class MaaStageRatioRule(ConfModel):
     members: list[MaaStageRatioMember] = []
 
 
+def _unexpired_medicine_date(value: str | None) -> str | None:
+    if value is not None and value < get_server_time().date().isoformat():
+        return None
+    return value
+
+
 class RegularTaskPart(ConfModel):
     class MaaDailyPlan(BaseModel):
         medicine: int = 0
@@ -586,6 +595,8 @@ class RegularTaskPart(ConfModel):
     "日常任务间隔"
     medicine_expire_days: int = 0
     "自动使用将要过期的理智药（剩余天数，0 表示不使用）"
+    medicine_use_all_date: str | None = None
+    "允许使用全部理智药的游戏日"
     ap_fallback: int = 0
     "关卡体力消耗默认值（数据中找不到关卡时的兜底，0 表示不启用）"
     maa_eat_stone: bool = False
@@ -634,6 +645,17 @@ class RegularTaskPart(ConfModel):
     "优先信赖阈值（百分比）"
     trust_rotation_interval: float = Field(default=24, ge=1, le=168)
     "信赖检查间隔（小时）"
+
+    @field_validator("medicine_use_all_date")
+    @classmethod
+    def validate_medicine_use_all_date(cls, value: str | None) -> str | None:
+        if value is not None and date.fromisoformat(value).isoformat() != value:
+            raise ValueError("日期格式须为 YYYY-MM-DD")
+        return _unexpired_medicine_date(value)
+
+    @field_serializer("medicine_use_all_date")
+    def serialize_medicine_use_all_date(self, value: str | None) -> str | None:
+        return _unexpired_medicine_date(value)
 
 
 class WorkShopItem(ConfModel):

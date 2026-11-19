@@ -1,11 +1,14 @@
-export const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+import resourceStageOpenDays from '../../../arknights_mower/data/resource_stage_open_days.json'
 
-export const WEEKDAY_INDICES = Object.fromEntries(
-  WEEKDAYS.map((weekday, index) => [weekday, index])
-)
+export const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 
 const GAME_TIMEZONE_OFFSET_HOURS = 8
 const GAME_DAY_START_HOUR = 4
+const GAME_DAY_OFFSET_MS = (GAME_TIMEZONE_OFFSET_HOURS - GAME_DAY_START_HOUR) * 60 * 60 * 1000
+
+export function getGameDate(date) {
+  return new Date(date.getTime() + GAME_DAY_OFFSET_MS).toISOString().slice(0, 10)
+}
 
 /**
  * Return the weekday index used by the game (Monday = 0, Sunday = 6).
@@ -15,8 +18,7 @@ const GAME_DAY_START_HOUR = 4
  * independent from the browser's local timezone.
  */
 export function getGameWeekdayIndex(date = new Date()) {
-  const gameDayOffsetMs = (GAME_TIMEZONE_OFFSET_HOURS - GAME_DAY_START_HOUR) * 60 * 60 * 1000
-  const day = new Date(date.getTime() + gameDayOffsetMs).getUTCDay()
+  const day = new Date(date.getTime() + GAME_DAY_OFFSET_MS).getUTCDay()
   return day === 0 ? 6 : day - 1
 }
 
@@ -60,17 +62,6 @@ const STAGE_VALUE_MAP = Object.fromEntries(
 )
 
 const ALWAYS_AVAILABLE_STAGES = new Set(['', 'Annihilation', '1-7', 'LS-6'])
-
-const RESOURCE_STAGE_OPEN_DAYS = {
-  CE: [1, 3, 5, 6],
-  AP: [0, 3, 5, 6],
-  SK: [0, 2, 4, 5],
-  CA: [1, 2, 4, 6],
-  'PR-A': [0, 3, 4, 6],
-  'PR-B': [0, 1, 4, 5],
-  'PR-C': [2, 3, 5, 6],
-  'PR-D': [1, 2, 5, 6]
-}
 
 export function formatStageLabel(value) {
   if (value in STAGE_DISPLAY_NAMES) {
@@ -243,13 +234,12 @@ export function mergeTableStageOrder(options, currentOrder = [], activityValues 
 }
 
 export function isStageAvailableOnWeekday(stage, weekday) {
-  const dayIndex = WEEKDAY_INDICES[weekday]
-  if (dayIndex === undefined || ALWAYS_AVAILABLE_STAGES.has(stage)) {
+  if (!WEEKDAYS.includes(weekday) || ALWAYS_AVAILABLE_STAGES.has(stage)) {
     return true
   }
-  for (const [prefix, days] of Object.entries(RESOURCE_STAGE_OPEN_DAYS)) {
+  for (const [prefix, days] of Object.entries(resourceStageOpenDays)) {
     if (stage.startsWith(prefix)) {
-      return days.includes(dayIndex)
+      return days.includes(weekday)
     }
   }
   return true

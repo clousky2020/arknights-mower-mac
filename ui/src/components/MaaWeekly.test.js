@@ -72,6 +72,7 @@ vi.mock('naive-ui', () => {
         'NCard',
         'NCheckbox',
         'NCheckboxGroup',
+        'NDatePicker',
         'NFlex',
         'NForm',
         'NFormItem',
@@ -124,12 +125,14 @@ describe('周计划芯片按钮排序联动', () => {
         'stage_plan_enable',
         'stage_plan_runner',
         'medicine_expire_days',
+        'medicine_use_all_date',
         'maa_report_to_yituliu',
         'maa_yituliu_id',
         'maa_penguin_id',
         'ap_fallback'
       ].map((key) => [key, ref('')])
     )
+    state.config.filterStageByAvailability = ref(true)
     state.config.maa_weekly_plan = ref([
       { weekday: '周一', stage: ['1-7', 'PR-B-2', 'Annihilation', 'PR-D-2'], medicine: 2 },
       { weekday: '周二', stage: ['1-7', 'PR-D-2', 'CE-6'], sanity_threshold: 50 }
@@ -176,9 +179,31 @@ describe('周计划芯片按钮排序联动', () => {
     expect(header.includes('aria-label="启用周计划"')).toBe(showEnable)
     expect(html.split('aria-label="启用周计划"').length - 1).toBe(showEnable ? 1 : 0)
     expect(html).toContain('支持 MAA 支持的所有关卡')
+    expect(html).toContain('用完理智药的日期')
+    expect(html).toContain('value-format="yyyy-MM-dd"')
     expect(html).toContain('PRTS.wiki：关卡一览 / 资源收集')
     expect(html).toContain('href="https://m.prts.wiki/')
     expect(html).toContain('consistent-menu-width="false"')
+  })
+
+  it('游戏日刷新后清空过期日期的显示并保留以后日期', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-25T03:59:59+08:00'))
+    state.config.medicine_use_all_date.value = '2026-11-24'
+    const app = mountEditor()
+    try {
+      expect(state.editor.setupState.scheduledMedicineDate).toBe('2026-11-24')
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(state.editor.setupState.scheduledMedicineDate).toBeNull()
+      expect(state.config.medicine_use_all_date.value).toBe('2026-11-24')
+
+      state.editor.setupState.scheduledMedicineDate = '2026-11-26'
+      expect(state.editor.setupState.scheduledMedicineDate).toBe('2026-11-26')
+      expect(state.config.medicine_use_all_date.value).toBe('2026-11-26')
+    } finally {
+      app.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it('资源变更后重读活动并保留周计划选择', async () => {

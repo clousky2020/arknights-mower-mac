@@ -6,7 +6,7 @@ import axios from 'axios'
 import { computed, h, inject, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/config'
 import { useResourceVersionStore } from '@/stores/resourceVersion'
-import { useGameWeekdayIndex } from '@/composables/gameWeekday'
+import { useGameDay } from '@/composables/gameWeekday'
 import {
   CHIP_STAGES,
   WEEKDAYS,
@@ -25,9 +25,11 @@ import WeeklyPlanSelector from './WeeklyPlanSelector.vue'
 const store = useConfigStore()
 const {
   maa_weekly_plan,
+  filterStageByAvailability,
   stage_plan_enable,
   stage_plan_runner,
   medicine_expire_days,
+  medicine_use_all_date,
   maa_report_to_yituliu,
   maa_yituliu_id,
   maa_report_to_penguin,
@@ -74,8 +76,6 @@ const copyTargetDays = ref([])
 let copyDialogLongPressTimer = null
 let copyDialogLongPressTriggered = false
 
-// 关卡过滤开关（活动期间可关闭）
-const filterStageByAvailability = ref(true)
 const editorModeStorageKey = 'maa-weekly-plan-editor-mode'
 const savedEditorMode = window.localStorage.getItem(editorModeStorageKey)
 const editorMode = ref(savedEditorMode === 'table' ? 'table' : 'list')
@@ -113,7 +113,16 @@ watch(editorMode, (mode) => {
   }
 })
 
-const currentWeekdayIndex = useGameWeekdayIndex()
+const { date: gameDate, weekdayIndex: currentWeekdayIndex } = useGameDay()
+const scheduledMedicineDate = computed({
+  get() {
+    const date = medicine_use_all_date.value
+    return date && date >= gameDate.value ? date : null
+  },
+  set(date) {
+    medicine_use_all_date.value = date
+  }
+})
 
 const stageOptions = computed(() => buildStageOptions(latestActivityOptions.value))
 
@@ -346,6 +355,29 @@ function cancelCopyDialogLongPress() {
                 天才用）。
               </div>
               <div>填 0 表示不服用（默认）。</div>
+            </help-text>
+          </n-flex>
+          <n-flex
+            class="weekly-plan-toolbar"
+            align="center"
+            role="group"
+            aria-labelledby="medicine-use-all-date"
+          >
+            <span id="medicine-use-all-date">用完理智药的日期</span>
+            <n-date-picker
+              v-model:formatted-value="scheduledMedicineDate"
+              type="date"
+              value-format="yyyy-MM-dd"
+              placeholder="选择日期"
+              clearable
+              style="width: 160px"
+            />
+            <help-text>
+              <div>游戏日从北京时间当天 04:00 到次日 04:00。</div>
+              <div>到该游戏日，刷理智时允许使用所有理智药，仍受关卡库存上限和任务时间限制。</div>
+              <div>
+                游戏日结束后日期自动清空，也可手动清空取消。MAA 按提交刷理智任务时的游戏日判断。
+              </div>
             </help-text>
           </n-flex>
           <n-flex align="center" v-if="stage_plan_runner === 'maa'">
