@@ -299,6 +299,32 @@ def test_no_large_task_started_keeps_release_time(scheduler, maa_solver):
     assert scheduler.release.time == scheduler.now
 
 
+def test_automatic_dispatch_runs_the_window_type_instead_of_the_default(
+    scheduler, maa_solver, monkeypatch
+):
+    conf = Conf(
+        maa_rg_enable=1,
+        maa_long_task_type="rogue",
+        maa_long_task_weekly_windows=[
+            {
+                "start": "14:00",
+                "end": "14:20",
+                "weekdays": [scheduler.now.weekday()],
+                "task_type": "sf",
+            }
+        ],
+    )
+    monkeypatch.setattr(manual_tasks.config, "conf", conf)
+    worker = MagicMock()
+    monkeypatch.setattr(base_schedule, "SecretFront", MagicMock(return_value=worker))
+
+    assert maa_solver.maa_plan_solver([])
+
+    worker.run.assert_called_once_with(timedelta(minutes=20))
+    maa_solver.MAA.start.assert_not_called()
+    assert conf.maa_long_task_type == "rogue"
+
+
 @pytest.mark.parametrize(
     "flag", ["strict_mood_limit", "emergency_recovery_release", "execution_retained"]
 )
@@ -342,12 +368,19 @@ def test_saved_garrison_can_resume_before_next_order(
 
 
 @pytest.mark.parametrize("end,allowed", [("14:08", False), ("14:09", True)])
-def test_extra_window_bounds_automatic_admission(scheduler, monkeypatch, end, allowed):
+@pytest.mark.parametrize("weekly", [False, True])
+def test_configured_window_bounds_automatic_admission(
+    scheduler, monkeypatch, end, allowed, weekly
+):
+    window = {"start": "14:00", "end": end}
     conf = Conf(
         maa_rg_enable=True,
         maa_rg_sleep_max="06:00",
         maa_rg_sleep_min="08:00",
-        maa_long_task_extra_windows=[{"start": "14:00", "end": end}],
+        maa_long_task_extra_windows=[] if weekly else [window],
+        maa_long_task_weekly_windows=[{**window, "weekdays": [scheduler.now.weekday()]}]
+        if weekly
+        else None,
     )
     monkeypatch.setattr(manual_tasks.config, "conf", conf)
     scheduler.solver.maa_plan_solver = MagicMock()

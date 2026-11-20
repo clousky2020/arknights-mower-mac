@@ -906,20 +906,31 @@ def test_unresolved_workstation_target_does_not_claim_departure(solver, target):
     assert result["rooms"][0]["agents"] == [target, "Current"]
 
 
+@pytest.mark.parametrize("days_until_opening", [0, 2])
 def test_idle_wakes_for_next_window_without_changing_queue(
-    production_idle_scheduler, monkeypatch, caplog
+    production_idle_scheduler, monkeypatch, caplog, days_until_opening
 ):
     from arknights_mower.solvers import base_schedule as base
 
     state = production_idle_scheduler
     instance = state.solver
     now = state.clock.now()
+    opening = now.replace(hour=11, minute=0, second=0, microsecond=0) + timedelta(
+        days=days_until_opening
+    )
+    for task in instance.tasks:
+        task.time += timedelta(days=days_until_opening)
     conf = base.config.conf.updated(
         {
             "maa_rg_enable": 1,
             "maa_rg_sleep_max": "05:00",
             "maa_rg_sleep_min": "06:00",
             "maa_long_task_extra_windows": [{"start": "11:00", "end": "12:00"}],
+            "maa_long_task_weekly_windows": [
+                {"start": "11:00", "end": "12:00", "weekdays": [opening.weekday()]}
+            ]
+            if days_until_opening
+            else None,
         }
     )
     monkeypatch.setattr(base.config, "conf", conf)
@@ -928,9 +939,57 @@ def test_idle_wakes_for_next_window_without_changing_queue(
     tasks = [(id(t), t.time) for t in instance.tasks]
     with caplog.at_level(logging.INFO):
         instance.rest_until_next_task()
-    seconds = (
-        now.replace(hour=11, minute=0, second=0, microsecond=0) - now
-    ).total_seconds()
+    seconds = (opening - now).total_seconds()
     instance._idle_sleep.assert_called_once_with(seconds, round_end=True)
     assert [(id(t), t.time) for t in instance.tasks] == tasks
     assert "11:00:00，随后进入大型任务执行时段" in caplog.text
+
+
+@pytest.mark.parametrize("enter_after_opening", [False, True])
+def test_idle_cleanup_crossing_an_adjoining_window_returns_to_dispatch(
+    production_idle_scheduler, monkeypatch, enter_after_opening
+):
+    from arknights_mower.solvers import base_schedule as base
+
+    state = production_idle_scheduler
+    instance = state.solver
+    start = state.clock.now().replace(hour=13, minute=59, second=50, microsecond=0)
+    finished = start.replace(hour=14, minute=0, second=5)
+    state.clock.current = finished if enter_after_opening else start
+    for task, hour in zip(instance.tasks, (16, 17), strict=True):
+        task.time = start.replace(hour=hour, minute=0, second=0)
+    monkeypatch.setattr(
+        base.config,
+        "conf",
+        base.config.conf.updated(
+            {
+                "maa_rg_enable": 1,
+                "maa_long_task_weekly_windows": [
+                    {"start": "13:00", "end": "14:00", "weekdays": [start.weekday()]},
+                    {
+                        "start": "14:00",
+                        "end": "15:00",
+                        "weekdays": [start.weekday()],
+                        "task_type": "sss",
+                    },
+                ],
+            }
+        ),
+    )
+    instance._schedule_maintenance_backup_check.side_effect = lambda: setattr(
+        state.clock, "current", finished
+    )
+    instance._idle_sleep = Mock()
+    instance.handle_idle_action = Mock()
+    instance._stop_after_round = Mock()
+    tasks = [(id(task), task.time) for task in instance.tasks]
+
+    if enter_after_opening:
+        instance.rest_until_next_task(window_observed_at=start)
+    else:
+        instance.rest_until_next_task()
+
+    instance._idle_sleep.assert_not_called()
+    instance.handle_idle_action.assert_not_called()
+    instance._stop_after_round.assert_called_once_with()
+    assert [(id(task), task.time) for task in instance.tasks] == tasks

@@ -127,7 +127,11 @@ from arknights_mower.utils.email import maa_template, send_message, task_templat
 from arknights_mower.utils.graph import SceneGraphSolver
 from arknights_mower.utils.image import cropimg, loadres, thres2
 from arknights_mower.utils.log import log_parent_context, logger
-from arknights_mower.utils.long_task_windows import long_task_window
+from arknights_mower.utils.long_task_windows import (
+    MAA_LONG_TASK_TYPES,
+    long_task_schedule,
+    long_task_window,
+)
 from arknights_mower.utils.maa_callback import (
     REPORT_REQUEST,
     MaaCallbackLog,
@@ -149,6 +153,7 @@ from arknights_mower.utils.mastery_support_types import TrainingObservationError
 from arknights_mower.utils.network_adaptation import get_network_adaptation
 from arknights_mower.utils.operation_timing import (
     estimate_dorm_minutes,
+    estimate_work_minutes,
     record_dorm_recovery,
     record_selection_retry,
     timed_room,
@@ -2613,10 +2618,10 @@ class BaseSchedulerSolver(
         }
         return True
 
-    def _refresh_coordination_support(self, task):
-        refresh_unsubmitted = (
-            getattr(task, "coordination_commit_pending", False)
-            and not getattr(task, "execution_failure", None)
+    def _unsubmitted_coordination(self, task):
+        return (
+            getattr(task, "exhaust_support", False)
+            and getattr(task, "coordination_commit_pending", False)
             and not self._coordination_commit_started(task)
             and not any(
                 getattr(task, flag, False)
@@ -2628,8 +2633,14 @@ class BaseSchedulerSolver(
                 )
             )
         )
+
+    def _refresh_coordination_support(self, task):
+        refresh_unsubmitted = self._unsubmitted_coordination(task) and not getattr(
+            task, "execution_failure", None
+        )
         if (
             not getattr(task, "exhaust_support", False)
+            or self._coordination_commit_started(task)
             or getattr(task, "coordination_commit_pending", False)
             and not refresh_unsubmitted
             or getattr(task, "backup_shift_active", False)
@@ -16273,13 +16284,8 @@ class BaseSchedulerSolver(
             self._check_group_shift_targets(agents, room, reason="选人前恢复原任务目标")
         fallback_selected = []
         padding_selected = []
-        # Free 已尝试满心情和未登记空闲者兜底，明确留空的位置不参与选人。
-        if "" in agents:
-            fast_mode = False
-            agents = [item for item in agents if item != ""]
-        agent = copy.deepcopy(agents)
         task = getattr(self, "task", None)
-        workshop_mood_check = (
+        selection_mood_check = (
             self._check_workshop_selection_mood
             if room == "factory"
             and task is not None
@@ -16289,6 +16295,18 @@ class BaseSchedulerSolver(
             and task.meta_data in agents
             else None
         )
+        if (
+            room.startswith("dorm")
+            and not preserve_dorm_occupants
+            and not recovery_padding
+            and getattr(task, "type", None) != TaskTypes.FIAMMETTA
+        ):
+            selection_mood_check = self._dorm_entry_mood_check(agents, room)
+        # Free 已尝试满心情和未登记空闲者兜底，明确留空的位置不参与选人。
+        if "" in agents:
+            fast_mode = False
+            agents = [item for item in agents if item != ""]
+        agent = copy.deepcopy(agents)
         exists = []
         if fast_mode:
             current_room = self.op_data.get_current_room(room, True)
@@ -16394,7 +16412,7 @@ class BaseSchedulerSolver(
                 changed, ret = self.scan_agent(
                     agent,
                     full_scan=last_special_filter == "ALL",
-                    mood_check=workshop_mood_check,
+                    mood_check=selection_mood_check,
                     mood_estimates=self.op_data.dorm_mood_estimates
                     if is_dorm and preserve_dorm_occupants
                     else None,
@@ -16433,7 +16451,7 @@ class BaseSchedulerSolver(
                             changed, ret = self.scan_agent(
                                 agent,
                                 full_scan=last_special_filter == "ALL",
-                                mood_check=workshop_mood_check,
+                                mood_check=selection_mood_check,
                             )
                             if changed:
                                 selected.extend(changed)
@@ -16497,7 +16515,7 @@ class BaseSchedulerSolver(
                 agent,
                 full_scan=last_special_filter == "ALL",
                 observation=observation,
-                mood_check=workshop_mood_check,
+                mood_check=selection_mood_check,
                 mood_estimates=self.op_data.dorm_mood_estimates
                 if is_dorm and preserve_dorm_occupants
                 else None,
@@ -16568,6 +16586,7 @@ class BaseSchedulerSolver(
                     observation=observation,
                     mood_estimates=estimates,
                     require_full_mood=True,
+                    mood_check=self._allow_dorm_filler_mood,
                 )
                 padding_selected.extend(chosen)
                 selected.extend(chosen)
@@ -16638,6 +16657,14 @@ class BaseSchedulerSolver(
             screening = bool(
                 mood_fallback and estimates is not None and len(retainable) >= free_num
             )
+            rejected = set()
+
+            def allow_free_card(name, mood):
+                if self._allow_dorm_filler_mood(name, mood):
+                    return True
+                rejected.add(name)
+                return False
+
             observation = None
             previous_page = None
             while free_num:
@@ -16648,7 +16675,8 @@ class BaseSchedulerSolver(
                     free_list = [
                         name
                         for name in free_list
-                        if self.op_data.dorm_capacity_allows(
+                        if name not in rejected
+                        and self.op_data.dorm_capacity_allows(
                             name,
                             bed_position,
                             plan=capacity_plan,
@@ -16701,6 +16729,7 @@ class BaseSchedulerSolver(
                     observation=observation,
                     mood_estimates=estimates,
                     skip_full_mood=screening,
+                    mood_check=allow_free_card if is_dorm else None,
                 )
                 observation = None
                 if screening and not selected_name:
@@ -16745,7 +16774,7 @@ class BaseSchedulerSolver(
                     selected_name.remove(selected_name[0])
                 if free_num == 0:
                     break
-                elif changed:
+                elif changed or rejected.intersection(candidates):
                     right_swipe = self.swipe_left(right_swipe, last_special_filter)
                 else:
                     if right_swipe >= max_swipe:
@@ -19283,6 +19312,21 @@ class BaseSchedulerSolver(
             self.tasks.append(self.task)
         return False
 
+    def _run_order_dorm_fits(self, room):
+        task = self.task
+        conf = config.conf
+        if task.adjusted or conf.run_order_buffer_time <= 0:
+            return True
+        start = getattr(task, "run_order_calibrated_time", task.time)
+        confirm_at = start + timedelta(
+            seconds=run_order_entry_seconds(task, conf)
+            - run_order_buffer_seconds(task, conf)
+        )
+        preparation = timedelta(
+            minutes=estimate_dorm_minutes(room) + estimate_work_minutes(task.meta_data)
+        )
+        return datetime.now() + preparation < confirm_at
+
     def _prepare_run_order_dorm_departures(self, plan):
         """跑单先替换宿舍中的换入者，避免连续跑单长期留下空床。"""
         task = self.task
@@ -19293,19 +19337,34 @@ class BaseSchedulerSolver(
         ):
             return True
         targets = set(plan.get(task.meta_data, ())) & set(TRADE_ORDER_AGENTS)
-        pending = getattr(task, "run_order_dorm_slots", {})
+        source_slots = {}
         for name in targets:
             op = self.op_data.operators.get(name)
             if op is not None and op.current_room.startswith("dorm"):
-                positions = pending.setdefault(op.current_room, set())
+                positions = source_slots.setdefault(op.current_room, set())
                 if op.current_index >= 0:
                     positions.add(op.current_index)
+        pending = getattr(task, "run_order_dorm_slots", {})
         saved_plan = getattr(task, "run_order_dorm_plan", {})
-        rooms = set(pending) | set(saved_plan)
+        rooms = source_slots.keys() | pending.keys() | saved_plan.keys()
         if rooms:
-            task.run_order_dorm_slots = pending
             task.__dict__.pop("run_order_staffing_wait", None)
         for room in sorted(rooms):
+            if (
+                room not in pending
+                and room not in saved_plan
+                and not self._run_order_dorm_fits(room)
+            ):
+                logger.info(
+                    "跑单确认前时间不足，跳过%s补位，直接前往%s",
+                    self.translate_room(room),
+                    self.translate_room(task.meta_data),
+                    extra={"log_room": room},
+                )
+                continue
+            slots = pending.setdefault(room, set())
+            slots.update(source_slots.get(room, ()))
+            task.run_order_dorm_slots = pending
             try:
                 self.enter_room(room)
                 self.turn_on_room_detail(room)
@@ -19315,11 +19374,9 @@ class BaseSchedulerSolver(
                     not item.get("observed", True) for item in observed
                 ):
                     raise RecognizeError("跑单前宿舍实际驻员未读完整")
-                slots = pending.setdefault(room, set())
                 slots.update(
                     index for index, name in enumerate(actual) if name in targets
                 )
-                task.run_order_dorm_slots = pending
                 departing = [
                     index
                     for index in slots
@@ -19499,6 +19556,12 @@ class BaseSchedulerSolver(
             elif (
                 not getattr(self.task, "emergency_staffing", False)
                 and any(not room.startswith("dorm") for room in plan)
+                and not (
+                    self.task.type == TaskTypes.SELF_CORRECTION
+                    and getattr(self.task, "exhaust_support", False)
+                    and self._coordination_commit_started(self.task)
+                    and plan == self.task.plan
+                )
                 and self.task.type
                 not in (
                     TaskTypes.WORKSHOP,
@@ -20914,15 +20977,11 @@ class BaseSchedulerSolver(
 
     def has_maa_tasks(self) -> bool:
         conf = config.conf
-        if hasattr(conf, "has_maa_tasks"):
-            return conf.has_maa_tasks
+        kind, _, _ = long_task_schedule(conf, datetime.now())
         return (
             self.has_maa_daily_tasks()
-            or getattr(conf, "RG", False)
-            or getattr(conf, "SSS", False)
-            or getattr(conf, "RCL", False)
-            or getattr(conf, "COPILOT", False)
-            or getattr(conf, "PARADOX", False)
+            or getattr(conf, "maa_growth_enabled", False)
+            or kind in MAA_LONG_TASK_TYPES
         )
 
     def _maa_refresh_deadline(self):
@@ -21202,31 +21261,17 @@ class BaseSchedulerSolver(
                         )
                         self.tasks.insert(0, SchedulerTask(time=datetime.now()))
             conf = config.conf
-            selected_long = (
-                long_task
-                if manual
-                else next(
-                    (
-                        name
-                        for flag, name in (
-                            ("RG", "rogue"),
-                            ("COPILOT", "copilot"),
-                            ("PARADOX", "paradox"),
-                            ("SSS", "sss"),
-                            ("RCL", "rcl"),
-                            ("RA", "ra"),
-                            ("SF", "sf"),
-                        )
-                        if getattr(conf, flag, False)
-                    ),
-                    None,
-                )
-            )
             now = datetime.now()
-            cutoff, _ = long_task_window(conf, now)
+            selected_long = long_task
             if not manual:
+                selected_long, cutoff, _ = long_task_schedule(conf, now)
                 long_limit = min(long_limit, cutoff)
-                if cutoff - now < timedelta(minutes=9):
+                if (
+                    cutoff - now < timedelta(minutes=9)
+                    or selected_long == "garrison"
+                    or outer_idle_loop
+                    and selected_long not in MAA_LONG_TASK_TYPES
+                ):
                     selected_long = None
             running_long_task = True
             if selected_long and (refresh := self._maa_refresh_deadline()) is not None:
@@ -23213,7 +23258,7 @@ class BaseSchedulerSolver(
             try_workshop_tasks(self.op_data, self.tasks)
             scheduling(self.tasks, op_data=self.op_data)
 
-    def rest_until_next_task(self):
+    def rest_until_next_task(self, *, window_observed_at=None):
         """完成本轮任务后，休息到下个可派发任务或大型任务时段开始。
 
         发休息通知、累计任务计数、并真正睡到下个任务。
@@ -23226,6 +23271,11 @@ class BaseSchedulerSolver(
             if first is None or first.time > datetime.now():
                 self._stop_after_round()
             return
+        opening_before_cleanup = None
+        if config.conf.maa_rg_enable:
+            _, opening_before_cleanup = long_task_window(
+                config.conf, window_observed_at or datetime.now()
+            )
         from arknights_mower.solvers.mastery_reader import (
             discard_completed_mastery_tasks,
         )
@@ -23245,10 +23295,14 @@ class BaseSchedulerSolver(
         # 保留任务的原时间不代表当前可执行；休眠预算沿用关键任务避让顺序。
         protect_priority_tasks(self.tasks, op_data=getattr(self, "op_data", None))
         first = self.find_next_task()
-        if first is None:
+        now = datetime.now()
+        if first is None or (
+            config.conf.maa_rg_enable
+            and opening_before_cleanup is not None
+            and opening_before_cleanup <= now
+        ):
             self._stop_after_round()
             return
-        now = datetime.now()
         wake_at = first.time
         if config.conf.maa_rg_enable:
             _, opening = long_task_window(config.conf, now)
