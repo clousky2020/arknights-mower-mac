@@ -51,11 +51,15 @@ def probe_encoding(path, encoding="utf-8"):
     """
     with open(path, "rb") as f:
         raw = f.read()
-    candidates = [encoding, "utf-8-sig", "utf-8", "gbk"] if encoding else [
-        "utf-8-sig",
-        "utf-8",
-        "gbk",
-    ]
+    candidates = (
+        [encoding, "utf-8-sig", "utf-8", "gbk"]
+        if encoding
+        else [
+            "utf-8-sig",
+            "utf-8",
+            "gbk",
+        ]
+    )
     seen = set()
     ordered = []
     for candidate in candidates:
@@ -68,9 +72,7 @@ def probe_encoding(path, encoding="utf-8"):
             return candidate
         except UnicodeDecodeError:
             continue
-    raise UnicodeDecodeError(
-        "csv_utils", raw, 0, len(raw), "无法按任何已知编码解码"
-    )
+    raise UnicodeDecodeError("csv_utils", raw, 0, len(raw), "无法按任何已知编码解码")
 
 
 def read_csv_rows(path, encoding="utf-8", header="infer"):
